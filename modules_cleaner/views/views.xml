@@ -1,0 +1,60 @@
+<odoo>
+  <data>
+    <!-- explicit list view definition -->
+<!--
+    <record model="ir.ui.view" id="../dur_pro/dur-pro/bemade-tools/modules_cleaner.list">
+      <field name="name">../DurPro/Dur-Pro/bemade-tools/modules_cleaner list</field>
+      <field name="model">../dur_pro/dur-pro/bemade-tools/modules_cleaner.../dur_pro/dur-pro/bemade-tools/modules_cleaner</field>
+      <field name="arch" type="xml">
+        <tree>
+          <field name="name"/>
+          <field name="value"/>
+          <field name="value2"/>
+        </tree>
+      </field>
+    </record>
+-->
+
+    <!-- actions opening views on models -->
+<!--
+    <record model="ir.actions.act_window" id="../dur_pro/dur-pro/bemade-tools/modules_cleaner.action_window">
+      <field name="name">../DurPro/Dur-Pro/bemade-tools/modules_cleaner window</field>
+      <field name="res_model">../dur_pro/dur-pro/bemade-tools/modules_cleaner.../dur_pro/dur-pro/bemade-tools/modules_cleaner</field>
+      <field name="view_mode">tree,form</field>
+    </record>
+-->
+
+    <!-- server action to the one above -->
+<!--
+    <record model="ir.actions.server" id="../dur_pro/dur-pro/bemade-tools/modules_cleaner.action_server">
+      <field name="name">../DurPro/Dur-Pro/bemade-tools/modules_cleaner server</field>
+      <field name="model_id" ref="model_../dur_pro/dur-pro/bemade-tools/modules_cleaner_../dur_pro/dur-pro/bemade-tools/modules_cleaner"/>
+      <field name="state">code</field>
+      <field name="code">
+        action = {
+          "type": "ir.actions.act_window",
+          "view_mode": "tree,form",
+          "res_model": model._name,
+        }
+      </field>
+    </record>
+-->
+
+    <!-- Top menu item -->
+<!--
+    <menuitem name="../DurPro/Dur-Pro/bemade-tools/modules_cleaner" id="../dur_pro/dur-pro/bemade-tools/modules_cleaner.menu_root"/>
+-->
+    <!-- menu categories -->
+<!--
+    <menuitem name="Menu 1" id="../dur_pro/dur-pro/bemade-tools/modules_cleaner.menu_1" parent="../dur_pro/dur-pro/bemade-tools/modules_cleaner.menu_root"/>
+    <menuitem name="Menu 2" id="../dur_pro/dur-pro/bemade-tools/modules_cleaner.menu_2" parent="../dur_pro/dur-pro/bemade-tools/modules_cleaner.menu_root"/>
+-->
+    <!-- actions -->
+<!--
+    <menuitem name="List" id="../dur_pro/dur-pro/bemade-tools/modules_cleaner.menu_1_list" parent="../dur_pro/dur-pro/bemade-tools/modules_cleaner.menu_1"
+              action="../dur_pro/dur-pro/bemade-tools/modules_cleaner.action_window"/>
+    <menuitem name="Server to list" id="../dur_pro/dur-pro/bemade-tools/modules_cleaner" parent="../dur_pro/dur-pro/bemade-tools/modules_cleaner.menu_2"
+              action="../dur_pro/dur-pro/bemade-tools/modules_cleaner.action_server"/>
+-->
+  </data>
+</odoo>
