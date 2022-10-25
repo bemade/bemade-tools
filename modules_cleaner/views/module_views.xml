@@ -1,0 +1,13 @@
+<odoo>
+    <record model="ir.ui.view" id="module_cleanup">
+        <field name="name">ir.module.module.tree.cleanup</field>
+        <field name="model">ir.module.module</field>
+        <field name="inherited_id" ref="base.module_tree"/>
+        <field name="type">tree</field>
+        <field name="arch" type="xml">
+            <field name="shortdesc" position="after">
+                <field name="path_exist" />
+            </field>
+        </field>>
+    </record>
+</odoo>

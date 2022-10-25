@@ -11,8 +11,8 @@ class IrModule(models.Model):
         for module in self:
             print(get_module_path(module.name, display_warning=False))
             module.path_exist = get_module_path(module.name, display_warning=False) or False
-            # if get_module_path(module.name, display_warning=False) or False:
-            #     module.unlink()
+            if get_module_path(module.name, display_warning=False) or False:
+                module.unlink()
 
     path_exist = fields.Boolean('Path exist', compute='_check_path_exist')
 
