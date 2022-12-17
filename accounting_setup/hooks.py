@@ -82,14 +82,6 @@ ACCOUNT_TYPE_MAPPINGS = [
     ("18", "Non-current Assets"),
     ("1801", "Fixed Assets"),
     ("1802", "Fixed Assets"),
-    ("212", "Payable"),
-    ("212204", "Current Liability"),
-    ("212205", "Current Liability"),
-    ("216", "Non-current Liabilities"),
-    ("217", "Non-current Liabilities"),
-    ("250", "Non-current Liabilities"),
-    ("253", "Non-current Liabilities"),
-    ("254", "Non-current Liabilities"),
     ("411009", "Other Income"),
     ("42", "Other Income"),
     ("5", "Cost of Goods Sold"),
@@ -164,28 +156,29 @@ def set_tax_groups(cr):
         else:
             tax.tax_group_id = new_groups_dict['Taxes']
     # Delete the old groups
-    existing_groups.unlink()
+    #existing_groups.unlink()
 
 
 def update_accounts(cr):
     env = api.Environment(cr, SUPERUSER_ID, dict())
-    # delete the old "view" accounts and the corresponding account type
-    env['account.account'].search([('user_type_id.name', '=', 'View')]).unlink()
-    env['account.account.type'].search([('name', '=', 'View')]).unlink()
+    # deprecate the old "view" accounts and the corresponding account type
+    rs_view_accounts = env['account.account'].search([('user_type_id.name', '=', 'View')])
+    for view_account in rs_view_accounts:
+        view_account.deprecated = True
 
     # Clean up the old types and their organization
-    env['account.account.type'].search([('name', '=', 'Asset')]).name = 'Current Asset'
+    current_asset = env['account.account.type'].search([('name', '=', 'Asset')])
+    current_asset.name = 'Current Asset'
     env['account.account.type'].search([('name', '=', 'Liability')]).name = 'Current Liability'
     env['account.account.type'].search([('name', '=', 'Cost of Revenue')]).name = 'Cost of Goods Sold'
     env['account.account.type'].search([('name', '=', 'Capital')]).internal_group = 'equity'
     prepayment = env['account.account.type'].search([('name', '=', 'Prepayments')])
     prepayment.name = 'Prepaid Expenses'
 
-    # set the outstanding accounts as a bank & cash type
-    bank_type = env['account.account.type'].search([('name', '=', 'Bank')])
+    # set the outstanding accounts as a current asset
     outstanding_accounts = env['account.account'].search([('code', '=like', '00%')])
     for a in outstanding_accounts:
-        a.user_type_id = bank_type
+        a.user_type_id = current_asset
 
     # map the accounts to their appropriate types
     account_types_rs = env['account.account.type'].search([])
@@ -196,11 +189,6 @@ def update_accounts(cr):
             account.user_type_id = account_types[account_type]
             if account.user_type_id.type in ('payable', 'receivable'):
                 account.reconcile = True
-
-    # clean up unused account types
-    used_types = env['account.account'].search([]).mapped('user_type_id')
-    unused_types = env['account.account.type'].search([]).filtered(lambda r: r not in used_types)
-    unused_types.unlink()
 
 
 def remove_self(cr):
