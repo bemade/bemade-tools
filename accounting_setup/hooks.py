@@ -156,7 +156,7 @@ def set_tax_groups(cr):
         else:
             tax.tax_group_id = new_groups_dict['Taxes']
     # Delete the old groups
-    #existing_groups.unlink()
+    existing_groups.unlink()
 
 
 def update_accounts(cr):
@@ -189,6 +189,11 @@ def update_accounts(cr):
             account.user_type_id = account_types[account_type]
             if account.user_type_id.type in ('payable', 'receivable'):
                 account.reconcile = True
+
+    # clean up unused account types
+    used_types = env['account.account'].search([]).mapped('user_type_id')
+    unused_types = env['account.account.type'].search([]).filtered(lambda r: r not in used_types)
+    unused_types.unlink()
 
 
 def remove_self(cr):
