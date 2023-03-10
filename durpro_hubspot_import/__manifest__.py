@@ -7,6 +7,7 @@
     "depends": [
         "helpdesk",
     ],
+    "external_dependencies": ["hubspot-api-client", ],
     "external_dependencies": {
         "python": ["hubspot"],
     },
