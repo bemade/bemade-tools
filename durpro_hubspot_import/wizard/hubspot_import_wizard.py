@@ -2,6 +2,7 @@ from odoo import models, fields, api, _
 import time
 
 
+
 class HubSpotImportWizard(models.TransientModel):
     _name = "durpro_hubspot_import.hubspot_import_wizard"
     _description = 'Allows for the importation of HubSpot data into Odoo Helpdesk Tickets (and associations)'
@@ -43,18 +44,29 @@ class HubSpotImportWizard(models.TransientModel):
         page_size = 1000
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count([])
         for offset in range(0, no_tickets, page_size):
-            tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search([], offset=offset, limit=page_size)
+            # Only work on tickets that have a configured pipeline and stage to which to transfer
+            tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search([], offset=offset,
+                                                                              limit=page_size).filtered(lambda r: (
+                (r.pipeline and r.pipeline.helpdesk_team_id and r.pipeline_stage and r.pipeline_stage.helpdesk_stage)))
             for ticket in tickets:
                 # Create a ticket in the right pipeline
+                try:
+                    create_date = time.strptime(ticket.create_date, "%Y-%m-%dT%H:%M:%S[.%f]Z")
+                except:
+                    try:
+                        create_date = time.strptime(ticket.create_date, "%Y-%m-%dT%H:%M:%SZ")
+                    except:
+                        create_date = False
                 hd_ticket = self.env['helpdesk.ticket'].create({
-                    'name': ticket.subject,
+                    'name': ticket.subject or ticket.content or "No Subject",
                     'description': ticket.content,
-                    'create_date': time.strptime(ticket.createdate, "%Y-%m-%dT%H:%M:%S.%fZ"),
+                    'create_date': create_date,
                     'team_id': ticket.pipeline.helpdesk_team_id.id,
+                    'stage_id': ticket.pipeline_stage.helpdesk_stage.id,
                     'user_id': ticket.user_id.id if ticket.user_id else False,
                     'partner_id': ticket.associated_contacts[
                         0].odoo_contact.id if ticket.associated_contacts else False,
-
+                    'hubspot_ticket_id': ticket.id,
                 })
 
                 # For each associated mail message
@@ -64,17 +76,7 @@ class HubSpotImportWizard(models.TransientModel):
                 #   parent_id (Many2one -> mail.message), child_ids, model (char, related doc model), res_id,
                 #   email_from, author_id (Many2one -> res.partner), partner_ids (Many2many, recipients),
                 #   state -> selection("sent", "received")
-                for hs_email in ticket.associated_emails:
-                    self.env['mail.mail'].create({
-
-                    })
-
-    # def action_get_ticket_associations(self):
-    #     tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search()
-    #     associations = {}
-    #     for ticket in tickets:
-    #         # Get contact associations (15)
-    #         contact_associations = self._api_client().crm.tickets.associations_api.get_all(
-    #             ticket_id=ticket.hs_ticket_id,
-    #             to_object_type=15).to_dict()
-    #         hs_contact_ids = contact_associations.results
+                # for hs_email in ticket.associated_emails:
+                #     self.env['mail.mail'].create({
+                #
+                #     })

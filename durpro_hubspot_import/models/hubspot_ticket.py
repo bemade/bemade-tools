@@ -69,6 +69,7 @@ class HubSpotTicket(models.Model):
     def import_associated_notes(self):
         self.import_associations('ticket', 'note', 'associated_notes')
 
+    @api.depends("hs_pipeline", "hs_pipeline_stage")
     def _compute_pipeline(self):
         for rec in self:
             if rec.hs_pipeline:
@@ -97,3 +98,11 @@ class HubSpotTicket(models.Model):
             if rec.associated_owner and rec.associated_owner.email:
                 rec.user_id = users_dict[
                     rec.associated_owner.email] if rec.associated_owner.email in users_dict else False
+
+
+class HelpdeskTicket(models.Model):
+    _inherit = "helpdesk.ticket"
+
+    hubspot_ticket_id = fields.Many2one("durpro_hubspot_import.hubspot_ticket", string="Original Hubspot Ticket",
+                                        help="The HubSpot ticket that this ticket was created from.",
+                                        ondelete="cascade")
