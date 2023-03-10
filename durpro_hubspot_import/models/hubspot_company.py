@@ -32,6 +32,6 @@ class HubSpotCompany(models.Model):
     def _match_company(self):
         """Matches the HubSpot companies in this RecordSet by name only."""
         for rec in self:
-            partners = self.env['res.partner'].search([('is_company', '=', True), ('name', '=ilike', rec.name)])
-            if partners:
-                rec.odoo_partner = partners[0]
+            partner = self.env['res.partner'].search([('is_company', '=', True), ('name', '=ilike', rec.name)],
+                                                     limit=1)
+            rec.odoo_partner = partner or False

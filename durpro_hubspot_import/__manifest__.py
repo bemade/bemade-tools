@@ -7,10 +7,7 @@
     "depends": [
         "helpdesk",
     ],
-    "external_dependencies": ["hubspot-api-client", ],
-    "external_dependencies": {
-        "python": ["hubspot"],
-    },
+    "external_dependencies": {"python": ["hubspot-api-client", ]},
     "description": """
     This module allows for importing records from HubSpot into Odoo.
     """,

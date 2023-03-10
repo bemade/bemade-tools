@@ -29,28 +29,19 @@ class HubSpotContact(models.Model):
 
     odoo_contact = fields.Many2one('res.partner', string='Matching Odoo Contact', compute='_match_contact', store=True)
 
+    @api.depends("firstname", "lastname", "email")
     def _match_contact(self):
         """
         Matches the HubSpot Contacts represented by this RecordSet to res.partner objects. First match is carried out by
         email. If emails bring up more than one match, they are filtered for first + last name match. If email matching
         fails, then a case insensitive name match is tried as a last resort.
         """
-        found_contacts = set()
-        for rec in self:
-            if not (rec.email or (rec.firstname and rec.lastname and rec.phone)):
-                continue
-            elif rec.email:
-                found_contacts |= self.env['res.partner'].search([('email', '=ilike', rec.email)])
-                if len(found_contacts) == 1:
-                    rec.odoo_contact = found_contacts[0]
-                    continue
-            if found_contacts:
-                found_contacts_filtered = filter(lambda r: r.name == f"{rec.firstname} {rec.lastname}", found_contacts)
-                if not found_contacts_filtered:
-                    rec.odoo_contact = found_contacts[0]
-                    continue
-            else:
-                found_contacts |= self.env['res.partner'].search(['name'], '=ilike', f"{rec.firstname} {rec.lastname}")
-                if found_contacts:
-                    rec.odoo_contact = found_contacts[0]
 
+        for rec in self:
+            full_name = (rec.firstname if rec.firstname else "") + " " + (rec.lastname if rec.lastname else "")
+            c = self.env['res.partner'].search([('email', '=ilike', rec.email), ('name', '=ilike', full_name)], limit=1)
+            if not c:
+                c = self.env['res.partner'].search([('email', '=ilike', rec.email)], limit=1)
+            if not c:
+                c = self.env['res.partner'].search([('name', '=ilike', full_name)], limit=1)
+            rec.odoo_contact = c or False
