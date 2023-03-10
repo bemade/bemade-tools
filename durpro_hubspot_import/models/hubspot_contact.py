@@ -36,12 +36,17 @@ class HubSpotContact(models.Model):
         email. If emails bring up more than one match, they are filtered for first + last name match. If email matching
         fails, then a case insensitive name match is tried as a last resort.
         """
+        names = [n[0] if n[0] else "" + " " + n[1] if n[1] else "" for n in
+                 zip(self.mapped("firstname"), self.mapped("lastname"))]
+        email_dict = {p.email: p for p in self.env['res.partner'].search([('email', 'in', self.mapped("email"))])}
+        name_dict = {p.name: p for p in self.env['res.partner'].search([('name', 'in', names)])}
 
         for rec in self:
+            partner = False
             full_name = (rec.firstname if rec.firstname else "") + " " + (rec.lastname if rec.lastname else "")
-            c = self.env['res.partner'].search([('email', '=ilike', rec.email), ('name', '=ilike', full_name)], limit=1)
-            if not c:
-                c = self.env['res.partner'].search([('email', '=ilike', rec.email)], limit=1)
-            if not c:
-                c = self.env['res.partner'].search([('name', '=ilike', full_name)], limit=1)
-            rec.odoo_contact = c or False
+            if rec.email in email_dict:
+                partner = email_dict[rec.email]
+            if not partner:
+                if full_name in name_dict:
+                    partner = name_dict[full_name]
+            rec.odoo_contact = partner

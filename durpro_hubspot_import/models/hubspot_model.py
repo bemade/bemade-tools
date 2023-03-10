@@ -88,7 +88,6 @@ class HubSpotModel(models.AbstractModel):
             rs_to = self.env[f'durpro_hubspot_import.hubspot_{model_to_suffix}']
             recs = self._api_client().crm.associations.batch_api.read(self.hubspot_model_name, rs_to.hubspot_model_name,
                                                                       batch_input_public_object_id=ids).results
-            print(f"{recs}")
             for rec in recs:
                 rec = rec.to_dict()
                 from_rec = rs_from_dict[rec['_from']['id']]

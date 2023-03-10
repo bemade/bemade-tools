@@ -29,9 +29,10 @@ class HubSpotCompany(models.Model):
     odoo_partner = fields.Many2one("res.partner", string="Matching Odoo Partner (company)",
                                    compute='_match_company', store=True)
 
+    @api.depends('name')
     def _match_company(self):
-        """Matches the HubSpot companies in this RecordSet by name only."""
+        """Matches the HubSpot companies in this RecordSet to Odoo res.partners with is_company = True, by name only."""
+        partners = self.env['res.partner'].search([('name', 'in', self.mapped("name"))])
+        partners_dict = {r.name: r for r in partners}
         for rec in self:
-            partner = self.env['res.partner'].search([('is_company', '=', True), ('name', '=ilike', rec.name)],
-                                                     limit=1)
-            rec.odoo_partner = partner or False
+            rec.odoo_partner = partners_dict[rec.name] if rec.name in partners_dict else False
