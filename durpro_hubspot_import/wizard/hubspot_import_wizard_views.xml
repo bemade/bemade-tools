@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <record id="hubspot_import_wizard_view_form" model="ir.ui.view">
+        <field name="name">hubspot.import.wizard.view.form</field>
+        <field name="model">durpro_hubspot_import.hubspot_import_wizard</field>
+        <field name="arch" type="xml">
+            <form>
+                <sheet>
+                    <group col="12">
+                        <button string="Import Tickets" class="btn btn-primary" name="action_get_hubspot_tickets"
+                                type="object"/>
+
+                        <button string="Import Contacts" class="btn btn-primary" name="action_get_hubspot_contacts"
+                                type="object"/>
+
+                        <button string="Import Companies" class="btn btn-primary" name="action_get_hubspot_companies"
+                                type="object"/>
+                        <button string="Import Pipelines" class="btn btn-primary" name="action_get_hubspot_pipelines"
+                                type="object"/>
+                        <button string="Import Emails" class="btn btn-primary" name="action_get_hubspot_emails"
+                                type="object"/>
+                        <button string="Import Notes" class="btn btn-primary" name="action_get_hubspot_notes"
+                                type="object"/>
+                        <button string="Import Owners" class="btn btn-primary" name="action_get_hubspot_owners"
+                                type="object"/>
+                    </group>
+                    <group col="12">
+                        <button string="Associate Tickets to Contacts" class="btn btn-primary"
+                                name="action_associate_tickets_with_contacts" type="object"/>
+                        <button string="Associate Tickets to Companies" class="btn btn-primary"
+                                name="action_associate_tickets_with_companies" type="object"/>
+                        <button string="Associate Tickets to Emails" class="btn btn-primary"
+                                name="action_associate_tickets_with_emails" type="object"/>
+                        <button string="Associate Tickets to Notes" class="btn btn-primary"
+                                name="action_associate_tickets_with_notes" type="object"/>
+                    </group>
+                    <group col="12">
+                        <button string="Create Odoo Tickets from Imported Data" class="btn btn-primary"
+                                name="action_create_odoo_tickets" type="object" />
+                    </group>
+                </sheet>
+                <footer>
+                    <button string="Cancel" class="btn btn-secondary" special="cancel" data-hotkey="x"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

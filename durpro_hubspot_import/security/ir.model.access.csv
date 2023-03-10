@@ -1,0 +1,10 @@
+"id","name","model_id:id","group_id:id","perm_read","perm_write","perm_create","perm_unlink"
+"access_hubspot_import_hubspot_ticket","access.hubspot.import.hubspot.ticket","model_durpro_hubspot_import_hubspot_ticket","base.group_system",1,1,1,1
+"access_hubspot_import_hubspot_contact","access.hubspot.import.hubspot.contact","model_durpro_hubspot_import_hubspot_contact","base.group_system",1,1,1,1
+"access_hubspot_import_hubspot_company","access.hubspot.import.hubspot.company","model_durpro_hubspot_import_hubspot_company","base.group_system",1,1,1,1
+"access_hubspot_import_hubspot_pipeline","access.hubspot.import.hubspot.pipeline","model_durpro_hubspot_import_hubspot_pipeline","base.group_system",1,1,1,1
+"access_hubspot_import_hubspot_pipeline_stage","access.hubspot.import.hubspot.pipeline_stage","model_durpro_hubspot_import_hubspot_pipeline_stage","base.group_system",1,1,1,1
+"access_hubspot_import_wizard","access.hubspot.import.wizard","model_durpro_hubspot_import_hubspot_import_wizard","base.group_system",1,1,1,1
+"access_hubspot_import_hubspot_email","access.hubspot.import.hubspot.email","model_durpro_hubspot_import_hubspot_email","base.group_system",1,1,1,1
+"access_hubspot_import_hubspot_note","access.hubspot.import.hubspot.note","model_durpro_hubspot_import_hubspot_note","base.group_system",1,1,1,1
+"access_hubspot_import_hubspot_owner","access.hubspot.import.hubspot.owner","model_durpro_hubspot_import_hubspot_owner","base.group_system",1,1,1,1

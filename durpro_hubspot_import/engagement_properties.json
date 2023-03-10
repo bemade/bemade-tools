@@ -1,0 +1,5672 @@
+{
+  "results": [
+    {
+      "updatedAt": "2022-05-28T00:52:32.122Z",
+      "createdAt": "2019-08-06T02:43:30.927Z",
+      "name": "hs_activity_type",
+      "label": "Call and meeting type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The activity type of the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_all_assigned_business_unit_ids",
+      "label": "Business units",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The business units this record is assigned to.",
+      "groupName": "engagementinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-18T17:42:56.342Z",
+      "createdAt": "2019-08-06T02:43:31.063Z",
+      "name": "hs_at_mentioned_owner_ids",
+      "label": "At-Mentioned Owner Ids",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The owners that have been at-mentioned on the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "referencedObjectType": "OWNER",
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T01:02:33.316Z",
+      "createdAt": "2019-08-06T02:43:31.253Z",
+      "name": "hs_attachment_ids",
+      "label": "Attached file IDs",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The IDs of the files that are attached to the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-07-14T19:14:20.445Z",
+      "createdAt": "2021-12-16T17:02:23.779Z",
+      "name": "hs_attendee_owner_ids",
+      "label": "HubSpot attendee owner IDs",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "List of HubSpot owner IDs for additional attendees",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:42:27.604Z",
+      "createdAt": "2019-08-06T02:43:31.343Z",
+      "name": "hs_body_preview",
+      "label": "Body preview",
+      "type": "string",
+      "fieldType": "text",
+      "description": "A truncated preview of the engagegement body",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:21:43.733Z",
+      "createdAt": "2019-08-06T02:43:31.469Z",
+      "name": "hs_body_preview_html",
+      "label": "HTML Body Preview",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The HTML representation of the engagement body preview",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:23:52.869Z",
+      "createdAt": "2019-08-06T02:43:31.430Z",
+      "name": "hs_body_preview_is_truncated",
+      "label": "Body Preview Truncated",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Indicates if the engagement body was truncated for the preview",
+      "groupName": "engagement",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:43:16.672Z",
+      "createdAt": "2021-05-10T20:29:58.875Z",
+      "name": "hs_calendar_event_id",
+      "label": "Calendar Event ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The event ID for the synced task.",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": true,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:31:40.309Z",
+      "createdAt": "2021-02-11T18:41:15.066Z",
+      "name": "hs_call_app_id",
+      "label": "Integrating App ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The App ID associated with the integrating app",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:31:55.625Z",
+      "createdAt": "2020-11-18T23:03:07.403Z",
+      "name": "hs_call_authed_url_provider",
+      "label": "Authenticated recording files url provider",
+      "type": "string",
+      "fieldType": "text",
+      "description": "URL which returns Authenticated audio/video URL of the recording",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:32:10.966Z",
+      "createdAt": "2019-12-12T14:41:18.754Z",
+      "name": "hs_call_body",
+      "label": "Call notes",
+      "type": "string",
+      "fieldType": "html",
+      "description": "The body of the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:32:26.276Z",
+      "createdAt": "2019-12-12T14:41:17.997Z",
+      "name": "hs_call_callee_object_id",
+      "label": "Callee object id",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The id of the callee",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:32:41.621Z",
+      "createdAt": "2019-12-12T14:41:18.780Z",
+      "name": "hs_call_callee_object_type",
+      "label": "Callee object type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The type of callee",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "Company",
+          "value": "COMPANY",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Contact",
+          "value": "CONTACT",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-12-16T01:16:30.168Z",
+      "createdAt": "2021-12-09T18:59:00.209Z",
+      "name": "hs_call_direction",
+      "label": "Call direction",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The direction of a call",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "Inbound",
+          "value": "INBOUND",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Outbound",
+          "value": "OUTBOUND",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:33:12.368Z",
+      "createdAt": "2019-12-12T14:41:18.219Z",
+      "name": "hs_call_disposition",
+      "label": "Call outcome",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The outcome of the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:33:27.668Z",
+      "createdAt": "2019-12-12T14:41:18.272Z",
+      "name": "hs_call_duration",
+      "label": "Call duration",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The duration of the call, in milliseconds",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:33:42.976Z",
+      "createdAt": "2019-12-12T14:41:18.194Z",
+      "name": "hs_call_external_account_id",
+      "label": "External Account ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "External Account ID",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:33:58.265Z",
+      "createdAt": "2019-12-12T14:41:18.020Z",
+      "name": "hs_call_external_id",
+      "label": "External ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The external ID of the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:34:13.644Z",
+      "createdAt": "2019-12-12T14:41:18.675Z",
+      "name": "hs_call_from_number",
+      "label": "From Number",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The phone number of the person that initiated the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-11T14:26:36.681Z",
+      "createdAt": "2023-01-11T14:26:36.681Z",
+      "name": "hs_call_from_number_nickname",
+      "label": "From Number Name",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The name of the phone number that initiated the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:34:28.944Z",
+      "createdAt": "2020-11-09T21:58:06.906Z",
+      "name": "hs_call_has_transcript",
+      "label": "Transcript Available",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Flag to indicate if the call has an associated transcript",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "description": "",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "description": "",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-30T15:28:17.613Z",
+      "createdAt": "2022-08-12T15:31:54.633Z",
+      "name": "hs_call_has_voicemail",
+      "label": "Voicemail Available",
+      "type": "enumeration",
+      "fieldType": "booleancheckbox",
+      "description": "Flag to indicate if the call has an associated voicemail",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "Yes",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "No",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:34:44.425Z",
+      "createdAt": "2019-12-12T14:41:18.066Z",
+      "name": "hs_call_recording_url",
+      "label": "Recording URL",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The URL of the recorded call audio",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:34:59.732Z",
+      "createdAt": "2020-11-04T15:23:57.114Z",
+      "name": "hs_call_source",
+      "label": "Call Source",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The source of the call to differentiate VoIP vs Video Conferencing Apps",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "VoIP",
+          "value": "VOIP",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Zoom",
+          "value": "ZOOM",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "Integrations Platform",
+          "value": "INTEGRATIONS_PLATFORM",
+          "displayOrder": 3,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-09-29T15:20:49.674Z",
+      "createdAt": "2019-12-12T14:41:18.565Z",
+      "name": "hs_call_status",
+      "label": "Call status",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The status of the call",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "Busy",
+          "value": "BUSY",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Calling CRM User",
+          "value": "CALLING_CRM_USER",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Canceled",
+          "value": "CANCELED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Completed",
+          "value": "COMPLETED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Connecting",
+          "value": "CONNECTING",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Failed",
+          "value": "FAILED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "In Progress",
+          "value": "IN_PROGRESS",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Missed",
+          "value": "MISSED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "No Answer",
+          "value": "NO_ANSWER",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Queued",
+          "value": "QUEUED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Ringing",
+          "value": "RINGING",
+          "displayOrder": -1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:35:30.457Z",
+      "createdAt": "2020-09-16T18:36:03.811Z",
+      "name": "hs_call_title",
+      "label": "Call Title",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The title of the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:35:45.786Z",
+      "createdAt": "2019-12-12T14:41:18.170Z",
+      "name": "hs_call_to_number",
+      "label": "To Number",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The phone number of the person that was called",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-11T14:25:20.037Z",
+      "createdAt": "2023-01-11T14:25:20.037Z",
+      "name": "hs_call_to_number_nickname",
+      "label": "To Number Name",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The name of the phone number that was called",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:36:01.110Z",
+      "createdAt": "2022-03-02T18:49:28.547Z",
+      "name": "hs_call_transcript_tracked_terms",
+      "label": "Tracked terms",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "A list of any tracked terms contained in the call transcript",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:36:16.422Z",
+      "createdAt": "2019-12-12T14:41:18.295Z",
+      "name": "hs_call_transcription_id",
+      "label": "Call transcription id",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The id of the transcription",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:36:31.739Z",
+      "createdAt": "2020-11-18T23:03:28.927Z",
+      "name": "hs_call_video_recording_url",
+      "label": "Video url",
+      "type": "string",
+      "fieldType": "text",
+      "description": "Video URL of the recording",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:36:47.080Z",
+      "createdAt": "2021-06-07T09:17:16.641Z",
+      "name": "hs_call_zoom_meeting_uuid",
+      "label": "Unique Zoom Meeting ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The Zoom meeting unique identifier of the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:37:02.375Z",
+      "createdAt": "2021-01-19T18:41:00.173Z",
+      "name": "hs_calls_service_call_id",
+      "label": "Calls Service Call ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The Calls Service specific global unique identifier for a call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": true,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T02:50:12.789Z",
+      "createdAt": "2022-04-12T21:03:21.259Z",
+      "name": "hs_communication_body",
+      "label": "Communication body",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The body of the communication",
+      "groupName": "communicationinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-15T19:56:14.411Z",
+      "createdAt": "2022-04-08T21:01:20.712Z",
+      "name": "hs_communication_channel_type",
+      "label": "Channel Type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "",
+      "groupName": "communicationinformation",
+      "options": [
+        {
+          "label": "SMS",
+          "value": "SMS",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "WhatsApp",
+          "value": "WHATS_APP",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "LinkedIn Message",
+          "value": "LINKEDIN_MESSAGE",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "Physical Mail",
+          "value": "PHYSICAL_MAIL",
+          "displayOrder": 3,
+          "hidden": true
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-06-03T21:31:29.386Z",
+      "createdAt": "2022-06-03T21:31:29.386Z",
+      "name": "hs_communication_conversation_associations_synced_at",
+      "label": "Conversation associations sync timestamp",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "Timestamp of the most recent time that associations were synced to this communication from the corresponding conversation object",
+      "groupName": "communicationinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-06-03T21:24:56.973Z",
+      "createdAt": "2022-06-03T21:08:15.876Z",
+      "name": "hs_communication_conversation_object_id",
+      "label": "Conversation object ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The ID of the conversation object for the thread that this communication belongs to",
+      "groupName": "communicationinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-09-23T20:46:13.346Z",
+      "createdAt": "2022-05-06T15:48:33.269Z",
+      "name": "hs_communication_conversations_channel_ids",
+      "label": "Conversations channel IDs",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The IDs of the Conversations channels used in this communication",
+      "groupName": "communicationinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-09-23T20:46:28.009Z",
+      "createdAt": "2022-05-06T15:49:41.340Z",
+      "name": "hs_communication_conversations_channel_instance_ids",
+      "label": "Conversations channel account IDs",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The IDs of the Conversations channel accounts used in this communication",
+      "groupName": "communicationinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-06-03T21:24:12.404Z",
+      "createdAt": "2022-05-06T15:44:51.701Z",
+      "name": "hs_communication_conversations_first_message_at",
+      "label": "Conversations first message timestamp",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "Timestamp of the first Conversations message in the communication",
+      "groupName": "communicationinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-09-23T20:30:24.268Z",
+      "createdAt": "2022-05-06T15:41:49.703Z",
+      "name": "hs_communication_conversations_thread_id",
+      "label": "Conversations thread ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The ID of the Conversations thread that this communication belongs to",
+      "groupName": "communicationinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T02:51:44.810Z",
+      "createdAt": "2022-04-12T20:25:36.048Z",
+      "name": "hs_communication_logged_from",
+      "label": "Logged From",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Where the communication was logged",
+      "groupName": "communicationinformation",
+      "options": [
+        {
+          "label": "CRM",
+          "value": "CRM",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Conversations",
+          "value": "CONVERSATIONS",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:11.539Z",
+      "createdAt": "2019-12-12T14:41:21.637Z",
+      "name": "hs_conversation_session_agent_join_time",
+      "label": "Date agent joined conversation",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.205Z",
+      "name": "hs_conversation_session_agent_response_time",
+      "label": "Conversation session agent response time",
+      "type": "number",
+      "fieldType": "number",
+      "description": "How long from when a conversation is assigned to an agent to when they send a message, in milliseconds",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.549Z",
+      "name": "hs_conversation_session_duration",
+      "label": "Conversation duration",
+      "type": "number",
+      "fieldType": "number",
+      "description": "How long the session lasted, in milliseconds",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.347Z",
+      "name": "hs_conversation_session_is_bot",
+      "label": "Conversation by bot",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Whether or not the session was handled by a bot",
+      "groupName": "conversation_session",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.801Z",
+      "name": "hs_conversation_session_num_agent_messages",
+      "label": "Number of agent messages",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The number of messages sent by the agent",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.966Z",
+      "name": "hs_conversation_session_num_visitor_messages",
+      "label": "Number of visitor messages",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The number of messages sent by the visitor",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.397Z",
+      "name": "hs_conversation_session_online",
+      "label": "Online",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Whether or not the session was online",
+      "groupName": "conversation_session",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.616Z",
+      "name": "hs_conversation_session_session_closed_at",
+      "label": "Conversation session closed at",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date when the session was marked as closed by the system",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.423Z",
+      "name": "hs_conversation_session_source",
+      "label": "Conversation source type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Where the conversation took place",
+      "groupName": "conversation_session",
+      "options": [
+        {
+          "label": "Facebook Messenger",
+          "value": "FB_MESSENGER",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Live Chat",
+          "value": "LIVE_CHAT",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.255Z",
+      "name": "hs_conversation_session_thread_id",
+      "label": "Conversation thread id",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The id of the thread that the conversation corresponds to",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.229Z",
+      "name": "hs_conversation_session_url",
+      "label": "Conversation website URL",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The URL of the conversation session",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.324Z",
+      "name": "hs_conversation_session_visitor_end_time",
+      "label": "Date visitor ended conversation",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date when the visitor ended the session",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.472Z",
+      "name": "hs_conversation_session_visitor_start_time",
+      "label": "Date visitor started conversation",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date when the visitor started the session",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-18T12:56:53.211Z",
+      "createdAt": "2019-12-12T14:41:21.525Z",
+      "name": "hs_conversation_session_visitor_wait_time",
+      "label": "Time visitor waited for conversation",
+      "type": "number",
+      "fieldType": "number",
+      "description": "How long the visitor waited before the session started, in milliseconds",
+      "groupName": "conversation_session",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:38:14.638Z",
+      "createdAt": "2019-08-06T02:43:31.097Z",
+      "name": "hs_created_by",
+      "label": "Activity created by",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The user who created the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_created_by_user_id",
+      "label": "Created by user ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The user that created this object. This value is automatically set by HubSpot and may not be modified.",
+      "groupName": "engagementinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:31:07.630Z",
+      "createdAt": "2019-08-06T02:43:30.307Z",
+      "name": "hs_createdate",
+      "label": "Create date",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date that an engagement was created",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:44:10.646Z",
+      "createdAt": "2020-01-06T21:49:43.999Z",
+      "name": "hs_direction_and_unique_id",
+      "label": "Email direction and unique ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The direction and unique ID of the email",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": true,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false,
+      "calculationFormula": "concatenate(string(hs_email_direction), ':', string(hs_unique_id))"
+    },
+    {
+      "updatedAt": "2022-05-28T05:44:26.012Z",
+      "createdAt": "2019-12-12T14:41:19.372Z",
+      "name": "hs_email_attached_video_id",
+      "label": "Attached Video",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The ID of a video optionally attached to an email",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:44:41.346Z",
+      "createdAt": "2019-12-12T14:41:20.077Z",
+      "name": "hs_email_attached_video_name",
+      "label": "Attached Video Name",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The name of a video optionally attached to an email",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:44:56.703Z",
+      "createdAt": "2019-12-12T14:41:19.020Z",
+      "name": "hs_email_attached_video_opened",
+      "label": "Attached Video Opened",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Has the video attachment been opened",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:45:12.034Z",
+      "createdAt": "2019-12-12T14:41:19.167Z",
+      "name": "hs_email_attached_video_watched",
+      "label": "Attached Video Watched",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Has the video attachement been watched",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:45:27.398Z",
+      "createdAt": "2020-08-19T16:56:35.269Z",
+      "name": "hs_email_bcc_email",
+      "label": "Email BCC Address",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Email addresses of the email's BCC recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:45:42.724Z",
+      "createdAt": "2020-08-19T16:55:33.120Z",
+      "name": "hs_email_bcc_firstname",
+      "label": "Email BCC First Name",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "First names of the email's BCC recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:45:58.060Z",
+      "createdAt": "2020-08-19T16:56:25.115Z",
+      "name": "hs_email_bcc_lastname",
+      "label": "Email BCC Last Name",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Last names of the email's BCC recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:46:13.392Z",
+      "createdAt": "2020-08-19T16:56:47.335Z",
+      "name": "hs_email_bcc_raw",
+      "label": "Email BCC",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Raw header values of the email's BCC recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-09-13T18:54:44.466Z",
+      "createdAt": "2022-09-13T18:54:44.466Z",
+      "name": "hs_email_bounce_error_detail_message",
+      "label": "Email Bounce Error Detail Message",
+      "type": "string",
+      "fieldType": "textarea",
+      "description": "The message from the bounce error.",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-09-13T18:54:14.251Z",
+      "createdAt": "2022-09-13T18:54:14.251Z",
+      "name": "hs_email_bounce_error_detail_status_code",
+      "label": "Email Bounce Error Detail Status Code",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The status code from the bounce error.",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:46:28.744Z",
+      "createdAt": "2020-08-19T16:54:59.114Z",
+      "name": "hs_email_cc_email",
+      "label": "Email CC Address",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Email addresses of the email's CC recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:46:44.088Z",
+      "createdAt": "2020-08-18T19:02:08.783Z",
+      "name": "hs_email_cc_firstname",
+      "label": "Email CC First Name",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "First names of the email's CC recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:46:59.432Z",
+      "createdAt": "2020-08-19T16:54:42.291Z",
+      "name": "hs_email_cc_lastname",
+      "label": "Email CC Last Name",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Last names of the email's CC recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:47:14.755Z",
+      "createdAt": "2020-08-19T16:55:09.149Z",
+      "name": "hs_email_cc_raw",
+      "label": "Email CC",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Raw header values of the email's CC recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-11-10T17:22:51.950Z",
+      "createdAt": "2019-12-12T14:41:19.674Z",
+      "name": "hs_email_direction",
+      "label": "Email Direction",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The direction the email was sent in",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "Forwarded",
+          "value": "FORWARDED_EMAIL",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Incoming",
+          "value": "INCOMING_EMAIL",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Outgoing",
+          "value": "EMAIL",
+          "displayOrder": -1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-02-08T17:54:21.199Z",
+      "createdAt": "2020-12-14T19:17:57.541Z",
+      "name": "hs_email_encoded_email_associations_request",
+      "label": "Encoded Email Associations Request",
+      "type": "string",
+      "fieldType": "text",
+      "description": "Encoded email associations request",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:48:00.803Z",
+      "createdAt": "2019-12-12T14:41:19.351Z",
+      "name": "hs_email_error_message",
+      "label": "Error Message",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The error that occurred while sending the email",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:48:16.147Z",
+      "createdAt": "2019-12-12T14:41:20.054Z",
+      "name": "hs_email_facsimile_send_id",
+      "label": "Email Send Id",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The ID of the email send event sent through Facsimile",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:48:31.479Z",
+      "createdAt": "2020-08-18T19:00:29.909Z",
+      "name": "hs_email_from_email",
+      "label": "Email From Address",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Email address of the email's sender",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:48:46.820Z",
+      "createdAt": "2020-08-18T18:59:18.420Z",
+      "name": "hs_email_from_firstname",
+      "label": "Email From First Name",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "First name of the email's sender",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:49:02.162Z",
+      "createdAt": "2020-08-18T18:59:54.772Z",
+      "name": "hs_email_from_lastname",
+      "label": "Email From Last Name",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Last name of the email's sender",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:49:17.504Z",
+      "createdAt": "2020-08-18T19:01:08.327Z",
+      "name": "hs_email_from_raw",
+      "label": "Email From",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Raw header value of the email's sender",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:49:32.809Z",
+      "createdAt": "2019-12-12T14:41:19.329Z",
+      "name": "hs_email_headers",
+      "label": "Email Headers",
+      "type": "json",
+      "fieldType": "text",
+      "description": "The sender and receivers of the email",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-06-10T13:08:54.979Z",
+      "createdAt": "2022-06-09T15:40:52.442Z",
+      "name": "hs_email_html",
+      "label": "Email body",
+      "type": "string",
+      "fieldType": "html",
+      "description": "This is the body of any email sent from a record. It doesn't include emails received from contacts.",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:50:03.426Z",
+      "createdAt": "2019-12-12T14:41:19.751Z",
+      "name": "hs_email_logged_from",
+      "label": "Logged From",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Where the email was logged",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "Bcc Endpoint",
+          "value": "BCC_ENDPOINT",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "CRM",
+          "value": "CRM",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Extension",
+          "value": "EXTENSION",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "Facsimile",
+          "value": "FACSIMILE",
+          "displayOrder": 3,
+          "hidden": false
+        },
+        {
+          "label": "Facsimile Outgoing",
+          "value": "FACSIMILE_OUTGOING",
+          "displayOrder": 4,
+          "hidden": false
+        },
+        {
+          "label": "Facsimile Resync",
+          "value": "FACSIMILE_RESYNC",
+          "displayOrder": 5,
+          "hidden": false
+        },
+        {
+          "label": "Forward Endpoint",
+          "value": "FORWARD_ENDPOINT",
+          "displayOrder": 6,
+          "hidden": false
+        },
+        {
+          "label": "Unknown",
+          "value": "UNKNOWN",
+          "displayOrder": 7,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:50:18.818Z",
+      "createdAt": "2019-12-12T14:41:19.280Z",
+      "name": "hs_email_media_processing_status",
+      "label": "Media Processing Status",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Processing status for this email's images and attachments",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "Deferred",
+          "value": "DEFERRED",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Processed",
+          "value": "PROCESSED",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Skipped",
+          "value": "SKIPPED",
+          "displayOrder": 2,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:50:34.233Z",
+      "createdAt": "2020-07-29T23:22:42.091Z",
+      "name": "hs_email_member_of_forwarded_subthread",
+      "label": "Email is member of forwarded subthread",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Whether this email is a member of a forwarded subthread",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "description": "",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "description": "",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:50:49.575Z",
+      "createdAt": "2019-12-12T14:41:19.416Z",
+      "name": "hs_email_message_id",
+      "label": "Message ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The ID of the message",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:51:04.922Z",
+      "createdAt": "2021-04-26T13:54:20.613Z",
+      "name": "hs_email_migrated_via_portal_data_migration",
+      "label": "email_migrated_via_portal_data_migration",
+      "type": "enumeration",
+      "fieldType": "booleancheckbox",
+      "description": "Indicates that the email was migrated from another portal using DataMigration tool",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "Yes",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "No",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:51:20.359Z",
+      "createdAt": "2021-03-12T22:22:43.223Z",
+      "name": "hs_email_pending_inline_image_ids",
+      "label": "Email pending inline image file IDs",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "File IDs of pending inline images in the email's HTML",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-09-13T16:45:34.878Z",
+      "createdAt": "2019-12-12T14:41:19.512Z",
+      "name": "hs_email_post_send_status",
+      "label": "Post-Send Status",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "A description of what happened to the email (successful send, bounced, dropped) and why",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "Canceled due to portal data migration",
+          "value": "CANCELED_DUE_TO_PORTAL_DATA_MIGRATION",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Globally blocked recipient address",
+          "value": "GLOBALLY_BLOCKED_RECIPIENT_ADDRESS",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Globally blocked recipient domain",
+          "value": "GLOBALLY_BLOCKED_RECIPIENT_DOMAIN",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Modified/Deleted",
+          "value": "MODIFIED_OR_DELETED",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Other send rejected",
+          "value": "OTHER_SEND_REJECTED",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Permanent fail",
+          "value": "PERMANENT_FAIL",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Previously marked as spam",
+          "value": "PREVIOUSLY_MARKED_AS_SPAM",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Rate limited by client",
+          "value": "RATE_LIMITED_BY_CLIENT",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Rate limited by provider",
+          "value": "RATE_LIMITED_BY_PROVIDER",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Rate-limited",
+          "value": "RATE_LIMITED",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Recipient previously bounced globally",
+          "value": "RECIPIENT_PREVIOUSLY_BOUNCED_GLOBALLY",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Recipient previously bounced on portal",
+          "value": "RECIPIENT_PREVIOUSLY_BOUNCED_ON_PORTAL",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Retrying",
+          "value": "RETRYING",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Scheduled",
+          "value": "SCHEDULED",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Send as permissions denied",
+          "value": "SEND_AS_PERMISSIONS_DENIED",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Sent",
+          "value": "SENT",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Unscheduled",
+          "value": "UNSCHEDULED",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Unsubscribed",
+          "value": "UNSUBSCRIBED",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Unsubscribed personal",
+          "value": "UNSUBSCRIBED_PERSONAL",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "sent user removed from portal",
+          "value": "SENT_USER_REMOVED_FROM_PORTAL",
+          "description": "",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Smtp connection failed",
+          "value": "SMTP_CONNECTION_FAILED",
+          "displayOrder": 20,
+          "hidden": false
+        },
+        {
+          "label": "Mailbox full",
+          "value": "MAILBOX_FULL",
+          "displayOrder": 21,
+          "hidden": false
+        },
+        {
+          "label": "Provider suspended account",
+          "value": "PROVIDER_SUSPENDED_ACCOUNT",
+          "displayOrder": 22,
+          "hidden": false
+        },
+        {
+          "label": "Recipient invalid",
+          "value": "RECIPIENT_INVALID",
+          "displayOrder": 23,
+          "hidden": false
+        },
+        {
+          "label": "Smtp client not authenticated",
+          "value": "SMTP_CLIENT_NOT_AUTHENTICATED",
+          "displayOrder": 24,
+          "hidden": false
+        },
+        {
+          "label": "Considered spam",
+          "value": "CONSIDERED_SPAM",
+          "displayOrder": 25,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:51:51.154Z",
+      "createdAt": "2019-12-12T14:41:19.590Z",
+      "name": "hs_email_recipient_drop_reasons",
+      "label": "Recipient-Drop Reasons",
+      "type": "json",
+      "fieldType": "text",
+      "description": "A list of the dropped recipients paired with the reason each was dropped",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:52:06.500Z",
+      "createdAt": "2019-12-12T14:41:19.906Z",
+      "name": "hs_email_send_event_id",
+      "label": "Email Send Event Id",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The ID of the email send event",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:52:21.837Z",
+      "createdAt": "2019-12-12T14:41:19.951Z",
+      "name": "hs_email_send_event_id_created",
+      "label": "Email Send Event Id Created",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date when the email send event ID was created",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:52:37.258Z",
+      "createdAt": "2020-08-19T16:57:29.204Z",
+      "name": "hs_email_sender_email",
+      "label": "Email Sender Address",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Email address of the email's sender",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:52:52.567Z",
+      "createdAt": "2020-08-19T16:57:04.566Z",
+      "name": "hs_email_sender_firstname",
+      "label": "Email Sender First Name",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "First name of the email's sender",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:53:07.893Z",
+      "createdAt": "2020-08-19T16:57:17.003Z",
+      "name": "hs_email_sender_lastname",
+      "label": "Email Sender Last Name",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Last name of the email's sender",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:53:23.222Z",
+      "createdAt": "2020-08-19T16:57:41.244Z",
+      "name": "hs_email_sender_raw",
+      "label": "Email Sender",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Raw header value of the email's sender",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:53:38.547Z",
+      "createdAt": "2019-12-12T14:41:20.100Z",
+      "name": "hs_email_sent_via",
+      "label": "Sent Via",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "How the email was sent",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "Gmail",
+          "value": "GMAIL",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Office365",
+          "value": "OFFICE365",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "SendGrid",
+          "value": "SENDGRID",
+          "displayOrder": 2,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:53:53.921Z",
+      "createdAt": "2019-12-12T14:41:19.637Z",
+      "name": "hs_email_status",
+      "label": "Email send status",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The send status of the email",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "Bounced",
+          "value": "BOUNCED",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Failed",
+          "value": "FAILED",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Scheduled",
+          "value": "SCHEDULED",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "Sending",
+          "value": "SENDING",
+          "displayOrder": 3,
+          "hidden": false
+        },
+        {
+          "label": "Sent",
+          "value": "SENT",
+          "displayOrder": 4,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-06-28T19:43:01.725Z",
+      "createdAt": "2022-06-28T19:25:16.954Z",
+      "name": "hs_email_subject",
+      "label": "Email subject",
+      "type": "string",
+      "fieldType": "html",
+      "description": "The subject of the email",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:54:24.725Z",
+      "createdAt": "2019-12-12T14:41:19.191Z",
+      "name": "hs_email_text",
+      "label": "Text",
+      "type": "string",
+      "fieldType": "textarea",
+      "description": "The plaintext of the email",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:54:40.025Z",
+      "createdAt": "2019-12-12T14:41:20.127Z",
+      "name": "hs_email_thread_id",
+      "label": "Thread ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The thread that the email belongs to",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:54:55.347Z",
+      "createdAt": "2020-08-18T19:01:43.215Z",
+      "name": "hs_email_to_email",
+      "label": "Email To Address",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Email addresses of the email's recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:55:10.651Z",
+      "createdAt": "2020-08-18T19:01:19.380Z",
+      "name": "hs_email_to_firstname",
+      "label": "Email To First Name",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "First names of the email's recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:55:26.009Z",
+      "createdAt": "2020-08-18T19:01:30.214Z",
+      "name": "hs_email_to_lastname",
+      "label": "Email To Last Name",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Last names of the email's recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:55:41.494Z",
+      "createdAt": "2020-08-18T19:01:56.193Z",
+      "name": "hs_email_to_raw",
+      "label": "Email To",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Raw header values of the email's recipients",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:55:56.806Z",
+      "createdAt": "2019-12-12T14:41:19.724Z",
+      "name": "hs_email_tracker_key",
+      "label": "Tracker Key",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The tracker key of the email",
+      "groupName": "email",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:56:12.130Z",
+      "createdAt": "2019-12-12T14:41:19.438Z",
+      "name": "hs_email_validation_skipped",
+      "label": "Validation Skipped",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "Validation skipped that would have otherwise rejected logging",
+      "groupName": "email",
+      "options": [
+        {
+          "label": "Allow Empty Reply",
+          "value": "ALLOW_EMPTY_REPLY",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Skip Domain Validation",
+          "value": "SKIP_DOMAIN_VALIDATION",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:34:09.640Z",
+      "createdAt": "2019-08-06T02:43:30.960Z",
+      "name": "hs_engagement_source",
+      "label": "Engagement Source",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The source that created this engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T01:00:48.352Z",
+      "createdAt": "2019-08-06T02:43:31.012Z",
+      "name": "hs_engagement_source_id",
+      "label": "Engagement Source ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The specific ID of the process that created this engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-15T20:07:49.930Z",
+      "createdAt": "2019-08-06T02:43:30.672Z",
+      "name": "hs_engagement_type",
+      "label": "Activity type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The type of an engagement",
+      "groupName": "engagement",
+      "options": [
+        {
+          "label": "Call",
+          "value": "CALL",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Conversation Session",
+          "value": "CONVERSATION_SESSION",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Email reply from contact",
+          "value": "INCOMING_EMAIL",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Email sent to contact",
+          "value": "EMAIL",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Forwarded email",
+          "value": "FORWARDED_EMAIL",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "LinkedIn Message",
+          "value": "LINKEDIN_MESSAGE",
+          "displayOrder": -1,
+          "hidden": true
+        },
+        {
+          "label": "Meeting",
+          "value": "MEETING",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Note",
+          "value": "NOTE",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Postal Mail",
+          "value": "POSTAL_MAIL",
+          "displayOrder": -1,
+          "hidden": true
+        },
+        {
+          "label": "Publishing Task",
+          "value": "PUBLISHING_TASK",
+          "displayOrder": -1,
+          "hidden": true
+        },
+        {
+          "label": "SMS",
+          "value": "SMS",
+          "displayOrder": -1,
+          "hidden": true
+        },
+        {
+          "label": "Task",
+          "value": "TASK",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "WhatsApp",
+          "value": "WHATS_APP",
+          "displayOrder": -1,
+          "hidden": true
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T01:05:05.778Z",
+      "createdAt": "2019-08-06T02:43:31.313Z",
+      "name": "hs_follow_up_action",
+      "label": "Follow up action",
+      "type": "string",
+      "fieldType": "text",
+      "description": "What action should be performed during follow up",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:29:12.893Z",
+      "createdAt": "2019-08-20T13:31:41.946Z",
+      "name": "hs_gdpr_deleted",
+      "label": "GDPR deleted",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Indicates the body of this engagement has been cleared because of a GDPR delete request",
+      "groupName": "engagement",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:21:58.290Z",
+      "createdAt": "2021-05-27T15:32:44.756Z",
+      "name": "hs_i_cal_uid",
+      "label": "iCalUid",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The iCalUid of the synced event",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:22:13.755Z",
+      "createdAt": "2020-09-11T18:20:47.857Z",
+      "name": "hs_internal_meeting_notes",
+      "label": "Internal Meeting Notes",
+      "type": "string",
+      "fieldType": "textarea",
+      "description": "",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:47:11.435Z",
+      "createdAt": "2019-08-06T02:43:30.350Z",
+      "name": "hs_lastmodifieddate",
+      "label": "Last modified date",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date any property on this engagement was modified",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-17T20:44:11.350Z",
+      "createdAt": "2023-01-17T20:44:11.350Z",
+      "name": "hs_marketing_task_category",
+      "label": "Category",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The type of post that needs to be published",
+      "groupName": "task",
+      "options": [
+        {
+          "label": "Blog Post",
+          "value": "BLOG_POST",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Custom",
+          "value": "CUSTOM",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Email",
+          "value": "EMAIL",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Facebook",
+          "value": "FACEBOOK",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Landing Page",
+          "value": "LANDING_PAGE",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Legacy Page",
+          "value": "LEGACY_PAGE",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "LinkedIn",
+          "value": "LINKEDIN",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Site Page",
+          "value": "SITE_PAGE",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Twitter",
+          "value": "TWITTER",
+          "displayOrder": -1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-17T20:46:45.828Z",
+      "createdAt": "2023-01-17T20:46:45.828Z",
+      "name": "hs_marketing_task_category_id",
+      "label": "Category ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The category id of the publishing task",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:22:44.258Z",
+      "createdAt": "2019-12-12T14:41:17.489Z",
+      "name": "hs_meeting_body",
+      "label": "Meeting description",
+      "type": "string",
+      "fieldType": "textarea",
+      "description": "The text description of the meeting",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:22:59.590Z",
+      "createdAt": "2021-09-28T20:03:22.722Z",
+      "name": "hs_meeting_calendar_event_hash",
+      "label": "Meeting calendar event hash",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The unique hash for the meeting",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:23:14.911Z",
+      "createdAt": "2021-09-28T20:01:39.237Z",
+      "name": "hs_meeting_change_id",
+      "label": "Meeting change id",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The unique change id for the meeting",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:23:30.264Z",
+      "createdAt": "2019-12-12T14:41:17.175Z",
+      "name": "hs_meeting_created_from_link_id",
+      "label": "Created From Link ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "Created From Link ID",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:23:45.574Z",
+      "createdAt": "2019-12-12T14:41:17.800Z",
+      "name": "hs_meeting_end_time",
+      "label": "Meeting end time",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date when the meeting ends",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:24:00.894Z",
+      "createdAt": "2019-12-12T14:41:16.677Z",
+      "name": "hs_meeting_external_url",
+      "label": "External URL",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The external URL for the meeting",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:24:16.220Z",
+      "createdAt": "2019-12-12T14:41:17.364Z",
+      "name": "hs_meeting_location",
+      "label": "Meeting location",
+      "type": "string",
+      "fieldType": "text",
+      "description": "Where the meeting takes place",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:24:31.513Z",
+      "createdAt": "2021-12-16T17:01:12.284Z",
+      "name": "hs_meeting_location_type",
+      "label": "Location type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The type of location for the meeting event",
+      "groupName": "meeting",
+      "options": [
+        {
+          "label": "Phone call",
+          "value": "PHONE",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Address",
+          "value": "ADDRESS",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "Custom",
+          "value": "CUSTOM",
+          "displayOrder": 3,
+          "hidden": false
+        },
+        {
+          "label": "Video Conference",
+          "value": "VCE",
+          "displayOrder": 4,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:24:46.870Z",
+      "createdAt": "2020-02-18T18:48:52.935Z",
+      "name": "hs_meeting_outcome",
+      "label": "Meeting outcome",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The outcome of this meeting",
+      "groupName": "meeting",
+      "options": [
+        {
+          "label": "Scheduled",
+          "value": "SCHEDULED",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Completed",
+          "value": "COMPLETED",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Rescheduled",
+          "value": "RESCHEDULED",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "No Show",
+          "value": "NO_SHOW",
+          "displayOrder": 3,
+          "hidden": false
+        },
+        {
+          "label": "Canceled",
+          "value": "CANCELED",
+          "displayOrder": 4,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:25:02.225Z",
+      "createdAt": "2022-04-26T19:09:49.411Z",
+      "name": "hs_meeting_payments_session_id",
+      "label": "Payments session id",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The payments session id for the meeting",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:25:17.532Z",
+      "createdAt": "2019-12-12T14:41:17.439Z",
+      "name": "hs_meeting_pre_meeting_prospect_reminders",
+      "label": "Pre-meeting prospect reminders",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "A list of dates when meeting reminders should be sent to prospects",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:25:32.839Z",
+      "createdAt": "2019-12-12T14:41:16.949Z",
+      "name": "hs_meeting_source",
+      "label": "Meeting source",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The source where the meeting was booked",
+      "groupName": "meeting",
+      "options": [
+        {
+          "label": "CRM UI",
+          "value": "CRM_UI",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Integration",
+          "value": "INTEGRATION",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Meeting created from a proposed time",
+          "value": "AVAILABILITY_SCHEDULE",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "Meeting created on calendar from CRM",
+          "value": "BIDIRECTIONAL_API",
+          "displayOrder": 3,
+          "hidden": false
+        },
+        {
+          "label": "Meeting synced from calendar to CRM",
+          "value": "BIDIRECTIONAL_SYNC",
+          "displayOrder": 4,
+          "hidden": false
+        },
+        {
+          "label": "Meetings (Embedded)",
+          "value": "MEETINGS_EMBEDDED",
+          "displayOrder": 5,
+          "hidden": false
+        },
+        {
+          "label": "Meetings (Public)",
+          "value": "MEETINGS_PUBLIC",
+          "displayOrder": 6,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:25:48.182Z",
+      "createdAt": "2019-12-12T14:41:16.877Z",
+      "name": "hs_meeting_source_id",
+      "label": "Source ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The source ID of the meeting",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:26:03.474Z",
+      "createdAt": "2019-12-12T14:41:17.070Z",
+      "name": "hs_meeting_start_time",
+      "label": "Meeting start time",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date when the meeting starts",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:26:18.807Z",
+      "createdAt": "2019-12-12T14:41:17.636Z",
+      "name": "hs_meeting_title",
+      "label": "Meeting name",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The title of the meeting",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:26:34.293Z",
+      "createdAt": "2019-12-12T14:41:16.747Z",
+      "name": "hs_meeting_web_conference_meeting_id",
+      "label": "Web conference meeting ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The meeting ID of the web conference",
+      "groupName": "meeting",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_merged_object_ids",
+      "label": "Merged object IDs",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The list of object IDs that have been merged into this object. This value is automatically set by HubSpot and may not be modified.",
+      "groupName": "engagementinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:45:07.782Z",
+      "createdAt": "2019-08-06T02:43:31.190Z",
+      "name": "hs_modified_by",
+      "label": "Updated by",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The user who last updated the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:45:34.519Z",
+      "createdAt": "2021-07-21T11:39:34.391Z",
+      "name": "hs_msteams_message_id",
+      "label": "MS Teams message ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The message ID for the created task.",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": true,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-03T13:59:23.415Z",
+      "createdAt": "2019-12-12T14:41:16.136Z",
+      "name": "hs_note_body",
+      "label": "Note body",
+      "type": "string",
+      "fieldType": "html",
+      "description": "The body of the note",
+      "groupName": "note",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:45:56.912Z",
+      "createdAt": "2020-08-26T12:46:57.297Z",
+      "name": "hs_num_associated_companies",
+      "label": "Associated Companies",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The number of companies associated with this task",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:46:12.220Z",
+      "createdAt": "2020-08-26T12:47:09.281Z",
+      "name": "hs_num_associated_contacts",
+      "label": "Associated Contacts",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The number of contacts associated with this task",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:46:27.555Z",
+      "createdAt": "2020-08-26T12:47:20.598Z",
+      "name": "hs_num_associated_deals",
+      "label": "Associated Deals",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The number of deals associated with this task",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:46:42.958Z",
+      "createdAt": "2020-08-28T12:02:05.933Z",
+      "name": "hs_num_associated_queue_objects",
+      "label": "Associated Queue Objects",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The number of objects associated with this task that support task queues",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": true,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false,
+      "calculationFormula": "(hs_num_associated_contacts + hs_num_associated_companies + hs_num_associated_tickets + hs_num_associated_deals)"
+    },
+    {
+      "updatedAt": "2022-05-28T03:46:58.285Z",
+      "createdAt": "2020-08-26T12:46:35.285Z",
+      "name": "hs_num_associated_tickets",
+      "label": "Associated Tickets",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The number of tickets associated with this task",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_object_id",
+      "label": "Record ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The unique ID for this record. This value is automatically set by HubSpot and may not be modified.",
+      "groupName": "engagementinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-11T13:20:11.121Z",
+      "createdAt": "2022-08-11T13:20:11.121Z",
+      "name": "hs_postal_mail_body",
+      "label": "Postal Mail Body",
+      "type": "string",
+      "fieldType": "html",
+      "description": "Body text of the postal mail",
+      "groupName": "postal_mail_information",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-09-14T18:53:45.763Z",
+      "createdAt": "2022-08-11T13:44:55.073Z",
+      "name": "hs_postal_mail_type",
+      "label": "Postal Mail Type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Category of postal mail, as defined by the user",
+      "groupName": "postal_mail_information",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:59:32.507Z",
+      "createdAt": "2019-08-06T02:43:31.284Z",
+      "name": "hs_product_name",
+      "label": "Product name",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The name of the product associated with this engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-12-01T17:30:56.810Z",
+      "createdAt": "2019-12-12T14:41:21.070Z",
+      "name": "hs_publishing_task_body",
+      "label": "Body",
+      "type": "string",
+      "fieldType": "textarea",
+      "description": "The text description of the publishing task",
+      "groupName": "publishing_task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-12-01T17:31:03.489Z",
+      "createdAt": "2019-12-12T14:41:20.579Z",
+      "name": "hs_publishing_task_campaign_guid",
+      "label": "Campaign GUID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The unique id of the campaign that the published content belongs to",
+      "groupName": "publishing_task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-12-01T17:31:10.072Z",
+      "createdAt": "2021-06-24T13:34:07.415Z",
+      "name": "hs_publishing_task_campaign_step_id",
+      "label": "Publishing Task Campaign Step Id",
+      "type": "string",
+      "fieldType": "text",
+      "description": "",
+      "groupName": "publishing_task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-12-01T17:31:18.818Z",
+      "createdAt": "2019-12-12T14:41:20.545Z",
+      "name": "hs_publishing_task_category",
+      "label": "Category",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The type of post that needs to be published",
+      "groupName": "publishing_task",
+      "options": [
+        {
+          "label": "Blog Post",
+          "value": "BLOG_POST",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Custom",
+          "value": "CUSTOM",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Email",
+          "value": "EMAIL",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Facebook",
+          "value": "FACEBOOK",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Landing Page",
+          "value": "LANDING_PAGE",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Legacy Page",
+          "value": "LEGACY_PAGE",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "LinkedIn",
+          "value": "LINKEDIN",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Site Page",
+          "value": "SITE_PAGE",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Twitter",
+          "value": "TWITTER",
+          "displayOrder": -1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-12-01T17:31:37.218Z",
+      "createdAt": "2019-12-12T14:41:20.276Z",
+      "name": "hs_publishing_task_category_id",
+      "label": "Category ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The category id of the publishing task",
+      "groupName": "publishing_task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-12-01T17:31:46.630Z",
+      "createdAt": "2019-12-12T14:41:20.733Z",
+      "name": "hs_publishing_task_content_id",
+      "label": "Content ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The id of the content that needs to be published",
+      "groupName": "publishing_task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-12-01T17:32:56.695Z",
+      "createdAt": "2019-12-12T14:41:20.702Z",
+      "name": "hs_publishing_task_name",
+      "label": "Name",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The name of the publishing task",
+      "groupName": "publishing_task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-12-01T17:32:05.034Z",
+      "createdAt": "2019-12-12T14:41:20.311Z",
+      "name": "hs_publishing_task_state",
+      "label": "State",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Whether the task needs to be done or has already been done",
+      "groupName": "publishing_task",
+      "options": [
+        {
+          "label": "Done",
+          "value": "DONE",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "To Do",
+          "value": "TODO",
+          "displayOrder": -1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:56:52.172Z",
+      "createdAt": "2019-08-06T02:43:31.398Z",
+      "name": "hs_queue_membership_ids",
+      "label": "Queue",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The list of queues that contain this engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_read_only",
+      "label": "Read Only Object",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Is the object read only",
+      "groupName": "engagementinformation",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-07-21T20:09:15.330Z",
+      "createdAt": "2022-06-08T14:16:38.490Z",
+      "name": "hs_repeat_status",
+      "label": "Task repeat status",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "Indicates whether the task is currently repeating ",
+      "groupName": "taskinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:47:44.225Z",
+      "createdAt": "2019-12-12T14:41:13.306Z",
+      "name": "hs_scheduled_tasks",
+      "label": "Scheduled tasks",
+      "type": "json",
+      "fieldType": "text",
+      "description": "",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-30T15:31:59.954Z",
+      "createdAt": "2019-12-12T14:41:13.031Z",
+      "name": "hs_task_body",
+      "label": "Notes",
+      "type": "string",
+      "fieldType": "html",
+      "description": "The content in the notes field on a task",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-17T20:50:38.888Z",
+      "createdAt": "2023-01-17T20:50:38.888Z",
+      "name": "hs_task_campaign_guid",
+      "label": "Campaign GUID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The unique id of the campaign that the task is associated with",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:48:14.851Z",
+      "createdAt": "2019-12-12T14:41:13.877Z",
+      "name": "hs_task_completion_date",
+      "label": "Completed at",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date that the task was completed",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:48:30.161Z",
+      "createdAt": "2021-09-16T15:10:41.993Z",
+      "name": "hs_task_contact_timezone",
+      "label": "Contact Time Zone",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The time zone of the associated contact",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-17T20:24:20.670Z",
+      "createdAt": "2023-01-17T20:24:20.670Z",
+      "name": "hs_task_family",
+      "label": "Task Family",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "An enumeration field describing what type of task this is i.e. \"SALES\" or \"MARKETING\"",
+      "groupName": "task",
+      "options": [
+        {
+          "label": "Sales",
+          "value": "SALES",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Marketing",
+          "value": "MARKETING",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:48:45.489Z",
+      "createdAt": "2019-12-12T14:41:12.709Z",
+      "name": "hs_task_for_object_type",
+      "label": "For Object Type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The object type for the task",
+      "groupName": "task",
+      "options": [
+        {
+          "label": "Company",
+          "value": "COMPANY",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Contact",
+          "value": "CONTACT",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Content",
+          "value": "CONTENT",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "Deal",
+          "value": "DEAL",
+          "displayOrder": 3,
+          "hidden": false
+        },
+        {
+          "label": "Owner",
+          "value": "OWNER",
+          "displayOrder": 4,
+          "hidden": false
+        },
+        {
+          "label": "Quote",
+          "value": "QUOTE",
+          "displayOrder": 5,
+          "hidden": false
+        },
+        {
+          "label": "Ticket",
+          "value": "TICKET",
+          "displayOrder": 6,
+          "hidden": false
+        },
+        {
+          "label": "Workflow",
+          "value": "WORKFLOW",
+          "displayOrder": 7,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:49:00.868Z",
+      "createdAt": "2019-12-12T14:41:13.647Z",
+      "name": "hs_task_is_all_day",
+      "label": "Task is all day",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Determines if the task is due all day or at a specific time",
+      "groupName": "task",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:49:16.204Z",
+      "createdAt": "2020-05-21T22:02:54.351Z",
+      "name": "hs_task_last_contact_outreach",
+      "label": "Last contacted",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The last time a call, email, or meeting was logged for the associated contact. This is set automatically by HubSpot based on user actions in the contact record",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:49:31.524Z",
+      "createdAt": "2020-05-21T22:03:35.971Z",
+      "name": "hs_task_last_sales_activity_timestamp",
+      "label": "Last engagement",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date of the last sales activity with the associated contact. This is set automatically by HubSpot based on user actions in the contact record",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:49:46.853Z",
+      "createdAt": "2019-12-12T14:41:13.227Z",
+      "name": "hs_task_priority",
+      "label": "Priority",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The priority of the task",
+      "groupName": "task",
+      "options": [
+        {
+          "label": "None",
+          "value": "NONE",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Low",
+          "value": "LOW",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Medium",
+          "value": "MEDIUM",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "High",
+          "value": "HIGH",
+          "displayOrder": 3,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:50:02.334Z",
+      "createdAt": "2019-12-12T14:41:12.877Z",
+      "name": "hs_task_probability_to_complete",
+      "label": "Task probability to complete",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The probability the task will be completed",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:50:17.653Z",
+      "createdAt": "2021-06-16T17:47:20.211Z",
+      "name": "hs_task_relative_reminders",
+      "label": "Relative Task Reminders",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The dates (relative to the due date) when reminders will be sent",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:50:32.945Z",
+      "createdAt": "2019-12-12T14:41:12.788Z",
+      "name": "hs_task_reminders",
+      "label": "Reminder",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The dates when reminders will be sent",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:50:48.267Z",
+      "createdAt": "2020-09-08T12:56:35.063Z",
+      "name": "hs_task_repeat_interval",
+      "label": "Interval",
+      "type": "string",
+      "fieldType": "text",
+      "description": "How often the task should repeat",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:51:03.586Z",
+      "createdAt": "2019-12-12T14:41:12.492Z",
+      "name": "hs_task_send_default_reminder",
+      "label": "Send Default Reminder",
+      "type": "bool",
+      "fieldType": "radio",
+      "description": "Whether or not a reminder should be sent when the task is due",
+      "groupName": "task",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:51:19.028Z",
+      "createdAt": "2020-09-30T13:14:21.411Z",
+      "name": "hs_task_sequence_enrollment_active",
+      "label": "Sequence Enrollment Is Active",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Whether the sequence enrollment this task is a part of is currently active",
+      "groupName": "task",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "description": "",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "description": "",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:51:34.356Z",
+      "createdAt": "2020-02-10T18:32:36.906Z",
+      "name": "hs_task_sequence_step_enrollment_id",
+      "label": "Sequence step enrollment Id",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The id of the sequence step that created the task",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:51:49.697Z",
+      "createdAt": "2020-09-09T14:06:41.469Z",
+      "name": "hs_task_sequence_step_order",
+      "label": "Sequence step number",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The order of this task in the sequence at time of enrollment",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-22T16:12:41.941Z",
+      "createdAt": "2019-12-12T14:41:12.541Z",
+      "name": "hs_task_status",
+      "label": "Task Status",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The status of the task",
+      "groupName": "task",
+      "options": [
+        {
+          "label": "Completed",
+          "value": "COMPLETED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Deferred",
+          "value": "DEFERRED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "In Progress",
+          "value": "IN_PROGRESS",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Not Started",
+          "value": "NOT_STARTED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Waiting",
+          "value": "WAITING",
+          "displayOrder": -1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-22T16:12:22.633Z",
+      "createdAt": "2019-12-12T14:41:13.835Z",
+      "name": "hs_task_subject",
+      "label": "Task Title",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The subject text for the task",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T03:52:35.732Z",
+      "createdAt": "2019-12-12T14:41:12.821Z",
+      "name": "hs_task_template_id",
+      "label": "Task template id",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The id of template the task was created from",
+      "groupName": "task",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-08-22T12:09:10.013Z",
+      "createdAt": "2019-12-12T14:41:13.537Z",
+      "name": "hs_task_type",
+      "label": "Task Type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The type of task",
+      "groupName": "task",
+      "options": [
+        {
+          "label": "Call",
+          "value": "CALL",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Email",
+          "value": "EMAIL",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "LinkedIn",
+          "value": "LINKED_IN",
+          "displayOrder": -1,
+          "hidden": true
+        },
+        {
+          "label": "Meeting",
+          "value": "MEETING",
+          "displayOrder": -1,
+          "hidden": true
+        },
+        {
+          "label": "Sales Navigator - Connection Request",
+          "value": "LINKED_IN_CONNECT",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Sales Navigator - InMail",
+          "value": "LINKED_IN_MESSAGE",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "To Do",
+          "value": "TODO",
+          "displayOrder": -1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:46:09.614Z",
+      "createdAt": "2019-08-06T02:43:30.870Z",
+      "name": "hs_timestamp",
+      "label": "Activity date",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date that an engagement occurred",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_unique_creation_key",
+      "label": "Unique creation key",
+      "type": "string",
+      "fieldType": "text",
+      "description": "Unique property used for idempotent creates",
+      "groupName": "engagementinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": true,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T00:31:22.941Z",
+      "createdAt": "2019-08-06T02:43:30.814Z",
+      "name": "hs_unique_id",
+      "label": "Unique ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The unique ID of the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:40:21.229Z",
+      "createdAt": "2019-12-12T14:41:18.381Z",
+      "name": "hs_unknown_visitor_conversation",
+      "label": "Unknown Visitor Conversation",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Whether or not this communication was made with an unknown visitor",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_updated_by_user_id",
+      "label": "Updated by user ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The user that last updated this object. This value is automatically set by HubSpot and may not be modified.",
+      "groupName": "engagementinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_user_ids_of_all_notification_followers",
+      "label": "User IDs of all notification followers",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The user IDs of all users that have clicked follow within the object to opt-in to getting follow notifications",
+      "groupName": "engagementinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_user_ids_of_all_notification_unfollowers",
+      "label": "User IDs of all notification unfollowers",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The user IDs of all object owners that have clicked unfollow within the object to opt-out of getting follow notifications",
+      "groupName": "engagementinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_user_ids_of_all_owners",
+      "label": "User IDs of all owners",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The user IDs of all owners of this object",
+      "groupName": "engagementinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-08-06T02:43:30.639Z",
+      "name": "hubspot_owner_assigneddate",
+      "label": "Owner Assigned Date",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The timestamp when an owner was assigned to this engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-08-06T02:43:30.412Z",
+      "name": "hubspot_owner_id",
+      "label": "Activity assigned to",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The user that the activity is assigned to in HubSpot. This can be any HubSpot user or Salesforce integration user, and can be set manually or via Workflows.",
+      "groupName": "engagement",
+      "options": [],
+      "referencedObjectType": "OWNER",
+      "displayOrder": 6,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-08-06T02:43:30.448Z",
+      "name": "hubspot_team_id",
+      "label": "HubSpot Team",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The team of the owner of an engagement.",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": 7,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-08-06T02:43:30.481Z",
+      "name": "hs_all_owner_ids",
+      "label": "All owner ids",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The value of all owner referencing properties for this object, both default and custom",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": 8,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-08-06T02:43:30.551Z",
+      "name": "hs_all_team_ids",
+      "label": "All team ids",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The team ids corresponding to all owner referencing properties for this object, both default and custom",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": 9,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-08-06T02:43:30.606Z",
+      "name": "hs_all_accessible_team_ids",
+      "label": "All accessible team ids",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The team ids, including up the team hierarchy, corresponding to all owner referencing properties for this object, both default and custom",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": 10,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    }
+  ]
+}

@@ -1,0 +1,1588 @@
+{
+  "results": [
+    {
+      "updatedAt": "2022-05-28T05:29:22.521Z",
+      "createdAt": "2019-12-12T14:41:18.828Z",
+      "name": "hs_activity_type",
+      "label": "Call and meeting type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The activity type of the engagement",
+      "groupName": "engagement",
+      "options": [
+        {
+          "label": "Fit Call",
+          "value": "Fit Call",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Discovery Call",
+          "value": "Discovery Call",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Presentation",
+          "value": "Presentation",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "Other",
+          "value": "Other",
+          "displayOrder": 3,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_all_assigned_business_unit_ids",
+      "label": "Business units",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The business units this record is assigned to.",
+      "groupName": "callinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-18T17:43:02.687Z",
+      "createdAt": "2019-12-12T14:41:18.408Z",
+      "name": "hs_at_mentioned_owner_ids",
+      "label": "At-Mentioned Owner Ids",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The owners that have been at-mentioned on the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "referencedObjectType": "OWNER",
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:30:39.020Z",
+      "createdAt": "2019-12-12T14:41:18.484Z",
+      "name": "hs_attachment_ids",
+      "label": "Attached file IDs",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The IDs of the files that are attached to the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:30:54.322Z",
+      "createdAt": "2019-12-12T14:41:18.329Z",
+      "name": "hs_body_preview",
+      "label": "Call notes preview",
+      "type": "string",
+      "fieldType": "text",
+      "description": "A truncated preview of the call notes",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false,
+      "calculationFormula": "extract_most_recent_email_reply_text(string(hs_call_body))"
+    },
+    {
+      "updatedAt": "2022-05-28T05:31:09.664Z",
+      "createdAt": "2019-12-12T14:41:18.044Z",
+      "name": "hs_body_preview_html",
+      "label": "HTML Body Preview",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The HTML representation of the engagement body preview",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false,
+      "calculationFormula": "extract_most_recent_email_reply_html(string(hs_call_body))"
+    },
+    {
+      "updatedAt": "2022-05-28T05:31:24.971Z",
+      "createdAt": "2019-12-12T14:41:18.509Z",
+      "name": "hs_body_preview_is_truncated",
+      "label": "Body Preview Truncated",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Indicates if the engagement body was truncated for the preview",
+      "groupName": "engagement",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false,
+      "calculationFormula": "has_email_reply(string(hs_call_body))"
+    },
+    {
+      "updatedAt": "2022-05-28T05:31:40.309Z",
+      "createdAt": "2021-02-11T18:41:15.066Z",
+      "name": "hs_call_app_id",
+      "label": "Integrating App ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The App ID associated with the integrating app",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:31:55.625Z",
+      "createdAt": "2020-11-18T23:03:07.403Z",
+      "name": "hs_call_authed_url_provider",
+      "label": "Authenticated recording files url provider",
+      "type": "string",
+      "fieldType": "text",
+      "description": "URL which returns Authenticated audio/video URL of the recording",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:32:10.966Z",
+      "createdAt": "2019-12-12T14:41:18.754Z",
+      "name": "hs_call_body",
+      "label": "Call notes",
+      "type": "string",
+      "fieldType": "html",
+      "description": "The body of the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:32:26.276Z",
+      "createdAt": "2019-12-12T14:41:17.997Z",
+      "name": "hs_call_callee_object_id",
+      "label": "Callee object id",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The id of the callee",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:32:41.621Z",
+      "createdAt": "2019-12-12T14:41:18.780Z",
+      "name": "hs_call_callee_object_type",
+      "label": "Callee object type",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The type of callee",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "Company",
+          "value": "COMPANY",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Contact",
+          "value": "CONTACT",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-12-16T01:16:30.168Z",
+      "createdAt": "2021-12-09T18:59:00.209Z",
+      "name": "hs_call_direction",
+      "label": "Call direction",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The direction of a call",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "Inbound",
+          "value": "INBOUND",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "Outbound",
+          "value": "OUTBOUND",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:33:12.368Z",
+      "createdAt": "2019-12-12T14:41:18.219Z",
+      "name": "hs_call_disposition",
+      "label": "Call outcome",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The outcome of the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:33:27.668Z",
+      "createdAt": "2019-12-12T14:41:18.272Z",
+      "name": "hs_call_duration",
+      "label": "Call duration",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The duration of the call, in milliseconds",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:33:42.976Z",
+      "createdAt": "2019-12-12T14:41:18.194Z",
+      "name": "hs_call_external_account_id",
+      "label": "External Account ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "External Account ID",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:33:58.265Z",
+      "createdAt": "2019-12-12T14:41:18.020Z",
+      "name": "hs_call_external_id",
+      "label": "External ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The external ID of the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:34:13.644Z",
+      "createdAt": "2019-12-12T14:41:18.675Z",
+      "name": "hs_call_from_number",
+      "label": "From Number",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The phone number of the person that initiated the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-11T14:26:36.681Z",
+      "createdAt": "2023-01-11T14:26:36.681Z",
+      "name": "hs_call_from_number_nickname",
+      "label": "From Number Name",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The name of the phone number that initiated the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:34:28.944Z",
+      "createdAt": "2020-11-09T21:58:06.906Z",
+      "name": "hs_call_has_transcript",
+      "label": "Transcript Available",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Flag to indicate if the call has an associated transcript",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "description": "",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "description": "",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-30T15:28:17.613Z",
+      "createdAt": "2022-08-12T15:31:54.633Z",
+      "name": "hs_call_has_voicemail",
+      "label": "Voicemail Available",
+      "type": "enumeration",
+      "fieldType": "booleancheckbox",
+      "description": "Flag to indicate if the call has an associated voicemail",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "Yes",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "No",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:34:44.425Z",
+      "createdAt": "2019-12-12T14:41:18.066Z",
+      "name": "hs_call_recording_url",
+      "label": "Recording URL",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The URL of the recorded call audio",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:34:59.732Z",
+      "createdAt": "2020-11-04T15:23:57.114Z",
+      "name": "hs_call_source",
+      "label": "Call Source",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The source of the call to differentiate VoIP vs Video Conferencing Apps",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "VoIP",
+          "value": "VOIP",
+          "displayOrder": 1,
+          "hidden": false
+        },
+        {
+          "label": "Zoom",
+          "value": "ZOOM",
+          "displayOrder": 2,
+          "hidden": false
+        },
+        {
+          "label": "Integrations Platform",
+          "value": "INTEGRATIONS_PLATFORM",
+          "displayOrder": 3,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-09-29T15:20:49.674Z",
+      "createdAt": "2019-12-12T14:41:18.565Z",
+      "name": "hs_call_status",
+      "label": "Call status",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The status of the call",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "Busy",
+          "value": "BUSY",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Calling CRM User",
+          "value": "CALLING_CRM_USER",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Canceled",
+          "value": "CANCELED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Completed",
+          "value": "COMPLETED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Connecting",
+          "value": "CONNECTING",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Failed",
+          "value": "FAILED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "In Progress",
+          "value": "IN_PROGRESS",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Missed",
+          "value": "MISSED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "No Answer",
+          "value": "NO_ANSWER",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Queued",
+          "value": "QUEUED",
+          "displayOrder": -1,
+          "hidden": false
+        },
+        {
+          "label": "Ringing",
+          "value": "RINGING",
+          "displayOrder": -1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:35:30.457Z",
+      "createdAt": "2020-09-16T18:36:03.811Z",
+      "name": "hs_call_title",
+      "label": "Call Title",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The title of the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:35:45.786Z",
+      "createdAt": "2019-12-12T14:41:18.170Z",
+      "name": "hs_call_to_number",
+      "label": "To Number",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The phone number of the person that was called",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-11T14:25:20.037Z",
+      "createdAt": "2023-01-11T14:25:20.037Z",
+      "name": "hs_call_to_number_nickname",
+      "label": "To Number Name",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The name of the phone number that was called",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:36:01.110Z",
+      "createdAt": "2022-03-02T18:49:28.547Z",
+      "name": "hs_call_transcript_tracked_terms",
+      "label": "Tracked terms",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "A list of any tracked terms contained in the call transcript",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:36:16.422Z",
+      "createdAt": "2019-12-12T14:41:18.295Z",
+      "name": "hs_call_transcription_id",
+      "label": "Call transcription id",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The id of the transcription",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:36:31.739Z",
+      "createdAt": "2020-11-18T23:03:28.927Z",
+      "name": "hs_call_video_recording_url",
+      "label": "Video url",
+      "type": "string",
+      "fieldType": "text",
+      "description": "Video URL of the recording",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:36:47.080Z",
+      "createdAt": "2021-06-07T09:17:16.641Z",
+      "name": "hs_call_zoom_meeting_uuid",
+      "label": "Unique Zoom Meeting ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The Zoom meeting unique identifier of the call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:37:02.375Z",
+      "createdAt": "2021-01-19T18:41:00.173Z",
+      "name": "hs_calls_service_call_id",
+      "label": "Calls Service Call ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The Calls Service specific global unique identifier for a call",
+      "groupName": "call",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": true,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:37:17.664Z",
+      "createdAt": "2019-12-12T14:41:18.730Z",
+      "name": "hs_created_by",
+      "label": "Activity created by",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The user who created the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false,
+      "calculationFormula": "hs_created_by_user_id"
+    },
+    {
+      "name": "hs_created_by_user_id",
+      "label": "Created by user ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The user that created this object. This value is automatically set by HubSpot and may not be modified.",
+      "groupName": "callinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:37:32.994Z",
+      "createdAt": "2019-12-12T14:41:17.947Z",
+      "name": "hs_createdate",
+      "label": "Create date",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date that an engagement was created",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:37:48.182Z",
+      "createdAt": "2019-12-12T14:41:17.898Z",
+      "name": "hs_engagement_source",
+      "label": "Engagement Source",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The source that created this engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:38:03.476Z",
+      "createdAt": "2019-12-12T14:41:18.805Z",
+      "name": "hs_engagement_source_id",
+      "label": "Engagement Source ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The specific ID of the process that created this engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:38:18.791Z",
+      "createdAt": "2019-12-12T14:41:18.461Z",
+      "name": "hs_follow_up_action",
+      "label": "Follow up action",
+      "type": "string",
+      "fieldType": "text",
+      "description": "What action should be performed during follow up",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:38:34.105Z",
+      "createdAt": "2019-12-12T14:41:17.971Z",
+      "name": "hs_gdpr_deleted",
+      "label": "GDPR deleted",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Indicates the body of this engagement has been cleared because of a GDPR delete request",
+      "groupName": "engagement",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:38:49.430Z",
+      "createdAt": "2019-12-12T14:41:18.701Z",
+      "name": "hs_lastmodifieddate",
+      "label": "Last modified date",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date any property on this engagement was modified",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_merged_object_ids",
+      "label": "Merged object IDs",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The list of object IDs that have been merged into this object. This value is automatically set by HubSpot and may not be modified.",
+      "groupName": "callinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:39:04.635Z",
+      "createdAt": "2019-12-12T14:41:18.626Z",
+      "name": "hs_modified_by",
+      "label": "Updated by",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The user who last updated the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false,
+      "calculationFormula": "hs_updated_by_user_id"
+    },
+    {
+      "name": "hs_object_id",
+      "label": "Record ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The unique ID for this record. This value is automatically set by HubSpot and may not be modified.",
+      "groupName": "callinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:39:19.966Z",
+      "createdAt": "2019-12-12T14:41:18.651Z",
+      "name": "hs_product_name",
+      "label": "Product name",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The name of the product associated with this engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:39:35.297Z",
+      "createdAt": "2019-12-12T14:41:18.436Z",
+      "name": "hs_queue_membership_ids",
+      "label": "Queue Memberships",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The list of queues that contain this engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_read_only",
+      "label": "Read Only Object",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Is the object read only",
+      "groupName": "callinformation",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:39:50.599Z",
+      "createdAt": "2019-12-12T14:41:18.539Z",
+      "name": "hs_timestamp",
+      "label": "Activity date",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The date that an engagement occurred",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_unique_creation_key",
+      "label": "Unique creation key",
+      "type": "string",
+      "fieldType": "text",
+      "description": "Unique property used for idempotent creates",
+      "groupName": "callinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": true,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:40:05.917Z",
+      "createdAt": "2019-12-12T14:41:18.602Z",
+      "name": "hs_unique_id",
+      "label": "Unique ID",
+      "type": "string",
+      "fieldType": "text",
+      "description": "The unique ID of the engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": true,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2022-05-28T05:40:21.229Z",
+      "createdAt": "2019-12-12T14:41:18.381Z",
+      "name": "hs_unknown_visitor_conversation",
+      "label": "Unknown Visitor Conversation",
+      "type": "bool",
+      "fieldType": "booleancheckbox",
+      "description": "Whether or not this communication was made with an unknown visitor",
+      "groupName": "call",
+      "options": [
+        {
+          "label": "True",
+          "value": "true",
+          "displayOrder": 0,
+          "hidden": false
+        },
+        {
+          "label": "False",
+          "value": "false",
+          "displayOrder": 1,
+          "hidden": false
+        }
+      ],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_updated_by_user_id",
+      "label": "Updated by user ID",
+      "type": "number",
+      "fieldType": "number",
+      "description": "The user that last updated this object. This value is automatically set by HubSpot and may not be modified.",
+      "groupName": "callinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_user_ids_of_all_notification_followers",
+      "label": "User IDs of all notification followers",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The user IDs of all users that have clicked follow within the object to opt-in to getting follow notifications",
+      "groupName": "callinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_user_ids_of_all_notification_unfollowers",
+      "label": "User IDs of all notification unfollowers",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The user IDs of all object owners that have clicked unfollow within the object to opt-out of getting follow notifications",
+      "groupName": "callinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "name": "hs_user_ids_of_all_owners",
+      "label": "User IDs of all owners",
+      "type": "enumeration",
+      "fieldType": "checkbox",
+      "description": "The user IDs of all owners of this object",
+      "groupName": "callinformation",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-12-12T14:41:18.248Z",
+      "name": "hubspot_owner_assigneddate",
+      "label": "Owner Assigned Date",
+      "type": "datetime",
+      "fieldType": "date",
+      "description": "The timestamp when an owner was assigned to this engagement",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": -1,
+      "calculated": false,
+      "externalOptions": false,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-12-12T14:41:18.355Z",
+      "name": "hubspot_owner_id",
+      "label": "Activity assigned to",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The user that the activity is assigned to in HubSpot. This can be any HubSpot user or Salesforce integration user, and can be set manually or via Workflows.",
+      "groupName": "engagement",
+      "options": [],
+      "referencedObjectType": "OWNER",
+      "displayOrder": 6,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": false
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-12-12T14:41:18.138Z",
+      "name": "hubspot_team_id",
+      "label": "HubSpot Team",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The team of the owner of an engagement.",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": 7,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": false,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-12-12T14:41:18.115Z",
+      "name": "hs_all_owner_ids",
+      "label": "All owner ids",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The value of all owner referencing properties for this object, both default and custom",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": 8,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-12-12T14:41:17.921Z",
+      "name": "hs_all_team_ids",
+      "label": "All team ids",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The team ids corresponding to all owner referencing properties for this object, both default and custom",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": 9,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    },
+    {
+      "updatedAt": "2023-01-10T23:43:41.247Z",
+      "createdAt": "2019-12-12T14:41:18.091Z",
+      "name": "hs_all_accessible_team_ids",
+      "label": "All accessible team ids",
+      "type": "enumeration",
+      "fieldType": "select",
+      "description": "The team ids, including up the team hierarchy, corresponding to all owner referencing properties for this object, both default and custom",
+      "groupName": "engagement",
+      "options": [],
+      "displayOrder": 10,
+      "calculated": false,
+      "externalOptions": true,
+      "hasUniqueValue": false,
+      "hidden": true,
+      "hubspotDefined": true,
+      "modificationMetadata": {
+        "archivable": true,
+        "readOnlyDefinition": true,
+        "readOnlyValue": true
+      },
+      "formField": false
+    }
+  ]
+}

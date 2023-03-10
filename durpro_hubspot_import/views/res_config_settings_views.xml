@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <record id="durpro_hubspot_import_settings_view_form" model="ir.ui.view">
+        <field name="name">durpro.hubspot.import.settings.form</field>
+        <field name="model">res.config.settings</field>
+        <field name="priority" eval="15"/>
+        <field name="inherit_id" ref="base.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//div[hasclass('settings')]" position="inside">
+                <div class="app_settings_block" data-string="HubSpot Import" string="HubSpot Import"
+                     data-key="durpro_hubspot_import">
+                    <h2>HubSpot Import Settings</h2>
+                    <div class="row mt16 o_settings_container">
+                        <div class="col-12 col-lg-6 o_setting_box">
+                            <div class="o_setting_left_pane">
+                                <field name="app_key"></field>
+                            </div>
+                            <div class="o_setting_right_pane">
+                                <label class="o_form_label" for="app_key"/>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="action_durpro_hubspot_import_config" model="ir.actions.act_window">
+        <field name="name">Settings</field>
+        <field name="type">ir.actions.act_window</field>
+        <field name="res_model">res.config.settings</field>
+        <field name="view_id" ref="durpro_hubspot_import_settings_view_form"/>
+        <field name="view_mode">form</field>
+        <field name="target">inline</field>
+        <field name="context">{'module': 'durpro_hubspot_import'}</field>
+    </record>
+</odoo>
