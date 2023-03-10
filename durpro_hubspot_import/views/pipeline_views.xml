@@ -23,6 +23,28 @@
             </field>
         </record>
 
+        <record id="hubspot_pipeline_stage_tree" model="ir.ui.view">
+            <field name="name">durpro_hubspot_import.hubspot_pipeline_stage.tree</field>
+            <field name="model">durpro_hubspot_import.hubspot_pipeline_stage</field>
+            <field name="arch" type="xml">
+                <tree editable="bottom" create="false">
+                    <field name="hs_pipeline_id"/>
+                    <field name="label"/>
+                    <field name="helpdesk_stage"/>
+                </tree>
+            </field>
+        </record>
+
+        <record id="hubspot_pipeline_stage_search" model="ir.ui.view">
+            <field name="name">durpro_hubspot_import.hubspot_pipeline_stage.search</field>
+            <field name="model">durpro_hubspot_import.hubspot_pipeline_stage</field>
+            <field name="arch" type="xml">
+                <search>
+                    <field name="label"/>
+                </search>
+            </field>
+        </record>
+
         <record id="action_hubspot_pipelines" model="ir.actions.act_window">
             <field name="name">HubSpot Pipelines</field>
             <field name="type">ir.actions.act_window</field>
@@ -38,12 +60,33 @@
             <field name="view_id" ref="hubspot_pipeline_tree"/>
             <field name="act_window_id" ref="action_hubspot_pipelines"/>
         </record>
+        <record id="action_hubspot_pipeline_stages" model="ir.actions.act_window">
+            <field name="name">HubSpot Pipeline Stages</field>
+            <field name="type">ir.actions.act_window</field>
+            <field name="res_model">durpro_hubspot_import.hubspot_pipeline_stage</field>
+            <field name="view_mode">tree</field>
+            <field name="context">{}</field>
+            <field name="search_view_id" ref="hubspot_pipeline_stage_search"/>
+        </record>
+
+        <record id="action_view_hubspot_pipeline_stages_tree" model="ir.actions.act_window.view">
+            <field name="sequence" eval="1"/>
+            <field name="view_mode">tree</field>
+            <field name="view_id" ref="hubspot_pipeline_stage_tree"/>
+            <field name="act_window_id" ref="action_hubspot_pipeline_stages"/>
+        </record>
 
         <menuitem id="hubspot_pipelines"
                   name="Pipelines"
                   sequence="11"
                   parent="durpro_hubspot_import_menu_root"
                   action="action_hubspot_pipelines"
+                  groups="base.group_system"/>
+        <menuitem id="hubspot_pipeline_stages"
+                  name="Pipeline Stages"
+                  sequence="12"
+                  parent="durpro_hubspot_import_menu_root"
+                  action="action_hubspot_pipeline_stages"
                   groups="base.group_system"/>
     </data>
 </odoo>

@@ -51,6 +51,8 @@ class HubSpotTicket(models.Model):
     pipeline_stage = fields.Many2one("durpro_hubspot_import.hubspot_pipeline_stage", compute="_compute_pipeline",
                                      store=True)
 
+    user_id = fields.Many2one("res.users", compute="_compute_owner", store=True)
+
     @api.model
     def import_associated_contacts(self):
         self.import_associations('ticket', 'contact', 'associated_contacts')
@@ -86,7 +88,12 @@ class HubSpotTicket(models.Model):
 
     @api.depends('hubspot_owner_id')
     def _compute_owner(self):
+        owners = self.env['durpro_hubspot_import.hubspot_owner'].search(
+            [('hs_id', 'in', self.mapped("hubspot_owner_id"))])
+        owners_dict = {o.hs_id: o for o in owners}
+        users_dict = {u.email: u for u in self.env['res.users'].search([('email', 'in', owners.mapped("email"))])}
         for rec in self:
-            if rec.hubspot_owner_id:
-                owner = self.env['durpro_hubspot_import.hubspot_owner'].search([('hs_id', '=', rec.hubspot_owner_id)])
-                self.associated_owner = owner if owner else None
+            rec.associated_owner = owners_dict[rec.hubspot_owner_id] if rec.hubspot_owner_id in owners_dict else False
+            if rec.associated_owner and rec.associated_owner.email:
+                rec.user_id = users_dict[
+                    rec.associated_owner.email] if rec.associated_owner.email in users_dict else False

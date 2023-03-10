@@ -1,11 +1,5 @@
-import time
-
 from odoo import models, fields, api, _
-from hubspot import HubSpot
-from collections import deque
-from .. import constants
-
-import json
+import time
 
 
 class HubSpotImportWizard(models.TransientModel):
@@ -52,6 +46,17 @@ class HubSpotImportWizard(models.TransientModel):
             tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search([], offset=offset, limit=page_size)
             for ticket in tickets:
                 # Create a ticket in the right pipeline
+                hd_ticket = self.env['helpdesk.ticket'].create({
+                    'name': ticket.subject,
+                    'description': ticket.content,
+                    'create_date': time.strptime(ticket.createdate, "%Y-%m-%dT%H:%M:%S.%fZ"),
+                    'team_id': ticket.pipeline.helpdesk_team_id.id,
+                    'user_id': ticket.user_id.id if ticket.user_id else False,
+                    'partner_id': ticket.associated_contacts[
+                        0].odoo_contact.id if ticket.associated_contacts else False,
+
+                })
+
                 # For each associated mail message
 
                 # mail.mail objects, subtype of mail.message.
@@ -63,7 +68,6 @@ class HubSpotImportWizard(models.TransientModel):
                     self.env['mail.mail'].create({
 
                     })
-
 
     # def action_get_ticket_associations(self):
     #     tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search()

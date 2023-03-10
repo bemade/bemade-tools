@@ -55,7 +55,7 @@ class HubSpotPipeline(models.Model):
     def name_get(self):
         result = []
         for rec in self:
-            result.append(rec.label)
+            result.append((rec.id, rec.label))
         return result
 
 
@@ -70,8 +70,11 @@ class HubSpotPipelineStage(models.Model):
     hs_archived = fields.Boolean(string="HS is archived", default=False)
     ticket_state = fields.Char(string="HS Ticket State")
 
+    helpdesk_stage = fields.Many2one("helpdesk.stage", string="Odoo Helpdesk Stage")
+
+    @api.depends("label")
     def name_get(self):
         result = []
         for rec in self:
-            result.append(rec.label)
+            result.append((rec.id, rec.label))
         return result
