@@ -13,3 +13,5 @@ class HubSpotNote(models.Model):
     hs_created_by = fields.Char("HS Created By", compute="_extract_hs_fields", store=True)
     hs_created_date = fields.Char("HS Created Date", compute="_extract_hs_fields", store=True)
     hs_note_body = fields.Char("HS Note Body", compute="_extract_hs_fields", store=True)
+
+    hs_attachment_ids = fields.Char("HS Attachment IDs", compute="_extract_hs_fields", store=True)

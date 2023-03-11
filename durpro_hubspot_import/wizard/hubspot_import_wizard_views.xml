@@ -33,6 +33,8 @@
                                 name="action_associate_tickets_with_emails" type="object"/>
                         <button string="Associate Tickets to Notes" class="btn btn-primary"
                                 name="action_associate_tickets_with_notes" type="object"/>
+                        <button string="Get Attachments" class="btn btn-primary"
+                                name="action_get_attachments" type="object"/>
                     </group>
                     <group col="12">
                         <button string="Create Odoo Tickets from Imported Data" class="btn btn-primary"

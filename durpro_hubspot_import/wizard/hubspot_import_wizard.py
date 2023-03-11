@@ -40,6 +40,25 @@ class HubSpotImportWizard(models.TransientModel):
     def action_associate_tickets_with_notes(self):
         self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_notes()
 
+    def action_get_attachments(self):
+        """Get attachments for any loaded HubSpotNotes and HubSpotEmails. There is no "get_all" method for files."""
+        domain = [('hs_attachment_ids', '!=', False)]
+        notes_count = self.env['durpro_hubspot_import.hubspot_note'].search_count(domain)
+        emails_count = self.env['durpro_hubspot_import.hubspot_email'].search_count(domain)
+        page_size = 100
+        for offset in range(0, notes_count, page_size):
+            notes = self.env['durpro_hubspot_import.hubspot_note'].search(domain, offset=offset, limit=page_size)
+            for note in notes:
+                for file_id in str.split(note.hs_attachment_ids):
+                    f = self.env['durpro_hubspot_import.hubspot_attachment'].import_one(file_id)
+                    raw = f.get_data()
+                    filename = f.name or "" + f.extension or ""
+                    attachment = self.env['ir.attachment'].create({
+                        'name': filename,
+                        'raw': raw,
+                        'res_model': note._name,
+                    })
+        for offset in range(0, emails_count, page_size):
     def action_create_odoo_tickets(self):
         page_size = 1000
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count([])
