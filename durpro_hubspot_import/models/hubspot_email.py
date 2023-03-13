@@ -27,6 +27,8 @@ class HubSpotEmail(models.Model):
 
     owner = fields.Many2one("durpro_hubspot_import.hubspot_owner", string="HubSpot Owner", compute="_compute_owner",
                             store=True)
+    author = fields.Many2one("res.partner", string="Message Author", compute="_compute_sender_recipients")
+    recipients = fields.Many2many("res.partner", string="Message Recipients", compute="_compute_sender_recipients")
 
     @api.depends('hubspot_owner_id')
     def _compute_owner(self):
@@ -34,3 +36,19 @@ class HubSpotEmail(models.Model):
             if not rec.hubspot_owner_id:
                 continue
             rec.owner = self.env['durpro_hubspot_import.hubspot_owner'].search('hs_id', '=', rec.hubspot_owner_id)
+
+    @api.depends("hs_email_from_email", "hs_email_cc_email", "hs_email_to_email")
+    def _compute_sender_recipients(self):
+        for rec in self:
+            recipients = []
+            if rec.hs_email_to_email:
+                recipients.append(str.split(rec.hs_email_to_email, ";"))
+            if rec.hs_email_cc_email:
+                recipients.append(str.split(rec.hs_email_cc_email, ";"))
+            partners = self.env['res.partner'].search([('email', 'in', recipients)])
+            authors = self.env['res.partner'].search([('email', '=like', rec.hs_email_from_email)])
+            rec.author = authors[0] if authors else False
+            if partners:
+                rec.write({'recipients': fields.Command.set([p.id for p in partners])})
+            else:
+                rec.recipients = False

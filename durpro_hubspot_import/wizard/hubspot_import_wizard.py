@@ -2,7 +2,6 @@ from odoo import models, fields, api, _
 import time
 
 
-
 class HubSpotImportWizard(models.TransientModel):
     _name = "durpro_hubspot_import.hubspot_import_wizard"
     _description = 'Allows for the importation of HubSpot data into Odoo Helpdesk Tickets (and associations)'
@@ -53,12 +52,25 @@ class HubSpotImportWizard(models.TransientModel):
                     f = self.env['durpro_hubspot_import.hubspot_attachment'].import_one(file_id)
                     raw = f.get_data()
                     filename = f.name or "" + f.extension or ""
-                    attachment = self.env['ir.attachment'].create({
+                    self.env['ir.attachment'].create({
                         'name': filename,
                         'raw': raw,
                         'res_model': note._name,
                     })
         for offset in range(0, emails_count, page_size):
+            emails = self.env['durpro_hubspot_import.hubspot_email'].search(domain, offset=offset, limit=page_size)
+            for email in emails:
+                for file_id in str.split(email.hs_attachment_ids):
+                    f = self.env['durpro_hubspot_import.hubspot_attachment'].import_one(file_id)
+                    raw = f.get_data()
+                    filename = f.name or "" + f.extension or ""
+                    self.env['ir.attachment'].create({
+                        'name': filename,
+                        'raw': raw,
+                        'res_model': note._name,
+                    })
+
+
     def action_create_odoo_tickets(self):
         page_size = 1000
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count([])
@@ -89,34 +101,60 @@ class HubSpotImportWizard(models.TransientModel):
                 })
 
                 # For each associated mail message
-
+                # TODO: Clean this up with better code reuse, maybe in a mixin class or just a function
                 for note in ticket.associated_notes:
                     # Start by creating the attachments, then we'll link them up appropriately later
                     # We let ir.attachment guess the mimetype since HubSpot's file type field is non-MIME
                     attachments = []
                     if note.hs_attachment_ids:
+                        try:
+                            create_date = time.strptime(note.create_date, "%Y-%m-%dT%H:%M:%S[.%f]Z")
+                        except ValueError:
+                            try:
+                                create_date = time.strptime(note.create_date, "%Y-%m-%dT%H:%M:%SZ")
+                            except ValueError:
+                                create_date = False
                         for attachment in note.hs_attachment_ids:
-                            ir_att : self.env['ir.attachment'].create({
+                            ir_att = self.env['ir.attachment'].create({
                                 'name': attachment.get_filename(),
                                 'type': 'binary',
                                 'public': False,
                                 'raw': attachment.get_data(),
                                 'create_date': attachment.created_at,
                             })
-                            attachments.append(attachment)
+                            attachments.append(ir_att)
                         hd_ticket.message_post(body=note.hs_note_body,
                                                message_type='comment',
-                                               author_id=note.owner.user_id.odoo_user,
-                                               attachment_ids=attachments.ids,
+                                               author_id=note.owner.user_id.odoo_user or False,
+                                               attachment_ids=[a.id for a in attachments],
+                                               date=create_date,
                                                )
 
-
-                # mail.mail objects, subtype of mail.message.
-                # fields: subject (char), date (datetime), body (html), attachment_ids(Many2many->ir.attachment via message_attachment_rel ),
-                #   parent_id (Many2one -> mail.message), child_ids, model (char, related doc model), res_id,
-                #   email_from, author_id (Many2one -> res.partner), partner_ids (Many2many, recipients),
-                #   state -> selection("sent", "received")
-                # for hs_email in ticket.associated_emails:
-                #     self.env['mail.mail'].create({
-                #
-                #     })
+                for email in ticket.associated_emails:
+                    attachments = []
+                    if email.hs_attachment_ids:
+                        try:
+                            create_date = time.strptime(email.create_date, "%Y-%m-%dT%H:%M:%S[.%f]Z")
+                        except ValueError:
+                            try:
+                                create_date = time.strptime(email.create_date, "%Y-%m-%dT%H:%M:%SZ")
+                            except ValueError:
+                                create_date = False
+                        for attachment in note.hs_attachment_ids:
+                            ir_att = self.env['ir.attachment'].create({
+                                'name': attachment.get_filename(),
+                                'type': 'binary',
+                                'public': False,
+                                'raw': attachment.get_data(),
+                                'create_date': attachment.created_at,
+                            })
+                            attachments.append(ir_att)
+                        hd_ticket.message_post(subject=email.hs_email_subject,
+                                               body=email.hs_email_html or email.hs_email_text,
+                                               message_type='email',
+                                               author_id=email.author or False,
+                                               email_from=email.hs_email_from_email if not email.author else False,
+                                               partner_ids=email.recipients.ids,
+                                               attachment_ids=[a.id for a in attachments],
+                                               date=create_date,
+                                               )

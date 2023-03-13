@@ -35,4 +35,4 @@ class ModelName(models.Model):
         for rec in self:
             if not rec.email:
                 continue
-            rec.odoo_user = self.env['res.users'].search('email', '=ilike', rec.email)
+            rec.odoo_user = self.env['res.users'].search([('email', '=ilike', rec.email)])
