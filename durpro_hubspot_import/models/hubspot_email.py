@@ -35,7 +35,7 @@ class HubSpotEmail(models.Model):
         for rec in self:
             if not rec.hubspot_owner_id:
                 continue
-            rec.owner = self.env['durpro_hubspot_import.hubspot_owner'].search('hs_id', '=', rec.hubspot_owner_id)
+            rec.owner = self.env['durpro_hubspot_import.hubspot_owner'].search([('hs_id', '=', rec.hubspot_owner_id)])
 
     @api.depends("hs_email_from_email", "hs_email_cc_email", "hs_email_to_email")
     def _compute_sender_recipients(self):

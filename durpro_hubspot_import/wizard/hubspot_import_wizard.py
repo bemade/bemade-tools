@@ -70,15 +70,14 @@ class HubSpotImportWizard(models.TransientModel):
                         'res_model': note._name,
                     })
 
-
     def action_create_odoo_tickets(self):
         page_size = 1000
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count([])
         for offset in range(0, no_tickets, page_size):
             # Only work on tickets that have a configured pipeline and stage to which to transfer
-            tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search([], offset=offset,
-                                                                              limit=page_size).filtered(lambda r: (
-                (r.pipeline and r.pipeline.helpdesk_team_id and r.pipeline_stage and r.pipeline_stage.helpdesk_stage)))
+            tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search([],
+                                                                              offset=offset, limit=page_size).filtered(
+                lambda r: r.pipeline and r.pipeline.helpdesk_team_id and r.pipeline_stage and r.pipeline_stage.helpdesk_stage)
             for ticket in tickets:
                 # Create a ticket in the right pipeline
                 try:

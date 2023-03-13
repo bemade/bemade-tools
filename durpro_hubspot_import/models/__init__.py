@@ -7,3 +7,4 @@ from . import hubspot_pipeline
 from . import hubspot_email
 from . import hubspot_note
 from . import hubspot_owner
+from . import hubspot_attachment

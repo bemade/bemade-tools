@@ -23,6 +23,7 @@ class ModelName(models.Model):
         recs = self._api_client().crm.owners.get_all()
         properties = self.get_hs_properties_list()
         properties.remove('contents')
+        properties.remove('odoo_user')
         for rec in recs:
             self.env[self._name].create(
                 {field: getattr(rec, field.replace('hs_id', 'id')) for field in properties})
