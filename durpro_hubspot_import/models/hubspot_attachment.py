@@ -37,3 +37,7 @@ class HubSpotAttachment(models.Model):
                                                                              expiration_seconds=60).to_dict()
         r = requests.get(signed_url['url'], allow_redirects=True)
         return r.content
+    @api.depends('name', 'extension')
+    def get_filename(self):
+        self.ensure_one()
+        return self.name or "" + self.extension or ""

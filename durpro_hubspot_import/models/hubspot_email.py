@@ -23,4 +23,14 @@ class HubSpotEmail(models.Model):
     # attachment ids are semicolon separated
     hs_attachment_ids = fields.Char(string="HS Email Attachments", compute="_extract_hs_fields", store=True)
     hs_email_to_email = fields.Char(string="HS Email To Email", compute="_extract_hs_fields", store=True)
+    hubspot_owner_id = fields.Char(string="HS Owner ID", compute="_extract_hs_fields", store=True)
 
+    owner = fields.Many2one("durpro_hubspot_import.hubspot_owner", string="HubSpot Owner", compute="_compute_owner",
+                            store=True)
+
+    @api.depends('hubspot_owner_id')
+    def _compute_owner(self):
+        for rec in self:
+            if not rec.hubspot_owner_id:
+                continue
+            rec.owner = self.env['durpro_hubspot_import.hubspot_owner'].search('hs_id', '=', rec.hubspot_owner_id)

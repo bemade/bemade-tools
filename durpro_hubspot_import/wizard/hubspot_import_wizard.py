@@ -90,6 +90,27 @@ class HubSpotImportWizard(models.TransientModel):
 
                 # For each associated mail message
 
+                for note in ticket.associated_notes:
+                    # Start by creating the attachments, then we'll link them up appropriately later
+                    # We let ir.attachment guess the mimetype since HubSpot's file type field is non-MIME
+                    attachments = []
+                    if note.hs_attachment_ids:
+                        for attachment in note.hs_attachment_ids:
+                            ir_att : self.env['ir.attachment'].create({
+                                'name': attachment.get_filename(),
+                                'type': 'binary',
+                                'public': False,
+                                'raw': attachment.get_data(),
+                                'create_date': attachment.created_at,
+                            })
+                            attachments.append(attachment)
+                        hd_ticket.message_post(body=note.hs_note_body,
+                                               message_type='comment',
+                                               author_id=note.owner.user_id.odoo_user,
+                                               attachment_ids=attachments.ids,
+                                               )
+
+
                 # mail.mail objects, subtype of mail.message.
                 # fields: subject (char), date (datetime), body (html), attachment_ids(Many2many->ir.attachment via message_attachment_rel ),
                 #   parent_id (Many2one -> mail.message), child_ids, model (char, related doc model), res_id,
