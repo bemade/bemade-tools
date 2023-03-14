@@ -1,7 +1,8 @@
 from odoo import models, fields, api, _
 import requests
 import json
-
+import logging
+from hubspot.files.files.exceptions import ApiException
 
 class HubSpotAttachment(models.Model):
     _inherit = "durpro_hubspot_import.hubspot_model"
@@ -25,7 +26,10 @@ class HubSpotAttachment(models.Model):
     @api.model
     def import_one(self, file_id):
         """Imports the file metadata from HubSpot and returns the created HubSpotAttachment record."""
-        file_metadata = self._api_client().files.files.files_api.get_by_id(file_id=file_id).to_dict()
+        try:
+            file_metadata = self._api_client().files.files.files_api.get_by_id(file_id=file_id).to_dict()
+        except ApiException:
+            return False
         contents = json.dumps(file_metadata, default=str)
         r = self.env[self._name].create({'contents': contents})
         return r

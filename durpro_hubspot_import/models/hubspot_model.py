@@ -28,7 +28,10 @@ class HubSpotModel(models.AbstractModel):
         fields = self.get_hs_properties_list()
         for rec in self:
             hs_model = json.loads(rec.contents)
-            properties = hs_model['properties']
+            if 'properties' in hs_model:
+                properties = hs_model['properties']
+            else:
+                properties = hs_model
             to_write = {}
             for field in fields:
                 if field == 'contents':

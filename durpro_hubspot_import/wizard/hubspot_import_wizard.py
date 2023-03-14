@@ -42,32 +42,42 @@ class HubSpotImportWizard(models.TransientModel):
     def action_get_attachments(self):
         """Get attachments for any loaded HubSpotNotes and HubSpotEmails. There is no "get_all" method for files."""
         domain = [('hs_attachment_ids', '!=', False)]
-        notes_count = self.env['durpro_hubspot_import.hubspot_note'].search_count(domain)
-        emails_count = self.env['durpro_hubspot_import.hubspot_email'].search_count(domain)
+        # notes_count = self.env['durpro_hubspot_import.hubspot_note'].search_count(domain)
+        # emails_count = self.env['durpro_hubspot_import.hubspot_email'].search_count(domain)
         page_size = 100
+        notes_count = 1000
+        emails_count = 1000
+
         for offset in range(0, notes_count, page_size):
             notes = self.env['durpro_hubspot_import.hubspot_note'].search(domain, offset=offset, limit=page_size)
             for note in notes:
                 for file_id in str.split(note.hs_attachment_ids):
                     f = self.env['durpro_hubspot_import.hubspot_attachment'].import_one(file_id)
+                    # f is False if the file is not found on HubSpot servers
+                    if not f:
+                        continue
                     raw = f.get_data()
                     filename = f.name or "" + f.extension or ""
                     self.env['ir.attachment'].create({
                         'name': filename,
                         'raw': raw,
                         'res_model': note._name,
+                        'res_id': note.id,
                     })
         for offset in range(0, emails_count, page_size):
             emails = self.env['durpro_hubspot_import.hubspot_email'].search(domain, offset=offset, limit=page_size)
             for email in emails:
                 for file_id in str.split(email.hs_attachment_ids):
                     f = self.env['durpro_hubspot_import.hubspot_attachment'].import_one(file_id)
+                    if not f:
+                        continue
                     raw = f.get_data()
                     filename = f.name or "" + f.extension or ""
                     self.env['ir.attachment'].create({
                         'name': filename,
                         'raw': raw,
-                        'res_model': note._name,
+                        'res_model': email._name,
+                        'res_id': note.id,
                     })
 
     def action_create_odoo_tickets(self):

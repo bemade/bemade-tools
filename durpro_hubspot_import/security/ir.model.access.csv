@@ -8,3 +8,4 @@
 "access_hubspot_import_hubspot_email","access.hubspot.import.hubspot.email","model_durpro_hubspot_import_hubspot_email","base.group_system",1,1,1,1
 "access_hubspot_import_hubspot_note","access.hubspot.import.hubspot.note","model_durpro_hubspot_import_hubspot_note","base.group_system",1,1,1,1
 "access_hubspot_import_hubspot_owner","access.hubspot.import.hubspot.owner","model_durpro_hubspot_import_hubspot_owner","base.group_system",1,1,1,1
+"access_hubspot_import_hubspot_attachment","access.hubspot.import.hubspot.attachment","model_durpro_hubspot_import_hubspot_attachment","base.group_system",1,1,1,1
