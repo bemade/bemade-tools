@@ -109,7 +109,7 @@ class HubSpotImportWizard(models.TransientModel):
                 create_date = time.strftime('%Y-%m-%d %H:%M:%S', hs_time) if hs_time else False
                 hd_ticket = self.env['helpdesk.ticket'].create({
                     'name': ticket.subject or ticket.content or "No Subject",
-                    'description': ticket.content,
+                    'description': plaintext2html(ticket.content),
                     'create_date': create_date,
                     'team_id': ticket.pipeline.helpdesk_team_id.id,
                     'stage_id': ticket.pipeline_stage.helpdesk_stage.id,
