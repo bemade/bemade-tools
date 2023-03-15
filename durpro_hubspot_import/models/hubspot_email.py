@@ -52,3 +52,19 @@ class HubSpotEmail(models.Model):
                 rec.write({'recipients': fields.Command.set([p.id for p in partners])})
             else:
                 rec.recipients = False
+
+    @api.model
+    def _extract_hs_fields(self):
+        """
+        Overload to wrap HTML snippets with html and body tags where necessary. HubSpot is inconsistent in its HTML
+        contents for emails.
+        :return: None
+        """
+        super()._extract_hs_fields()
+        for rec in self:
+            if rec.hs_email_html and "<html>" not in rec.hs_email_html:
+                if "<body>" not in rec.hs_email_html:
+                    rec.hs_email_html = "<body>" + rec.hs_email_html + "</body>"
+                rec.hs_email_html = "<html>" + rec.hs_email_html + "</html>"
+
+

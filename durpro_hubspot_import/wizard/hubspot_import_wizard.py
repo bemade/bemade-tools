@@ -1,5 +1,7 @@
 from odoo import models, fields, api, _
 import time
+from odoo.tools.mail import plaintext2html
+from lxml import etree
 
 
 class HubSpotImportWizard(models.TransientModel):
@@ -87,6 +89,12 @@ class HubSpotImportWizard(models.TransientModel):
             self.env.cr.commit()
 
     def action_create_odoo_tickets(self):
+        # temporarily deactivate notifications
+        subtype = self.env['mail.message.subtype'].search(
+            [('res_model', '=', 'helpdesk.team'), ('relation_field', '=', 'team_id'), ('name', '=', 'Ticket Created')])
+        if subtype:
+            subtype_default_initial = subtype.default
+            subtype.default = False
         page_size = 1000
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count([])
         for offset in range(0, no_tickets, page_size):
@@ -97,10 +105,12 @@ class HubSpotImportWizard(models.TransientModel):
                     r: r.pipeline and r.pipeline.helpdesk_team_id and r.pipeline_stage and r.pipeline_stage.helpdesk_stage)
             for ticket in tickets:
                 # Create a ticket in the right pipeline
+                hs_time = ticket.hs_time_to_time(ticket.createdate) if ticket.createdate else False
+                create_date = time.strftime('%Y-%m-%d %H:%M:%S', hs_time) if hs_time else False
                 hd_ticket = self.env['helpdesk.ticket'].create({
                     'name': ticket.subject or ticket.content or "No Subject",
                     'description': ticket.content,
-                    'create_date': ticket.create_date,
+                    'create_date': create_date,
                     'team_id': ticket.pipeline.helpdesk_team_id.id,
                     'stage_id': ticket.pipeline_stage.helpdesk_stage.id,
                     'user_id': ticket.user_id.id if ticket.user_id else False,
@@ -115,13 +125,14 @@ class HubSpotImportWizard(models.TransientModel):
                     # We let ir.attachment guess the mimetype since HubSpot's file type field is non-MIME
                     attachments = self.env['ir.attachment'].search(
                         [('res_model', '=', 'durpro_hubspot_import.hubspot_note'),
-                         ('res_id', 'in', ticket.associated_emails)])
-                    create_date = note.hs_time_to_time(note.create_date)
-                    message = hd_ticket.message_post(body=note.hs_note_body,
-                                                     message_type='comment',
-                                                     author_id=note.owner.user_id.odoo_user or False,
-                                                     attachment_ids=attachments.ids,
-                                                     date=create_date, )
+                         ('res_id', 'in', [n.id for n in ticket.associated_notes])])
+                    hs_time = note.hs_time_to_time(note.hs_created_date) if note.hs_created_date else False
+                    create_date = time.strftime('%Y-%m-%d %H:%M:%S', hs_time) if hs_time else False
+                    message = hd_ticket.sudo().message_post(body=note.hs_note_body,
+                                                            message_type='comment',
+                                                            author_id=note.author.id if note.author else False,
+                                                            attachment_ids=attachments.ids,
+                                                            date=create_date, )
                     attachments.write({
                         'res_model': message._name,
                         'res_id': message.id,
@@ -130,17 +141,25 @@ class HubSpotImportWizard(models.TransientModel):
                 for email in ticket.associated_emails:
                     attachments = self.env['ir.attachment'].search(
                         [('res_model', '=', 'durpro_hubspot_import.hubspot_email'),
-                         ('res_id', 'in', ticket.associated_emails)])
-                    create_date = email.hs_time_to_time(email.create_date)
-                    message = hd_ticket.message_post(subject=email.hs_email_subject,
-                                                     body=email.hs_email_html or email.hs_email_text,
-                                                     message_type='email',
-                                                     author_id=email.author or False,
-                                                     email_from=email.hs_email_from_email if not email.author else False,
-                                                     partner_ids=email.recipients.ids,
-                                                     attachment_ids=attachments.ids,
-                                                     date=create_date,
-                                                     )
+                         ('res_id', 'in', [e.id for e in ticket.associated_emails])])
+                    hs_time = email.hs_time_to_time(email.hs_createdate) if email.hs_createdate else False
+                    create_date = time.strftime('%Y-%m-%d %H:%M:%S', hs_time) if hs_time else False
+                    body = email.hs_email_html or plaintext2html(email.hs_email_text) or plaintext2html("")
+                    tree = etree.fromstring(body, parser=etree.HTMLParser())
+                    if not tree:
+                        body = plaintext2html(email.hs_email_text) or plaintext2html("")
+                        tree = etree.fromstring(body, parser=etree.HTMLParser())
+                        if not tree:
+                            body = ""
+                    message = hd_ticket.sudo().message_post(subject=email.hs_email_subject or "",
+                                                            body=body,
+                                                            message_type='email',
+                                                            author_id=email.author.id if email.author else False,
+                                                            email_from=email.hs_email_from_email if not email.author else False,
+                                                            partner_ids=email.recipients.ids,
+                                                            attachment_ids=attachments.ids,
+                                                            date=create_date,
+                                                            )
                     attachments.write({
                         'res_model': message._name,
                         'res_id': message.id,
@@ -148,3 +167,5 @@ class HubSpotImportWizard(models.TransientModel):
             self.env['ir.attachment'].flush()
             self.env['mail.message'].flush()
             self.env.cr.commit()
+        if subtype:
+            subtype.default = subtype_default_initial

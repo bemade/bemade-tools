@@ -99,10 +99,7 @@ class HubSpotModel(models.AbstractModel):
                     [(rs_to.hubspot_id_field, 'in', [r['id'] for r in rec['to']])])
                 if not from_rec or not rs_to:
                     continue
-                if from_rec not in associations:
-                    associations |= {from_rec: [r for r in rs_to]}
-                else:
-                    associations[from_rec].add(rs_to)
+                associations.setdefault(from_rec, []).extend([r for r in rs_to])
         for from_rec, to_recs in associations.items():
             from_rec.write({association_field: [(6, 0, [r.id for r in to_recs])]})
 
