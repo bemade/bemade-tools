@@ -40,45 +40,51 @@ class HubSpotImportWizard(models.TransientModel):
         self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_notes()
 
     def action_get_attachments(self):
-        """Get attachments for any loaded HubSpotNotes and HubSpotEmails. There is no "get_all" method for files."""
-        domain = [('hs_attachment_ids', '!=', False)]
-        # notes_count = self.env['durpro_hubspot_import.hubspot_note'].search_count(domain)
-        # emails_count = self.env['durpro_hubspot_import.hubspot_email'].search_count(domain)
-        page_size = 100
-        notes_count = 1000
-        emails_count = 1000
+        """Get attachments for any loaded HubSpotNotes and HubSpotEmails. There is no "get_all" method for files.
+        Note that this function will not re-fetch attachments for notes and emails that already have ir_attachments
+        related to them."""
+        self._get_attachments('durpro_hubspot_import.hubspot_note')
+        self._get_attachments('durpro_hubspot_import.hubspot_email')
 
-        for offset in range(0, notes_count, page_size):
-            notes = self.env['durpro_hubspot_import.hubspot_note'].search(domain, offset=offset, limit=page_size)
-            for note in notes:
-                for file_id in str.split(note.hs_attachment_ids):
-                    f = self.env['durpro_hubspot_import.hubspot_attachment'].import_one(file_id)
+    def _get_attachments(self, res_model: str):
+        """
+        Loads the attachments for all the records of type res_model. Records with existing ir_attachments are
+        ignored as this is meant to be run as a one-time import.
+
+        :param res_model: The addressable model name in form module.model_name for which to fetch attachments.
+            The model passed is expected to have a field hs_attachment_ids representing the file IDs of the associated
+            attachments, semicolon separated.
+        :return: None
+        """
+        page_size = 100
+        already_loaded_recs = self.env['ir.attachment'].search([('res_model', '=', res_model)])
+        domain = [('hs_attachment_ids', '!=', False), ('id', 'not in', already_loaded_recs.res_ids)]
+        record_count = self.env[res_model].search_count(domain)
+        call_count = 0
+        start_time = time.time()
+
+        for offset in range(0, record_count, page_size):
+            recs = self.env[res_model].search(domain, offset=offset, limit=page_size)
+            for rec in recs:
+                for file_id in str.split(rec.hs_attachment_ids):
+                    f = self.env['durpro_hubspot_import.hubspot_attachment'].import_one(file_id)  # one API call
                     # f is False if the file is not found on HubSpot servers
                     if not f:
                         continue
-                    raw = f.get_data()
+                    raw = f.get_data()  # one API call
                     filename = f.name or "" + f.extension or ""
                     self.env['ir.attachment'].create({
                         'name': filename,
                         'raw': raw,
-                        'res_model': note._name,
-                        'res_id': note.id,
+                        'res_model': res_model,
+                        'res_id': rec.id,
                     })
-        for offset in range(0, emails_count, page_size):
-            emails = self.env['durpro_hubspot_import.hubspot_email'].search(domain, offset=offset, limit=page_size)
-            for email in emails:
-                for file_id in str.split(email.hs_attachment_ids):
-                    f = self.env['durpro_hubspot_import.hubspot_attachment'].import_one(file_id)
-                    if not f:
-                        continue
-                    raw = f.get_data()
-                    filename = f.name or "" + f.extension or ""
-                    self.env['ir.attachment'].create({
-                        'name': filename,
-                        'raw': raw,
-                        'res_model': email._name,
-                        'res_id': note.id,
-                    })
+                    if call_count == 4:
+                        time.sleep(time.time() - start_time)
+                        start_time = time.time()
+                    call_count = (call_count + 1) % 5
+            self.env['ir.attachment'].flush()
+            self.env.cr.commit()
 
     def action_create_odoo_tickets(self):
         page_size = 1000
@@ -87,20 +93,14 @@ class HubSpotImportWizard(models.TransientModel):
             # Only work on tickets that have a configured pipeline and stage to which to transfer
             tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search([],
                                                                               offset=offset, limit=page_size).filtered(
-                lambda r: r.pipeline and r.pipeline.helpdesk_team_id and r.pipeline_stage and r.pipeline_stage.helpdesk_stage)
+                lambda
+                    r: r.pipeline and r.pipeline.helpdesk_team_id and r.pipeline_stage and r.pipeline_stage.helpdesk_stage)
             for ticket in tickets:
                 # Create a ticket in the right pipeline
-                try:
-                    create_date = time.strptime(ticket.create_date, "%Y-%m-%dT%H:%M:%S[.%f]Z")
-                except:
-                    try:
-                        create_date = time.strptime(ticket.create_date, "%Y-%m-%dT%H:%M:%SZ")
-                    except:
-                        create_date = False
                 hd_ticket = self.env['helpdesk.ticket'].create({
                     'name': ticket.subject or ticket.content or "No Subject",
                     'description': ticket.content,
-                    'create_date': create_date,
+                    'create_date': ticket.create_date,
                     'team_id': ticket.pipeline.helpdesk_team_id.id,
                     'stage_id': ticket.pipeline_stage.helpdesk_stage.id,
                     'user_id': ticket.user_id.id if ticket.user_id else False,
@@ -109,61 +109,42 @@ class HubSpotImportWizard(models.TransientModel):
                     'hubspot_ticket_id': ticket.id,
                 })
 
-                # For each associated mail message
-                # TODO: Clean this up with better code reuse, maybe in a mixin class or just a function
+                # Add the notes and emails to the chatter with their attachments
                 for note in ticket.associated_notes:
                     # Start by creating the attachments, then we'll link them up appropriately later
                     # We let ir.attachment guess the mimetype since HubSpot's file type field is non-MIME
-                    attachments = []
-                    if note.hs_attachment_ids:
-                        try:
-                            create_date = time.strptime(note.create_date, "%Y-%m-%dT%H:%M:%S[.%f]Z")
-                        except ValueError:
-                            try:
-                                create_date = time.strptime(note.create_date, "%Y-%m-%dT%H:%M:%SZ")
-                            except ValueError:
-                                create_date = False
-                        for attachment in note.hs_attachment_ids:
-                            ir_att = self.env['ir.attachment'].create({
-                                'name': attachment.get_filename(),
-                                'type': 'binary',
-                                'public': False,
-                                'raw': attachment.get_data(),
-                                'create_date': attachment.created_at,
-                            })
-                            attachments.append(ir_att)
-                        hd_ticket.message_post(body=note.hs_note_body,
-                                               message_type='comment',
-                                               author_id=note.owner.user_id.odoo_user or False,
-                                               attachment_ids=[a.id for a in attachments],
-                                               date=create_date,
-                                               )
+                    attachments = self.env['ir.attachment'].search(
+                        [('res_model', '=', 'durpro_hubspot_import.hubspot_note'),
+                         ('res_id', 'in', ticket.associated_emails)])
+                    create_date = note.hs_time_to_time(note.create_date)
+                    message = hd_ticket.message_post(body=note.hs_note_body,
+                                                     message_type='comment',
+                                                     author_id=note.owner.user_id.odoo_user or False,
+                                                     attachment_ids=attachments.ids,
+                                                     date=create_date, )
+                    attachments.write({
+                        'res_model': message._name,
+                        'res_id': message.id,
+                        'create_date': create_date})
 
                 for email in ticket.associated_emails:
-                    attachments = []
-                    if email.hs_attachment_ids:
-                        try:
-                            create_date = time.strptime(email.create_date, "%Y-%m-%dT%H:%M:%S[.%f]Z")
-                        except ValueError:
-                            try:
-                                create_date = time.strptime(email.create_date, "%Y-%m-%dT%H:%M:%SZ")
-                            except ValueError:
-                                create_date = False
-                        for attachment in note.hs_attachment_ids:
-                            ir_att = self.env['ir.attachment'].create({
-                                'name': attachment.get_filename(),
-                                'type': 'binary',
-                                'public': False,
-                                'raw': attachment.get_data(),
-                                'create_date': attachment.created_at,
-                            })
-                            attachments.append(ir_att)
-                        hd_ticket.message_post(subject=email.hs_email_subject,
-                                               body=email.hs_email_html or email.hs_email_text,
-                                               message_type='email',
-                                               author_id=email.author or False,
-                                               email_from=email.hs_email_from_email if not email.author else False,
-                                               partner_ids=email.recipients.ids,
-                                               attachment_ids=[a.id for a in attachments],
-                                               date=create_date,
-                                               )
+                    attachments = self.env['ir.attachment'].search(
+                        [('res_model', '=', 'durpro_hubspot_import.hubspot_email'),
+                         ('res_id', 'in', ticket.associated_emails)])
+                    create_date = email.hs_time_to_time(email.create_date)
+                    message = hd_ticket.message_post(subject=email.hs_email_subject,
+                                                     body=email.hs_email_html or email.hs_email_text,
+                                                     message_type='email',
+                                                     author_id=email.author or False,
+                                                     email_from=email.hs_email_from_email if not email.author else False,
+                                                     partner_ids=email.recipients.ids,
+                                                     attachment_ids=attachments.ids,
+                                                     date=create_date,
+                                                     )
+                    attachments.write({
+                        'res_model': message._name,
+                        'res_id': message.id,
+                        'create_date': create_date})
+            self.env['ir.attachment'].flush()
+            self.env['mail.message'].flush()
+            self.env.cr.commit()

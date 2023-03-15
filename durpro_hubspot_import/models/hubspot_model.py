@@ -4,6 +4,7 @@ import json
 from hubspot import HubSpot
 from hubspot.crm.associations.models.batch_input_public_object_id import BatchInputPublicObjectId
 import time
+from typing import Union
 
 
 class HubSpotModel(models.AbstractModel):
@@ -104,3 +105,20 @@ class HubSpotModel(models.AbstractModel):
                     associations[from_rec].add(rs_to)
         for from_rec, to_recs in associations.items():
             from_rec.write({association_field: [(6, 0, [r.id for r in to_recs])]})
+
+    @api.model
+    def hs_time_to_time(self, hs_timestamp: str) -> Union[time.struct_time, bool]:
+        """
+        Converts a HubSpot formatted timestamp to a usable format for Odoo fields.
+
+        :param hs_timestamp: HubSpot timestamp string
+
+        :return: A python struct_time representation of the HubSpot timestamp
+        """
+        try:
+            return time.strptime(hs_timestamp, "%Y-%m-%dT%H:%M:%S[.%f]Z")
+        except ValueError:
+            try:
+                return time.strptime(hs_timestamp, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                return False
