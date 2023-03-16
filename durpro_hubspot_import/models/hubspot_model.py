@@ -39,9 +39,9 @@ class HubSpotModel(models.AbstractModel):
                     continue
                 to_read = 'id' if field == 'hs_id' else field
                 if to_read in properties:
-                    to_write |= {field: properties[to_read]}
+                    to_write[field] = properties[to_read]
                 if to_read in hs_model:
-                    to_write |= {field: hs_model[to_read]}
+                    to_write[field] = hs_model[to_read]
             rec.write(to_write)
 
     @api.model
