@@ -66,6 +66,9 @@ class HubSpotImportWizard(models.TransientModel):
             attachments, semicolon separated.
         :return: None
         """
+        time_limit = config['limit_time_real']
+        thread = threading.current_thread()
+
         page_size = 100
         already_loaded_recs = self.env['ir.attachment'].search([('res_model', '=', res_model)])
         res_ids = already_loaded_recs.mapped('res_id')
@@ -73,10 +76,21 @@ class HubSpotImportWizard(models.TransientModel):
         record_count = self.env[res_model].search_count(domain)
         call_count = 0
         start_time = time.time()
+        warn = ""
 
         for offset in range(0, record_count, page_size):
             recs = self.env[res_model].search(domain, offset=offset, limit=page_size)
-            for rec in recs:
+            thread_execution_time = time.time() - thread.start_time
+            if thread_execution_time + 20 > time_limit:
+                warn = f"Stopping attachment import for server thread time limit. Processed {offset} " \
+                       f"attachments. {record_count - offset} remaining."
+                break
+            for index, rec in enumerate(recs):
+                thread_execution_time = time.time() - thread.start_time
+                if thread_execution_time + 20 > time_limit:
+                    warn = f"Stopping attachment import for server thread time limit. Processed {offset + index} " \
+                           f"attachments. {record_count - (offset + index)} remaining."
+                    break
                 for file_id in str.split(rec.hs_attachment_ids):
                     f = self.env['durpro_hubspot_import.hubspot_attachment'].import_one(file_id)  # one API call
                     # f is False if the file is not found on HubSpot servers
@@ -96,6 +110,8 @@ class HubSpotImportWizard(models.TransientModel):
                     call_count = (call_count + 1) % 5
             self.env['ir.attachment'].flush()
             self.env.cr.commit()
+            if warn:
+                raise Warning(_(warn))
 
     @api.depends('ticket_page_size')
     def action_create_odoo_tickets(self):
@@ -119,18 +135,26 @@ class HubSpotImportWizard(models.TransientModel):
         stage_template_dict = {s: s.template_id for s in notify_stages}
         notify_stages.write({'template_id': False})
         page_size = int(self.ticket_page_size)
-        no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count([])
+        domain = [('id', 'not in', already_loaded_ids)]
+        no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count(domain)
+        warn = ""
         for offset in range(0, no_tickets, page_size):
             thread_execution_time = time.time() - thread.start_time
             if thread_execution_time + 5 > time_limit:
-                print("Stopping Odoo Ticket Creation for server thread time limit.")
+                warn = f"Stopping Odoo Ticket Creation for server thread time limit. Processed {offset} tickets. " \
+                       f"{no_tickets - offset} remain to be processed."
                 break
             # Only work on tickets that have a configured pipeline and stage to which to transfer
-            tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search([('id', 'not in', already_loaded_ids)],
+            tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search(domain,
                                                                               offset=offset, limit=page_size).filtered(
                 lambda
                     r: r.pipeline and r.pipeline.helpdesk_team_id and r.pipeline_stage and r.pipeline_stage.helpdesk_stage)
-            for ticket in tickets:
+            for index, ticket in enumerate(tickets):
+                thread_execution_time = time.time() - thread.start_time
+                if thread_execution_time + 5 > time_limit:
+                    warn = f"Stopping Odoo Ticket Creation for server thread time limit. Processed {offset+index} " \
+                           f"tickets. {no_tickets - (offset + index)} remain to be processed."
+                    break
                 # Create a ticket in the right pipeline
                 hs_time = ticket.hs_time_to_time(ticket.createdate) if ticket.createdate else False
                 create_date = time.strftime('%Y-%m-%d %H:%M:%S', hs_time) if hs_time else False
@@ -194,10 +218,12 @@ class HubSpotImportWizard(models.TransientModel):
             self.env['ir.attachment'].flush()
             self.env['mail.message'].flush()
             self.env.cr.commit()
+
         # Last commit if we got interrupted by time running out
         if subtype:
             subtype.default = subtype_default_initial
         for s in notify_stages:
             s.write({'template_id': stage_template_dict[s].id})
         self.env.cr.commit()
-        print("Stopped Odoo Ticket creation cleanly.")
+        if warn:
+            raise Warning(_(warn))
