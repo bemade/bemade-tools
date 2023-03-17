@@ -94,8 +94,7 @@ class HubSpotImportWizard(models.TransientModel):
             'hubspot_ticket_id')
         # temporarily deactivate notifications
         subtype = self.env['mail.message.subtype'].search(
-            [('res_model', '=', 'helpdesk.team'), ('relation_field', '=', 'team_id'), ('name', '=', 'Ticket Created'),
-             ('id', 'not in', already_loaded_ids)])
+            [('res_model', '=', 'helpdesk.team'), ('relation_field', '=', 'team_id'), ('name', '=', 'Ticket Created')])
         if subtype:
             subtype_default_initial = subtype.default
             subtype.default = False
@@ -103,7 +102,7 @@ class HubSpotImportWizard(models.TransientModel):
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count([])
         for offset in range(0, no_tickets, page_size):
             # Only work on tickets that have a configured pipeline and stage to which to transfer
-            tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search([],
+            tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search([('id', 'not in', already_loaded_ids)],
                                                                               offset=offset, limit=page_size).filtered(
                 lambda
                     r: r.pipeline and r.pipeline.helpdesk_team_id and r.pipeline_stage and r.pipeline_stage.helpdesk_stage)
