@@ -60,7 +60,8 @@ class HubSpotImportWizard(models.TransientModel):
         """
         page_size = 100
         already_loaded_recs = self.env['ir.attachment'].search([('res_model', '=', res_model)])
-        domain = [('hs_attachment_ids', '!=', False), ('id', 'not in', already_loaded_recs.res_ids)]
+        res_ids = already_loaded_recs.mapped('res_id')
+        domain = [('hs_attachment_ids', '!=', False), ('id', 'not in', res_ids)]
         record_count = self.env[res_model].search_count(domain)
         call_count = 0
         start_time = time.time()
