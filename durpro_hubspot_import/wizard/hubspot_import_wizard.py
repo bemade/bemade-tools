@@ -2,11 +2,19 @@ from odoo import models, fields, api, _
 import time
 from odoo.tools.mail import plaintext2html
 from lxml import etree
+from .. import constants
+from odoo.tools import config
+import threading
 
 
 class HubSpotImportWizard(models.TransientModel):
     _name = "durpro_hubspot_import.hubspot_import_wizard"
     _description = 'Allows for the importation of HubSpot data into Odoo Helpdesk Tickets (and associations)'
+
+    ticket_page_size = fields.Integer(string="Ticket Page Size", compute="_compute_page_size")
+
+    def _compute_page_size(self):
+        self.ticket_page_size = self.env['ir.config_parameter'].sudo().get_param(constants.PAGE_SIZE_PARAM)
 
     def action_get_hubspot_tickets(self):
         self.env['durpro_hubspot_import.hubspot_ticket'].import_all()
@@ -89,7 +97,15 @@ class HubSpotImportWizard(models.TransientModel):
             self.env['ir.attachment'].flush()
             self.env.cr.commit()
 
+    @api.depends('ticket_page_size')
     def action_create_odoo_tickets(self):
+        """Converts as many HubSpot Tickets to Odoo tickets as possible in the threading time limit imposed in the
+        server config (limit_time_real). Configured page size (see module settings) determines how often we commit to
+        the database. We allow 5 seconds for a final database commit after processing the last batch in the given time
+        limit.
+        """
+        time_limit = config['limit_time_real']
+        thread = threading.current_thread()
         already_loaded_ids = self.env['helpdesk.ticket'].search([('hubspot_ticket_id', '!=', False)]).mapped(
             'hubspot_ticket_id').ids
         # temporarily deactivate notifications
@@ -98,9 +114,13 @@ class HubSpotImportWizard(models.TransientModel):
         if subtype:
             subtype_default_initial = subtype.default
             subtype.default = False
-        page_size = 1000
+        page_size = int(self.ticket_page_size)
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count([])
         for offset in range(0, no_tickets, page_size):
+            thread_execution_time = time.time() - thread.start_time
+            if thread_execution_time + 5 > time_limit:
+                print("Stopping Odoo Ticket Creation for server thread time limit.")
+                break
             # Only work on tickets that have a configured pipeline and stage to which to transfer
             tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search([('id', 'not in', already_loaded_ids)],
                                                                               offset=offset, limit=page_size).filtered(
@@ -149,10 +169,10 @@ class HubSpotImportWizard(models.TransientModel):
                     create_date = time.strftime('%Y-%m-%d %H:%M:%S', hs_time) if hs_time else False
                     body = email.hs_email_html or plaintext2html(email.hs_email_text) or plaintext2html("")
                     tree = etree.fromstring(body, parser=etree.HTMLParser())
-                    if not tree:
+                    if tree is None:
                         body = plaintext2html(email.hs_email_text) or plaintext2html("")
                         tree = etree.fromstring(body, parser=etree.HTMLParser())
-                        if not tree:
+                        if tree is None:
                             body = ""
                     message = hd_ticket.sudo().message_post(subject=email.hs_email_subject or "",
                                                             body=body,
@@ -170,5 +190,8 @@ class HubSpotImportWizard(models.TransientModel):
             self.env['ir.attachment'].flush()
             self.env['mail.message'].flush()
             self.env.cr.commit()
+        # Last commit if we got interrupted by time running out
+        self.env.cr.commit()
         if subtype:
             subtype.default = subtype_default_initial
+        print("Stopped Odoo Ticket creation cleanly.")

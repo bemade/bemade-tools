@@ -10,13 +10,21 @@
                 <div class="app_settings_block" data-string="HubSpot Import" string="HubSpot Import"
                      data-key="durpro_hubspot_import">
                     <h2>HubSpot Import Settings</h2>
-                    <div class="row mt16 o_settings_container">
-                        <div class="col-12 col-lg-6 o_setting_box">
+                    <div class="row mt16 o_settings_container" name="hubspot_import_settings_container">
+                        <div class="col-16 col-lg-6 o_settings_box" id="hubspot_import_settings">
                             <div class="o_setting_left_pane">
                                 <field name="app_key"></field>
                             </div>
                             <div class="o_setting_right_pane">
                                 <label class="o_form_label" for="app_key"/>
+                            </div>
+                        </div>
+                        <div class="col-16 col-lg-6 o_settings_box" id="hubspot_import_settings">
+                            <div class="o_setting_left_pane">
+                                <field name="ticket_page_size"></field>
+                            </div>
+                            <div class="o_setting_right_pane">
+                                <label class="o_form_label" for="ticket_page_size"/>
                             </div>
                         </div>
                     </div>
