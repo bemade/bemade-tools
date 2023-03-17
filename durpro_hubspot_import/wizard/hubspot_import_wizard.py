@@ -90,9 +90,11 @@ class HubSpotImportWizard(models.TransientModel):
             self.env.cr.commit()
 
     def action_create_odoo_tickets(self):
+        already_loaded_ids = self.env['helpdesk.ticket'].search([('hs_ticket_id', '!=', False)]).mapped('hs_ticket_id')
         # temporarily deactivate notifications
         subtype = self.env['mail.message.subtype'].search(
-            [('res_model', '=', 'helpdesk.team'), ('relation_field', '=', 'team_id'), ('name', '=', 'Ticket Created')])
+            [('res_model', '=', 'helpdesk.team'), ('relation_field', '=', 'team_id'), ('name', '=', 'Ticket Created'),
+             ('id', 'not in', already_loaded_ids)])
         if subtype:
             subtype_default_initial = subtype.default
             subtype.default = False
