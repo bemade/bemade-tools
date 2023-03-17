@@ -104,6 +104,7 @@ class HubSpotImportWizard(models.TransientModel):
         the database. We allow 5 seconds for a final database commit after processing the last batch in the given time
         limit.
         """
+        # Handle time limits, turn off notifications
         time_limit = config['limit_time_real']
         thread = threading.current_thread()
         already_loaded_ids = self.env['helpdesk.ticket'].search([('hubspot_ticket_id', '!=', False)]).mapped(
@@ -114,6 +115,9 @@ class HubSpotImportWizard(models.TransientModel):
         if subtype:
             subtype_default_initial = subtype.default
             subtype.default = False
+        notify_stages = self.env['helpdesk.stage'].search([('template_id', '!=', False)])
+        stage_template_dict = {s: s.template_id for s in notify_stages}
+        notify_stages.write({'template_id': False})
         page_size = int(self.ticket_page_size)
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count([])
         for offset in range(0, no_tickets, page_size):
@@ -191,7 +195,9 @@ class HubSpotImportWizard(models.TransientModel):
             self.env['mail.message'].flush()
             self.env.cr.commit()
         # Last commit if we got interrupted by time running out
-        self.env.cr.commit()
         if subtype:
             subtype.default = subtype_default_initial
+        for s in notify_stages:
+            s.write({'template_id': stage_template_dict[s].id})
+        self.env.cr.commit()
         print("Stopped Odoo Ticket creation cleanly.")
