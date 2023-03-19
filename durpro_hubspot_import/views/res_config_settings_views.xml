@@ -27,6 +27,33 @@
                                 <label class="o_form_label" for="ticket_page_size"/>
                             </div>
                         </div>
+                        <div class="col-16 col-lg-6 o_settings_box" id="hubspot_import_settings">
+                            <div class="o_setting_left_pane">
+                                <field name="hubspot_auto_import"></field>
+                            </div>
+                            <div class="o_setting_right_pane">
+                                <label class="o_form_label" for="hubspot_auto_import"/>
+                            </div>
+                        </div>
+                    </div>
+                    <h2>Import Status</h2>
+                    <div class="row mt16 o_settings_container" name="hubspot_import_status_container">
+                        <div col="8">
+                            <field name="pipelines_imported"/>
+                            <field name="owners_imported"/>
+                            <field name="tickets_imported"/>
+                            <field name="contacts_imported"/>
+                        </div>
+                        <div col="8">
+                            <field name="companies_imported"/>
+                            <field name="emails_imported"/>
+                            <field name="notes_imported"/>
+                            <field name="attachments_imported"/>
+                        </div>
+                        <div col="8">
+                            <field name="attachments_remaining"/>
+                            <field name="tickets_converted"/>
+                        </div>
                     </div>
                 </div>
             </xpath>

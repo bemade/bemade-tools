@@ -6,7 +6,27 @@
         <field name="arch" type="xml">
             <form>
                 <sheet>
+                    <group col="8">
+                        <field name="pipelines_imported"/>
+                        <field name="owners_imported"/>
+                        <field name="tickets_imported"/>
+                        <field name="contacts_imported"/>
+                    </group>
+                    <group col="8">
+                        <field name="companies_imported"/>
+                        <field name="emails_imported"/>
+                        <field name="notes_imported"/>
+                        <field name="attachments_imported"/>
+                    </group>
+                    <group col="8">
+                        <field name="attachments_remaining"/>
+                        <field name="tickets_converted"/>
+                    </group>
                     <group col="12">
+                        <button string="Import Pipelines" class="btn btn-primary" name="action_get_hubspot_pipelines"
+                                type="object"/>
+                        <button string="Import Owners" class="btn btn-primary" name="action_get_hubspot_owners"
+                                type="object"/>
                         <button string="Import Tickets" class="btn btn-primary" name="action_get_hubspot_tickets"
                                 type="object"/>
 
@@ -15,13 +35,10 @@
 
                         <button string="Import Companies" class="btn btn-primary" name="action_get_hubspot_companies"
                                 type="object"/>
-                        <button string="Import Pipelines" class="btn btn-primary" name="action_get_hubspot_pipelines"
-                                type="object"/>
+
                         <button string="Import Emails" class="btn btn-primary" name="action_get_hubspot_emails"
                                 type="object"/>
                         <button string="Import Notes" class="btn btn-primary" name="action_get_hubspot_notes"
-                                type="object"/>
-                        <button string="Import Owners" class="btn btn-primary" name="action_get_hubspot_owners"
                                 type="object"/>
                     </group>
                     <group col="12">
@@ -38,7 +55,7 @@
                     </group>
                     <group col="12">
                         <button string="Create Odoo Tickets from Imported Data" class="btn btn-primary"
-                                name="action_create_odoo_tickets" type="object" />
+                                name="action_create_odoo_tickets" type="object"/>
                     </group>
                 </sheet>
                 <footer>
