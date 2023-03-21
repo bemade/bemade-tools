@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <data>
+        <record model="ir.cron" id="hubspot_auto_import_action">
+            <field name="name">HubSpot Ticket Import: automatic import</field>
+            <field name="model_id" ref="durpro_hubspot_import.model_durpro_hubspot_import_auto_importer"/>
+            <field name="state">code</field>
+            <field name="code">model.run_next()</field>
+            <field name="user_id" ref="base.user_root"/>
+            <field name="interval_number">15</field>
+            <field name="interval_type">minutes</field>
+            <field name="numbercall">-1</field>
+        </record>
+
+        <record model="durpro_hubspot_import.auto_importer" id="hubspot_auto_import_controller">
+            <field name="next_import">pipelines</field>
+            <field name="action_id" ref="hubspot_auto_import_action"/>
+        </record>
+    </data>
+</odoo>

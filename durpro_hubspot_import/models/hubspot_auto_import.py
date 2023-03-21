@@ -1,20 +1,15 @@
 from odoo import models, fields, api, _
-import time
-from odoo.tools.mail import plaintext2html
-from lxml import etree
-from .. import constants
 from odoo.tools import config
 import threading
+import time
+from .. import constants
 
+class HubSpotAutoImporter(models.Model):
+    _name = "durpro_hubspot_import.auto_importer"
+    _description = "Hubspot Auto Import Controller"
 
-class HubSpotImportWizard(models.TransientModel):
-    _name = "durpro_hubspot_import.hubspot_import_wizard"
-    _description = 'Allows for the importation of HubSpot data into Odoo Helpdesk Tickets (and associations)'
-
-    import_controller = fields.Many2one(string="Import Controller", compute='_get_controller')
-
-    ticket_page_size = fields.Integer(string="Ticket Page Size", compute="_compute_page_size")
-
+    action_id = fields.Many2one("ir.cron", string="Scheduled Action")
+    active = fields.Boolean(string="Active", related="action_id.active")
     tickets_imported = fields.Integer(string="HubSpot Tickets Imported", compute="_compute_import_totals")
     contacts_imported = fields.Integer(string="HubSpot Contacts Imported", compute="_compute_import_totals")
     companies_imported = fields.Integer(string="HubSpot Companies Imported", compute="_compute_import_totals")
@@ -23,38 +18,135 @@ class HubSpotImportWizard(models.TransientModel):
     notes_imported = fields.Integer(string="HubSpot Notes Imported", compute="_compute_import_totals")
     owners_imported = fields.Integer(string="HubSpot Owners Imported", compute="_compute_import_totals")
     attachments_imported = fields.Integer(string="HubSpot Attachments Imported", compute="_compute_import_totals")
-
     attachments_remaining = fields.Integer(string="Attachments Remaining", compute="_compute_import_totals")
-
     tickets_converted = fields.Integer(string="Tickets Converted", compute="_compute_import_totals")
 
-    def _get_controller(self):
-        self.env['durpro_hubspot_import.auto_importer'].search([], limit=1)
+    ticket_page_size = fields.Integer(string="Ticket Page Size", compute="_compute_page_size")
+
+    next_import = fields.Selection(string="Next Import Action", selection=[
+        ('pipelines', 'Pipelines'),
+        ('owners', 'Owners'),
+        ('tickets', 'Tickets'),
+        ('contacts', 'Contacts'),
+        ('companies', 'Companies'),
+        ('notes', 'Notes'),
+        ('emails', 'Emails'),
+        ('note_attachments', 'Note Attachments'),
+        ('email_attachments', 'Email Attachments'),
+        ('associate_contacts', 'Contact Associations'),
+        ('associate_companies', 'Company Associations'),
+        ('associate_emails', 'Email Associations'),
+        ('associate_notes', 'Note Associations'),
+        ('create_tickets', 'Create Tickets'),
+        ('stop', 'Done')
+    ], required=False)
+
+    after = fields.Char(string="After Token", help="Token for fetching the next page of results when interrupted.")
+
+    def _compute_page_size(self):
+        self.ticket_page_size = self.env['ir.config_parameter'].sudo().get_param(constants.PAGE_SIZE_PARAM)
+
+    @api.depends('action_id')
+    def activate(self):
+        self.action_id.active = True
+
+    @api.depends('action_id')
+    def deactivate(self):
+        if not self.action_id:
+            return
+        self.action_id.active = False
 
     @api.model
-    def default_get(self, fields_list):
-        res = super(HubSpotImportWizard, self).default_get(fields_list)
-        res.update(self._get_import_totals())
-        return res
+    def run_next(self):
+        controller = self.env[self._name].search([('active', 'in', (True, False))], limit=1)
+        if controller.next_import == 'pipelines':
+            self.env['durpro_hubspot_import.hubspot_pipeline'].import_all()
+            controller.next_import = 'owners'
+        if controller.next_import == 'owners':
+            if not controller._check_time(30):
+                return
+            self.env['durpro_hubspot_import.hubspot_owner'].import_all()
+            controller.next_import = 'tickets'
+        if controller.next_import == 'tickets':
+            self.after = self.env['durpro_hubspot_import.hubspot_ticket'].import_all(self.after or None)
+            if self.after:
+                return
+            controller.next_import = 'contacts'
+        if controller.next_import == 'contacts':
+            self.after = self.env['durpro_hubspot_import.hubspot_contact'].import_all(self.after or None)
+            if self.after:
+                return
+            controller.next_import = 'companies'
+        if controller.next_import == 'companies':
+            self.after = self.env['durpro_hubspot_import.hubspot_company'].import_all(self.after or None)
+            if self.after:
+                return
+            controller.next_import = 'notes'
+        if controller.next_import == 'notes':
+            self.after = self.env['durpro_hubspot_import.hubspot_note'].import_all(self.after or None)
+            if self.after:
+                return
+            controller.next_import = 'emails'
+        if controller.next_import == 'emails':
+            self.after = self.env['durpro_hubspot_import.hubspot_email'].import_all(self.after or None)
+            if self.after:
+                return
+            controller.next_import = 'note_attachments'
+        if controller.next_import == 'note_attachments':
+            # No time check here since the _get_attachments method handles that
+            controller._get_attachments('durpro_hubspot_import.hubspot_note')
+            controller.next_import = 'email_attachments'
+        if controller.next_import == 'email_attachments':
+            # No time check here since the _get_attachments method handles that
+            controller._get_attachments('durpro_hubspot_import.hubspot_email')
+            controller.next_import = 'associate_contacts'
+        if controller.next_import == 'associate_contacts':
+            controller._check_time(300)
+            self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_contacts()
+            controller.next_import = 'associate_companies'
+        if controller.next_import == 'associate_companies':
+            controller._check_time(300)
+            self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_companies()
+            controller.next_import = 'associate_emails'
+        if controller.next_import == 'associate_emails':
+            controller._check_time(880)
+            self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_emails()
+            controller.next_import = 'associate_notes'
+        if controller.next_import == 'associate_notes':
+            controller._check_time(600)
+            self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_notes()
+            controller.next_import = 'create_tickets'
+        if controller.next_import == 'create_tickets':
+            controller.create_odoo_tickets()
+            controller.next_import = 'stop'
+            controller.deactivate()
 
     @api.model
-    def _get_import_totals(self):
-        res = {
-            'tickets_imported': self.env['durpro_hubspot_import.hubspot_ticket'].search_count([]),
-            'contacts_imported': self.env['durpro_hubspot_import.hubspot_contact'].search_count([]),
-            'companies_imported': self.env['durpro_hubspot_import.hubspot_company'].search_count([]),
-            'pipelines_imported': self.env['durpro_hubspot_import.hubspot_pipeline'].search_count([]),
-            'emails_imported': self.env['durpro_hubspot_import.hubspot_email'].search_count([]),
-            'notes_imported': self.env['durpro_hubspot_import.hubspot_note'].search_count([]),
-            'owners_imported': self.env['durpro_hubspot_import.hubspot_owner'].search_count([]),
-            'attachments_imported': self.env['durpro_hubspot_import.hubspot_attachment'].search_count([]),
-            'tickets_converted': self.env['helpdesk.ticket'].search_count([('hubspot_ticket_id', '!=', False)]),
-        }
-        # To calculate the attachments remaining to import, we see how many total distinct attachment IDs are present
-        # in emails and notes, then subtract the number already imported.
+    def _check_time(self, delay: int) -> bool:
+        time_limit = config['limit_time_real']
+        thread = threading.current_thread()
+        thread_execution_time = time.time() - thread.start_time
+        if thread_execution_time + delay < time_limit:
+            print(f"check_time returning true. Start: {thread.start_time}, execution: {thread_execution_time}, delay: {delay}, limit: {time_limit}")
+            return True
+        else:
+            print(f"check_time returning false. Start: {thread.start_time}, execution: {thread_execution_time}, delay: {delay}, limit: {time_limit}")
+            return False
+
+    def _compute_import_totals(self):
+        self.ensure_one()
+        self.tickets_imported = self.env['durpro_hubspot_import.hubspot_ticket'].search_count([])
+        self.contacts_imported = self.env['durpro_hubspot_import.hubspot_contact'].search_count([])
+        self.companies_imported = self.env['durpro_hubspot_import.hubspot_company'].search_count([])
+        self.pipelines_imported = self.env['durpro_hubspot_import.hubspot_contact'].search_count([])
+        self.emails_imported = self.env['durpro_hubspot_import.hubspot_email'].search_count([])
+        self.notes_imported = self.env['durpro_hubspot_import.hubspot_note'].search_count([])
+        self.owners_imported = self.env['durpro_hubspot_import.hubspot_owner'].search_count([])
+        self.attachments_imported = self.env['durpro_hubspot_import.hubspot_attachment'].search_count([])
+        self.tickets_converted = self.env['helpdesk.ticket'].search_count([('hubspot_ticket_id', '!=', False)])
         sql = """SELECT hs_attachment_ids 
-                 FROM (select hs_attachment_ids from durpro_hubspot_import_hubspot_note) note 
-                 UNION (select hs_attachment_ids from durpro_hubspot_import_hubspot_email)"""
+                             FROM (select hs_attachment_ids from durpro_hubspot_import_hubspot_note) note 
+                             UNION (select hs_attachment_ids from durpro_hubspot_import_hubspot_email)"""
         self.env.cr.execute(sql)
         result = self.env.cr.fetchall()
         all_attachment_ids = set()
@@ -63,55 +155,7 @@ class HubSpotImportWizard(models.TransientModel):
             if ids:
                 for i in ids:
                     all_attachment_ids.add(i)
-        res['attachments_remaining'] = len(all_attachment_ids) - res['attachments_imported']
-        return res
-
-    def _compute_import_totals(self):
-        for rec in self:
-            rec.write(rec._get_import_totals())
-
-    def _compute_page_size(self):
-        self.ticket_page_size = self.env['ir.config_parameter'].sudo().get_param(constants.PAGE_SIZE_PARAM)
-
-    def action_get_hubspot_tickets(self):
-        self.env['durpro_hubspot_import.hubspot_ticket'].import_all()
-
-    def action_get_hubspot_contacts(self):
-        self.env['durpro_hubspot_import.hubspot_contact'].import_all()
-
-    def action_get_hubspot_companies(self):
-        self.env['durpro_hubspot_import.hubspot_company'].import_all()
-
-    def action_get_hubspot_pipelines(self):
-        self.env['durpro_hubspot_import.hubspot_pipeline'].import_all()
-
-    def action_get_hubspot_emails(self):
-        self.env['durpro_hubspot_import.hubspot_email'].import_all()
-
-    def action_get_hubspot_notes(self):
-        self.env['durpro_hubspot_import.hubspot_note'].import_all()
-
-    def action_get_hubspot_owners(self):
-        self.env['durpro_hubspot_import.hubspot_owner'].import_all()
-
-    def action_associate_tickets_with_contacts(self):
-        self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_contacts()
-
-    def action_associate_tickets_with_companies(self):
-        self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_companies()
-
-    def action_associate_tickets_with_emails(self):
-        self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_emails()
-
-    def action_associate_tickets_with_notes(self):
-        self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_notes()
-
-    def action_get_attachments(self):
-        """Get attachments for any loaded HubSpotNotes and HubSpotEmails. There is no "get_all" method for files.
-        Note that this function will not re-fetch attachments for notes and emails that already have ir_attachments
-        related to them."""
-        self._get_attachments('durpro_hubspot_import.hubspot_note')
-        self._get_attachments('durpro_hubspot_import.hubspot_email')
+        self.attachments_remaining = len(all_attachment_ids) - self.attachments_imported
 
     def _get_attachments(self, res_model: str):
         """
@@ -128,6 +172,7 @@ class HubSpotImportWizard(models.TransientModel):
 
         page_size = 100
         already_loaded_recs = self.env['ir.attachment'].search([('res_model', '=', res_model)])
+        load_time = time.time() - thread.start_time
         res_ids = already_loaded_recs.mapped('res_id')
         domain = [('hs_attachment_ids', '!=', False), ('id', 'not in', res_ids)]
         record_count = self.env[res_model].search_count(domain)
@@ -171,7 +216,7 @@ class HubSpotImportWizard(models.TransientModel):
                 raise Warning(_(warn))
 
     @api.depends('ticket_page_size')
-    def action_create_odoo_tickets(self):
+    def create_odoo_tickets(self):
         """Converts as many HubSpot Tickets to Odoo tickets as possible in the threading time limit imposed in the
         server config (limit_time_real). Configured page size (see module settings) determines how often we commit to
         the database. We allow 5 seconds for a final database commit after processing the last batch in the given time

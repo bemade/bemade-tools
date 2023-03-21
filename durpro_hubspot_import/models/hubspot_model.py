@@ -5,6 +5,9 @@ from hubspot import HubSpot
 from hubspot.crm.associations.models.batch_input_public_object_id import BatchInputPublicObjectId
 import time
 from typing import Union
+import threading
+import time
+from odoo.tools import config
 
 
 class HubSpotModel(models.AbstractModel):
@@ -49,31 +52,49 @@ class HubSpotModel(models.AbstractModel):
         return list(set(list(self.fields_get())) - constants.BASE_FIELDS)
 
     @api.model
-    def import_all(self):
+    def _check_time(self, delay: int) -> bool:
+        time_limit = config['limit_time_real']
+        thread = threading.current_thread()
+        thread_execution_time = time.time() - thread.start_time
+        if thread_execution_time + delay < time_limit:
+            return True
+        else:
+            return False
+
+    @api.model
+    def import_all(self, after=None) -> str:
         """ We copy some code from the HubSpot API fetch_all method instead of using get_all so that we can commit to
-        the database and free up memory as we go."""
+        the database and free up memory as we go.
+
+        :param after: The "after" token for fetching the next page of results.
+        :return: The str representing the "after" token to pass for the next page of results, if any, otherwise None.
+        """
         properties = self.get_hs_properties_list()
-        after = None
         PAGE_MAX_SIZE = 100
         call_count = 0
         start_time = time.time()
-        while True:
+        while True and self._check_time(10):
             page = self._api_client().crm.objects.basic_api.get_page(self.hubspot_model_name, after=after,
                                                                      limit=PAGE_MAX_SIZE, properties=properties)
             objects_fetched = page.results
+            already_loaded = self.env[self._name].search(
+                [(self.hubspot_id_field, 'in', [o.id for o in objects_fetched])]).mapped(self.hubspot_id_field)
             for obj in objects_fetched:
+                if obj.id in already_loaded:
+                    continue
                 object_as_dict = obj.to_dict()
                 contents = json.dumps(object_as_dict, default=str)
                 self.env[self._name].create({'contents': contents})
             self.env[self._name].flush()
             self.env.cr.commit()
             if page.paging is None:
-                break
+                return None
             after = page.paging.next.after
             if call_count == 9:
                 time.sleep(time.time() - start_time)
                 start_time = time.time()
             call_count = (call_count + 1) % 10
+        return after
 
     @api.model
     def import_associations(self, model_from_suffix, model_to_suffix, association_field):

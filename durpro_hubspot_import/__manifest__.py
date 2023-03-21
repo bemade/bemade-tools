@@ -13,6 +13,7 @@
     """,
     "demo": [],
     'data': [
+        "data/hubspot_import_data.xml",
         "views/res_config_settings_views.xml",
         "views/hubspot_import_views.xml",
         "views/pipeline_views.xml",

@@ -13,7 +13,7 @@
                     <div class="row mt16 o_settings_container" name="hubspot_import_settings_container">
                         <div class="col-16 col-lg-6 o_settings_box" id="hubspot_import_settings">
                             <div class="o_setting_left_pane">
-                                <field name="app_key"></field>
+                                <field name="app_key"/>
                             </div>
                             <div class="o_setting_right_pane">
                                 <label class="o_form_label" for="app_key"/>
@@ -21,7 +21,7 @@
                         </div>
                         <div class="col-16 col-lg-6 o_settings_box" id="hubspot_import_settings">
                             <div class="o_setting_left_pane">
-                                <field name="ticket_page_size"></field>
+                                <field name="ticket_page_size"/>
                             </div>
                             <div class="o_setting_right_pane">
                                 <label class="o_form_label" for="ticket_page_size"/>
@@ -29,32 +29,44 @@
                         </div>
                         <div class="col-16 col-lg-6 o_settings_box" id="hubspot_import_settings">
                             <div class="o_setting_left_pane">
-                                <field name="hubspot_auto_import"></field>
-                            </div>
-                            <div class="o_setting_right_pane">
+                                <field name="hubspot_auto_import"/>
                                 <label class="o_form_label" for="hubspot_auto_import"/>
                             </div>
                         </div>
                     </div>
                     <h2>Import Status</h2>
-                    <div class="row mt16 o_settings_container" name="hubspot_import_status_container">
-                        <div col="8">
-                            <field name="pipelines_imported"/>
-                            <field name="owners_imported"/>
-                            <field name="tickets_imported"/>
-                            <field name="contacts_imported"/>
-                        </div>
-                        <div col="8">
-                            <field name="companies_imported"/>
-                            <field name="emails_imported"/>
-                            <field name="notes_imported"/>
-                            <field name="attachments_imported"/>
-                        </div>
-                        <div col="8">
-                            <field name="attachments_remaining"/>
-                            <field name="tickets_converted"/>
-                        </div>
-                    </div>
+                    <table>
+                        <tbody>
+                            <tr>
+                                <td><label class="o_form_label" for="pipelines_imported"/></td>
+                                <td><label class="o_form_label" for="owners_imported"/></td>
+                                <td><label class="o_form_label" for="tickets_imported"/></td>
+                                <td><label class="o_form_label" for="contacts_imported"/></td>
+                                <td><label class="o_form_label" for="companies_imported"/></td>
+                            </tr>
+                            <tr>
+                                <td><field name="pipelines_imported"/></td>
+                                <td><field name="owners_imported"/></td>
+                                <td><field name="tickets_imported"/></td>
+                                <td><field name="contacts_imported"/></td>
+                                <td><field name="companies_imported"/></td>
+                            </tr>
+                            <tr>
+                                <td><label class="o_form_label" for="emails_imported"/></td>
+                                <td><label class="o_form_label" for="notes_imported"/></td>
+                                <td><label class="o_form_label" for="attachments_imported"/></td>
+                                <td><label class="o_form_label" for="attachments_remaining"/></td>
+                                <td><label class="o_form_label" for="tickets_converted"/></td>
+                            </tr>
+                            <tr>
+                                <td><field name="emails_imported"/></td>
+                                <td><field name="notes_imported"/></td>
+                                <td><field name="attachments_imported"/></td>
+                                <td><field name="attachments_remaining"/></td>
+                                <td><field name="tickets_converted"/></td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
             </xpath>
         </field>

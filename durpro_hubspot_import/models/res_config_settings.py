@@ -19,72 +19,63 @@ class ResConfigSettings(models.TransientModel):
         config_parameter=constants.PAGE_SIZE_PARAM,
     )
     hubspot_auto_import = fields.Boolean(string="Automatic Import",
-                                      help="Import HubSpot tickets and associated objects automatically.")
+                                         help="Import HubSpot tickets and associated objects automatically.")
 
-    tickets_imported = fields.Integer(string="HubSpot Tickets Imported", compute="_compute_import_totals")
-    contacts_imported = fields.Integer(string="HubSpot Contacts Imported", compute="_compute_import_totals")
-    companies_imported = fields.Integer(string="HubSpot Companies Imported", compute="_compute_import_totals")
-    pipelines_imported = fields.Integer(string="HubSpot Pipelines Imported", compute="_compute_import_totals")
-    emails_imported = fields.Integer(string="HubSpot Emails Imported", compute="_compute_import_totals")
-    notes_imported = fields.Integer(string="HubSpot Notes Imported", compute="_compute_import_totals")
-    owners_imported = fields.Integer(string="HubSpot Owners Imported", compute="_compute_import_totals")
-    attachments_imported = fields.Integer(string="HubSpot Attachments Imported", compute="_compute_import_totals")
+    hubspot_auto_import_controller = fields.Many2one("durpro_hubspot_import.auto_importer",
+                                                     string="Auto Import Controller",
+                                                     compute="_get_hubspot_controller")
+    tickets_imported = fields.Integer(string="HubSpot Tickets Imported",
+                                      related="hubspot_auto_import_controller.tickets_imported")
+    contacts_imported = fields.Integer(string="HubSpot Contacts Imported",
+                                       related="hubspot_auto_import_controller.contacts_imported")
+    companies_imported = fields.Integer(string="HubSpot Companies Imported",
+                                        related="hubspot_auto_import_controller.companies_imported")
+    pipelines_imported = fields.Integer(string="HubSpot Pipelines Imported",
+                                        related="hubspot_auto_import_controller.pipelines_imported")
+    emails_imported = fields.Integer(string="HubSpot Emails Imported",
+                                     related="hubspot_auto_import_controller.emails_imported")
+    notes_imported = fields.Integer(string="HubSpot Notes Imported",
+                                    related="hubspot_auto_import_controller.notes_imported")
+    owners_imported = fields.Integer(string="HubSpot Owners Imported",
+                                     related="hubspot_auto_import_controller.owners_imported")
+    attachments_imported = fields.Integer(string="HubSpot Attachments Imported",
+                                          related="hubspot_auto_import_controller.attachments_imported")
+    attachments_remaining = fields.Integer(string="Attachments Remaining",
+                                           related="hubspot_auto_import_controller.attachments_remaining")
+    tickets_converted = fields.Integer(string="Tickets Converted",
+                                       related="hubspot_auto_import_controller.tickets_converted")
 
-    attachments_remaining = fields.Integer(string="Attachments Remaining", compute="_compute_import_totals")
-
-    tickets_converted = fields.Integer(string="Tickets Converted", compute="_compute_import_totals")
-
-    auto_import_action = fields.Many2one("ir.cron", string="Scheduled Action for Import")
-
+    @api.depends('hubspot_auto_import_controller')
     def set_values(self):
         res = super(ResConfigSettings, self).set_values()
         self.env['ir.config_parameter'].set_param(constants.APPKEY_PARAM, self.app_key)
         self.env['ir.config_parameter'].set_param(constants.PAGE_SIZE_PARAM, self.ticket_page_size)
         self.env['ir.config_parameter'].set_param(constants.HS_AUTO_IMPORT_PARAM, self.hubspot_auto_import)
-        if self.hubspot_auto_import:
-            if not self.auto_import_action:
-                self.auto_import_action = self.env['ir.cron'].create({
-                    'name': 'HubSpot Automatic Import',
-                    'interval_number': -1,
-                })
+        if self.hubspot_auto_import and not self.hubspot_auto_import_controller.active:
+            self.hubspot_auto_import_controller.activate()
+        elif not self.hubspot_auto_import and self.hubspot_auto_import_controller.active:
+            self.hubspot_auto_import_controller.deactivate()
         return res
 
+    @api.depends('hubspot_auto_import_controller')
     def get_values(self):
         res = super(ResConfigSettings, self).get_values()
         res.update(app_key=self.env['ir.config_parameter'].sudo().get_param(constants.APPKEY_PARAM),
                    ticket_page_size=self.env['ir.config_parameter'].sudo().get_param(constants.PAGE_SIZE_PARAM),
                    hubspot_auto_import=self.env['ir.config_parameter'].sudo().get_param(constants.HS_AUTO_IMPORT_PARAM))
-        res.update(self._get_import_totals())
+        res.update({
+            'tickets_imported': self.tickets_imported,
+            'contacts_imported': self.contacts_imported,
+            'companies_imported': self.companies_imported,
+            'pipelines_imported': self.pipelines_imported,
+            'emails_imported': self.emails_imported,
+            'notes_imported': self.notes_imported,
+            'owners_imported': self.owners_imported,
+            'attachments_imported': self.attachments_imported,
+            'attachments_remaining': self.attachments_remaining,
+            'tickets_converted': self.tickets_converted,
+        })
         return res
 
-    def _get_import_totals(self):
-        res = {
-            'tickets_imported': self.env['durpro_hubspot_import.hubspot_ticket'].search_count([]),
-            'contacts_imported': self.env['durpro_hubspot_import.hubspot_contact'].search_count([]),
-            'companies_imported': self.env['durpro_hubspot_import.hubspot_company'].search_count([]),
-            'pipelines_imported': self.env['durpro_hubspot_import.hubspot_contact'].search_count([]),
-            'emails_imported': self.env['durpro_hubspot_import.hubspot_email'].search_count([]),
-            'notes_imported': self.env['durpro_hubspot_import.hubspot_note'].search_count([]),
-            'owners_imported': self.env['durpro_hubspot_import.hubspot_owner'].search_count([]),
-            'attachments_imported': self.env['durpro_hubspot_import.hubspot_attachment'].search_count([]),
-            'tickets_converted': self.env['helpdesk.ticket'].search_count([('hubspot_ticket_id', '!=', False)]),
-        }
-        # To calculate the attachments remaining to import, we see how many total distinct attachment IDs are present
-        # in emails and notes, then subtract the number already imported.
-        sql = """SELECT hs_attachment_ids 
-                     FROM (select hs_attachment_ids from durpro_hubspot_import_hubspot_note) note 
-                     UNION (select hs_attachment_ids from durpro_hubspot_import_hubspot_email)"""
-        self.env.cr.execute(sql)
-        result = self.env.cr.fetchall()
-        all_attachment_ids = set()
-        for r in result:
-            ids = str.split(r[0]) if r[0] else None
-            if ids:
-                for i in ids:
-                    all_attachment_ids.add(i)
-        res['attachments_remaining'] = len(all_attachment_ids) - res['attachments_imported']
-        return res
-
-    def _compute_import_totals(self):
-        for rec in self:
-            rec.write(rec._get_import_totals())
+    def _get_hubspot_controller(self):
+        self.hubspot_auto_import_controller = self.env['durpro_hubspot_import.auto_importer'].search([], limit=1)
