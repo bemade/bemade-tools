@@ -3,6 +3,10 @@ from odoo.tools import config
 import threading
 import time
 from .. import constants
+import logging
+
+_logger = logging.getLogger(__name__)
+
 
 class HubSpotAutoImporter(models.Model):
     _name = "durpro_hubspot_import.auto_importer"
@@ -95,13 +99,13 @@ class HubSpotAutoImporter(models.Model):
         if controller.next_import == 'note_attachments':
             # No time check here since the _get_attachments method handles that
             if not controller._get_attachments('durpro_hubspot_import.hubspot_note'):
-                print("Stopped short of processing all note attachments. Will restart later.")
+                _logger.info("Stopped short of processing all note attachments. Will restart later.")
                 return
             controller.next_import = 'email_attachments'
         if controller.next_import == 'email_attachments':
             # No time check here since the _get_attachments method handles that
             if not controller._get_attachments('durpro_hubspot_import.hubspot_email'):
-                print("Stopped short of processing all email attachments. Will restart later.")
+                _logger.info("Stopped short of processing all email attachments. Will restart later.")
                 return
             controller.next_import = 'associate_contacts'
         if controller.next_import == 'associate_contacts':
@@ -131,10 +135,8 @@ class HubSpotAutoImporter(models.Model):
         thread = threading.current_thread()
         thread_execution_time = time.time() - thread.start_time
         if thread_execution_time + delay < time_limit:
-            print(f"check_time returning true. Start: {thread.start_time}, execution: {thread_execution_time}, delay: {delay}, limit: {time_limit}")
             return True
         else:
-            print(f"check_time returning false. Start: {thread.start_time}, execution: {thread_execution_time}, delay: {delay}, limit: {time_limit}")
             return False
 
     def _compute_import_totals(self):
