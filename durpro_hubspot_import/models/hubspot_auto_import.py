@@ -94,11 +94,15 @@ class HubSpotAutoImporter(models.Model):
             controller.next_import = 'note_attachments'
         if controller.next_import == 'note_attachments':
             # No time check here since the _get_attachments method handles that
-            controller._get_attachments('durpro_hubspot_import.hubspot_note')
+            if not controller._get_attachments('durpro_hubspot_import.hubspot_note'):
+                print("Stopped short of processing all note attachments. Will restart later.")
+                return
             controller.next_import = 'email_attachments'
         if controller.next_import == 'email_attachments':
             # No time check here since the _get_attachments method handles that
-            controller._get_attachments('durpro_hubspot_import.hubspot_email')
+            if not controller._get_attachments('durpro_hubspot_import.hubspot_email'):
+                print("Stopped short of processing all email attachments. Will restart later.")
+                return
             controller.next_import = 'associate_contacts'
         if controller.next_import == 'associate_contacts':
             controller._check_time(300)
@@ -157,7 +161,7 @@ class HubSpotAutoImporter(models.Model):
                     all_attachment_ids.add(i)
         self.attachments_remaining = len(all_attachment_ids) - self.attachments_imported
 
-    def _get_attachments(self, res_model: str):
+    def _get_attachments(self, res_model: str) -> bool:
         """
         Loads the attachments for all the records of type res_model. Records with existing ir_attachments are
         ignored as this is meant to be run as a one-time import.
@@ -165,27 +169,25 @@ class HubSpotAutoImporter(models.Model):
         :param res_model: The addressable model name in form module.model_name for which to fetch attachments.
             The model passed is expected to have a field hs_attachment_ids representing the file IDs of the associated
             attachments, semicolon separated.
-        :return: None
+        :return: bool. True if import completed, False if interrupted for time.
         """
         time_limit = config['limit_time_real']
         thread = threading.current_thread()
 
         page_size = 100
         already_loaded_recs = self.env['ir.attachment'].search([('res_model', '=', res_model)])
-        load_time = time.time() - thread.start_time
         res_ids = already_loaded_recs.mapped('res_id')
         domain = [('hs_attachment_ids', '!=', False), ('id', 'not in', res_ids)]
         record_count = self.env[res_model].search_count(domain)
         call_count = 0
         start_time = time.time()
-        warn = ""
+        completed = True
 
         for offset in range(0, record_count, page_size):
             recs = self.env[res_model].search(domain, offset=offset, limit=page_size)
             thread_execution_time = time.time() - thread.start_time
             if thread_execution_time + 20 > time_limit:
-                warn = f"Stopping attachment import for server thread time limit. Processed {offset} " \
-                       f"attachments. {record_count - offset} remaining."
+                completed = False
                 break
             for index, rec in enumerate(recs):
                 thread_execution_time = time.time() - thread.start_time
@@ -212,8 +214,7 @@ class HubSpotAutoImporter(models.Model):
                     call_count = (call_count + 1) % 5
             self.env['ir.attachment'].flush()
             self.env.cr.commit()
-            if warn:
-                raise Warning(_(warn))
+            return completed
 
     @api.depends('ticket_page_size')
     def create_odoo_tickets(self):
@@ -239,12 +240,11 @@ class HubSpotAutoImporter(models.Model):
         page_size = int(self.ticket_page_size)
         domain = [('id', 'not in', already_loaded_ids)]
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count(domain)
-        warn = ""
+        completed = True
         for offset in range(0, no_tickets, page_size):
             thread_execution_time = time.time() - thread.start_time
             if thread_execution_time + 5 > time_limit:
-                warn = f"Stopping Odoo Ticket Creation for server thread time limit. Processed {offset} tickets. " \
-                       f"{no_tickets - offset} remain to be processed."
+                completed = False
                 break
             # Only work on tickets that have a configured pipeline and stage to which to transfer
             tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search(domain,
@@ -327,5 +327,4 @@ class HubSpotAutoImporter(models.Model):
         for s in notify_stages:
             s.write({'template_id': stage_template_dict[s].id})
         self.env.cr.commit()
-        if warn:
-            raise Warning(_(warn))
+        return completed
