@@ -24,7 +24,7 @@ class ModelName(models.Model):
         properties = self.get_hs_properties_list()
         properties.remove('contents')
         properties.remove('odoo_user')
-        already_imported = self.env['durpro_hubspot_import.hubspot_owner'].search([]).mapped('id').ids
+        already_imported = self.env['durpro_hubspot_import.hubspot_owner'].search([]).mapped('id')
         for rec in recs:
             if rec.id in already_imported:
                 continue
