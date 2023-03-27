@@ -1,5 +1,6 @@
 from odoo import models, fields, api, _
-from odoo.tools import config
+from odoo.tools import config, plaintext2html
+from lxml import etree
 import threading
 import time
 from .. import constants
