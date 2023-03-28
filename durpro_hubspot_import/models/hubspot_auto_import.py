@@ -59,6 +59,7 @@ class HubSpotAutoImporter(models.Model):
     def deactivate(self):
         if not self.action_id:
             return
+        time.sleep(2)  # Sleep 2 sec in case we're called from a scheduled action needing to terminate
         self.action_id.active = False
 
     @api.model
@@ -128,7 +129,7 @@ class HubSpotAutoImporter(models.Model):
         if controller.next_import == 'create_tickets':
             controller.create_odoo_tickets()
             controller.next_import = 'stop'
-            controller.deactivate()
+            threading.Thread(target=self.deactivate())
 
     @api.model
     def _check_time(self, delay: int) -> bool:
