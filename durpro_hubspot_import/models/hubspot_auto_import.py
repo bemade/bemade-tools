@@ -36,12 +36,12 @@ class HubSpotAutoImporter(models.Model):
         ('companies', 'Companies'),
         ('notes', 'Notes'),
         ('emails', 'Emails'),
-        ('note_attachments', 'Note Attachments'),
-        ('email_attachments', 'Email Attachments'),
         ('associate_contacts', 'Contact Associations'),
         ('associate_companies', 'Company Associations'),
         ('associate_emails', 'Email Associations'),
         ('associate_notes', 'Note Associations'),
+        ('note_attachments', 'Note Attachments'),
+        ('email_attachments', 'Email Attachments'),
         ('create_tickets', 'Create Tickets'),
         ('stop', 'Done')
     ], required=False)
@@ -64,6 +64,8 @@ class HubSpotAutoImporter(models.Model):
     @api.model
     def run_next(self):
         controller = self.env[self._name].search([('active', 'in', (True, False))], limit=1)
+        if controller.next_import == 'stop':
+            return
         if controller.next_import == 'pipelines':
             self.env['durpro_hubspot_import.hubspot_pipeline'].import_all()
             controller.next_import = 'owners'
@@ -96,18 +98,6 @@ class HubSpotAutoImporter(models.Model):
             self.after = self.env['durpro_hubspot_import.hubspot_email'].import_all(self.after or None)
             if self.after:
                 return
-            controller.next_import = 'note_attachments'
-        if controller.next_import == 'note_attachments':
-            # No time check here since the _get_attachments method handles that
-            if not controller._get_attachments('durpro_hubspot_import.hubspot_note'):
-                _logger.info("Stopped short of processing all note attachments. Will restart later.")
-                return
-            controller.next_import = 'email_attachments'
-        if controller.next_import == 'email_attachments':
-            # No time check here since the _get_attachments method handles that
-            if not controller._get_attachments('durpro_hubspot_import.hubspot_email'):
-                _logger.info("Stopped short of processing all email attachments. Will restart later.")
-                return
             controller.next_import = 'associate_contacts'
         if controller.next_import == 'associate_contacts':
             controller._check_time(300)
@@ -124,6 +114,18 @@ class HubSpotAutoImporter(models.Model):
         if controller.next_import == 'associate_notes':
             controller._check_time(600)
             self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_notes()
+            controller.next_import = 'note_attachments'
+        if controller.next_import == 'note_attachments':
+            # No time check here since the _get_attachments method handles that
+            if not controller._get_attachments('durpro_hubspot_import.hubspot_note'):
+                _logger.info("Stopped short of processing all note attachments. Will restart later.")
+                return
+            controller.next_import = 'email_attachments'
+        if controller.next_import == 'email_attachments':
+            # No time check here since the _get_attachments method handles that
+            if not controller._get_attachments('durpro_hubspot_import.hubspot_email'):
+                _logger.info("Stopped short of processing all email attachments. Will restart later.")
+                return
             controller.next_import = 'create_tickets'
         if controller.next_import == 'create_tickets':
             controller.create_odoo_tickets()
@@ -166,7 +168,8 @@ class HubSpotAutoImporter(models.Model):
     def _get_attachments(self, res_model: str) -> bool:
         """
         Loads the attachments for all the records of type res_model. Records with existing ir_attachments are
-        ignored as this is meant to be run as a one-time import.
+        ignored as this is meant to be run as a one-time import. Records without an associated ticket are also ignored
+        for the sake of resource economy.
 
         :param res_model: The addressable model name in form module.model_name for which to fetch attachments.
             The model passed is expected to have a field hs_attachment_ids representing the file IDs of the associated
@@ -179,7 +182,7 @@ class HubSpotAutoImporter(models.Model):
         page_size = 100
         already_loaded_recs = self.env['ir.attachment'].search([('res_model', '=', res_model)])
         res_ids = already_loaded_recs.mapped('res_id')
-        domain = [('hs_attachment_ids', '!=', False), ('id', 'not in', res_ids)]
+        domain = [('hs_attachment_ids', '!=', False), ('id', 'not in', res_ids), ('hubspot_tickets', '!=', False)]
         record_count = self.env[res_model].search_count(domain)
         call_count = 0
         start_time = time.time()

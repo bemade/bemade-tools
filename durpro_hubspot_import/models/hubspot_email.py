@@ -30,6 +30,9 @@ class HubSpotEmail(models.Model):
     author = fields.Many2one("res.partner", string="Message Author", compute="_compute_sender_recipients")
     recipients = fields.Many2many("res.partner", string="Message Recipients", compute="_compute_sender_recipients")
 
+    hubspot_tickets = fields.Many2many("durpro_hubspot_import.hubspot_ticket", "durpro_hubspot_import_ticket_email_rel",
+                                       "hs_object_id", "hs_ticket_id", string="Associated Tickets")
+
     @api.depends('hubspot_owner_id')
     def _compute_owner(self):
         for rec in self:

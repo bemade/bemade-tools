@@ -20,16 +20,18 @@ class HubSpotNote(models.Model):
     owner = fields.Many2one("durpro_hubspot_import.hubspot_owner", string="HubSpot Owner", compute="_compute_owner",
                             store=True)
     author = fields.Many2one("res.partner", string="Note Author", compute="_compute_author")
+    hubspot_tickets = fields.Many2many("durpro_hubspot_import.hubspot_ticket", "durpro_hubspot_import_ticket_note_rel",
+                                       "hs_object_id", "hs_ticket_id", string="Associated Tickets")
 
     @api.depends("hs_created_by")
     def _compute_author(self):
-        hs_users = self.env['durpro_hubspot_import.hubspot_owner'].search([('hs_id', 'in', self.mapped('hs_created_by'))])
+        hs_users = self.env['durpro_hubspot_import.hubspot_owner'].search(
+            [('hs_id', 'in', self.mapped('hs_created_by'))])
         hs_users_dict = {u.hs_id: u.email for u in hs_users}
-        odoo_users = self.env['res.users'].search([('email','in',hs_users.mapped('email'))])
+        odoo_users = self.env['res.users'].search([('email', 'in', hs_users.mapped('email'))])
         authors_dict = {u.email: u.partner_id for u in odoo_users}
         for rec in self:
             rec.author = authors_dict.get(hs_users_dict.get(rec.hs_created_by, False), False)
-
 
     @api.depends('hubspot_owner_id')
     def _compute_owner(self):
