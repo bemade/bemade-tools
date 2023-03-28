@@ -104,5 +104,4 @@ class HelpdeskTicket(models.Model):
     _inherit = "helpdesk.ticket"
 
     hubspot_ticket_id = fields.Many2one("durpro_hubspot_import.hubspot_ticket", string="Original Hubspot Ticket",
-                                        help="The HubSpot ticket that this ticket was created from.",
-                                        ondelete="cascade")
+                                        help="The HubSpot ticket that this ticket was created from.",)
