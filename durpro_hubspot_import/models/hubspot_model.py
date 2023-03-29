@@ -124,6 +124,7 @@ class HubSpotModel(models.AbstractModel):
                 associations.setdefault(from_rec, []).extend([r for r in rs_to])
             for from_rec, to_recs in associations.items():
                 from_rec.write({association_field: [(6, 0, [r.id for r in to_recs])]})
+            self.env.cr.commit()
         return i if i < rs_from_count - 1 else -1
 
     @api.model
