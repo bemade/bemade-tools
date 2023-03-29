@@ -105,12 +105,11 @@ class HubSpotModel(models.AbstractModel):
             associations = {}
             rs_from = self.env[f'durpro_hubspot_import.hubspot_{model_from_suffix}'].search([], offset=i, limit=100)
             rs_from_dict = {getattr(r, rs_from.hubspot_id_field): r for r in rs_from}
-            sublist = rs_from[i:min(i + 100, len(rs_from) - 1)]
             i += 100
             if i % 1000 == 0:
                 time.sleep(time.time() - start_time)
                 start_time = time.time()
-            ids = BatchInputPublicObjectId(inputs=[{'id': getattr(r, r.hubspot_id_field)} for r in sublist])
+            ids = BatchInputPublicObjectId(inputs=[{'id': getattr(r, r.hubspot_id_field)} for r in rs_from])
             rs_to = self.env[f'durpro_hubspot_import.hubspot_{model_to_suffix}']
             recs = self._api_client().crm.associations.batch_api.read(self.hubspot_model_name, rs_to.hubspot_model_name,
                                                                       batch_input_public_object_id=ids).results
