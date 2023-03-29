@@ -101,8 +101,8 @@ class HubSpotModel(models.AbstractModel):
         rs_from_count = self.env[f'durpro_hubspot_import.hubspot_{model_from_suffix}'].search_count([])
         i = start
         start_time = time.time()
-        associations = {}
         while i < rs_from_count - 1 and self._check_time(10):
+            associations = {}
             rs_from = self.env[f'durpro_hubspot_import.hubspot_{model_from_suffix}'].search([], offset=i, limit=100)
             rs_from_dict = {getattr(r, rs_from.hubspot_id_field): r for r in rs_from}
             sublist = rs_from[i:min(i + 100, len(rs_from) - 1)]
