@@ -103,28 +103,28 @@ class HubSpotAutoImporter(models.Model):
         if controller.next_import == 'associate_contacts':
             controller.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_contacts(
                 controller.next_offset)
-            if controller.next_offset == -1:
+            if not controller.next_offset:
                 controller.next_import = 'associate_companies'
             else:
                 return
         if controller.next_import == 'associate_companies':
             controller.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_companies(
                 controller.next_offset)
-            if controller.next_offset == -1:
+            if not controller.next_offset:
                 controller.next_import = 'associate_emails'
             else:
                 return
         if controller.next_import == 'associate_emails':
             controller.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_emails(
                 controller.next_offset)
-            if controller.next_offset == -1:
+            if not controller.next_offset:
                 controller.next_import = 'associate_notes'
             else:
                 return
         if controller.next_import == 'associate_notes':
             controller.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_notes(
                 controller.next_offset)
-            if controller.next_offset == -1:
+            if not controller.next_offset:
                 controller.next_import = 'note_attachments'
             else:
                 return

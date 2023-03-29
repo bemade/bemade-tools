@@ -124,7 +124,7 @@ class HubSpotModel(models.AbstractModel):
             for from_rec, to_recs in associations.items():
                 from_rec.write({association_field: [(6, 0, [r.id for r in to_recs])]})
             self.env.cr.commit()
-        return i if i < rs_from_count - 1 else -1
+        return i if i < rs_from_count - 1 else 0
 
     @api.model
     def hs_time_to_time(self, hs_timestamp: str) -> Union[time.struct_time, bool]:
