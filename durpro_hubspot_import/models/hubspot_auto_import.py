@@ -199,19 +199,15 @@ class HubSpotAutoImporter(models.Model):
         record_count = self.env[res_model].search_count(domain)
         call_count = 0
         start_time = time.time()
-        completed = True
-
-        for offset in range(0, record_count, page_size):
+        offset = 0
+        while offset < record_count and self._check_time(20):
             recs = self.env[res_model].search(domain, offset=offset, limit=page_size)
-            thread_execution_time = time.time() - thread.start_time
-            if thread_execution_time + 20 > time_limit:
-                completed = False
-                break
+            offset += page_size
             for index, rec in enumerate(recs):
                 thread_execution_time = time.time() - thread.start_time
                 if thread_execution_time + 20 > time_limit:
-                    warn = f"Stopping attachment import for server thread time limit. Processed {offset + index} " \
-                           f"attachments. {record_count - (offset + index)} remaining."
+                    _logger.info(f"Stopping attachment import for server thread time limit. Processed "
+                                 f"{offset + index} attachments. {record_count - (offset + index)} remaining.")
                     break
                 for file_id in str.split(rec.hs_attachment_ids, ';'):
                     f = self.env['durpro_hubspot_import.hubspot_attachment'].import_one(file_id)  # one API call
@@ -232,7 +228,11 @@ class HubSpotAutoImporter(models.Model):
                     call_count = (call_count + 1) % 5
             self.env['ir.attachment'].flush()
             self.env.cr.commit()
-            return completed
+        completed = offset >= record_count
+        if not completed:
+            _logger.info(f"Stopping attachment import for server thread time limit. Processed {offset} attachments. "
+                         f"{record_count - offset} remaining.")
+        return completed
 
     @api.depends('ticket_page_size')
     def create_odoo_tickets(self):
