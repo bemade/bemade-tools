@@ -67,7 +67,7 @@ class HubSpotTicket(models.Model):
 
     @api.model
     def import_associated_notes(self, next_offset: int) -> int:
-        self.import_associations('ticket', 'note', 'associated_notes', next_offset)
+        return self.import_associations('ticket', 'note', 'associated_notes', next_offset)
 
     @api.depends("hs_pipeline", "hs_pipeline_stage")
     def _compute_pipeline(self):

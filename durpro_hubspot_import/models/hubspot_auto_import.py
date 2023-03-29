@@ -76,55 +76,55 @@ class HubSpotAutoImporter(models.Model):
             self.env['durpro_hubspot_import.hubspot_owner'].import_all()
             controller.next_import = 'tickets'
         if controller.next_import == 'tickets':
-            self.after = self.env['durpro_hubspot_import.hubspot_ticket'].import_all(self.after or None)
-            if self.after:
+            controller.after = self.env['durpro_hubspot_import.hubspot_ticket'].import_all(controller.after or None)
+            if controller.after:
                 return
             controller.next_import = 'contacts'
         if controller.next_import == 'contacts':
-            self.after = self.env['durpro_hubspot_import.hubspot_contact'].import_all(self.after or None)
-            if self.after:
+            controller.after = self.env['durpro_hubspot_import.hubspot_contact'].import_all(controller.after or None)
+            if controller.after:
                 return
             controller.next_import = 'companies'
         if controller.next_import == 'companies':
-            self.after = self.env['durpro_hubspot_import.hubspot_company'].import_all(self.after or None)
-            if self.after:
+            controller.after = self.env['durpro_hubspot_import.hubspot_company'].import_all(controller.after or None)
+            if controller.after:
                 return
             controller.next_import = 'notes'
         if controller.next_import == 'notes':
-            self.after = self.env['durpro_hubspot_import.hubspot_note'].import_all(self.after or None)
-            if self.after:
+            controller.after = self.env['durpro_hubspot_import.hubspot_note'].import_all(controller.after or None)
+            if controller.after:
                 return
             controller.next_import = 'emails'
         if controller.next_import == 'emails':
-            self.after = self.env['durpro_hubspot_import.hubspot_email'].import_all(self.after or None)
-            if self.after:
+            controller.after = self.env['durpro_hubspot_import.hubspot_email'].import_all(controller.after or None)
+            if controller.after:
                 return
             controller.next_import = 'associate_contacts'
         if controller.next_import == 'associate_contacts':
-            self.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_contacts(
-                self.next_offset)
-            if self.next_offset == -1:
+            controller.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_contacts(
+                controller.next_offset)
+            if controller.next_offset == -1:
                 controller.next_import = 'associate_companies'
             else:
                 return
         if controller.next_import == 'associate_companies':
-            self.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_companies(
-                self.next_offset)
-            if self.next_offset == -1:
+            controller.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_companies(
+                controller.next_offset)
+            if controller.next_offset == -1:
                 controller.next_import = 'associate_emails'
             else:
                 return
         if controller.next_import == 'associate_emails':
-            self.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_emails(
-                self.next_offset)
-            if self.next_offset == -1:
+            controller.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_emails(
+                controller.next_offset)
+            if controller.next_offset == -1:
                 controller.next_import = 'associate_notes'
             else:
                 return
         if controller.next_import == 'associate_notes':
-            self.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_notes(
-                self.next_offset)
-            if self.next_offset == -1:
+            controller.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_notes(
+                controller.next_offset)
+            if controller.next_offset == -1:
                 controller.next_import = 'note_attachments'
             else:
                 return
