@@ -101,7 +101,7 @@ class HubSpotAutoImporter(models.Model):
                 return
             controller.next_import = 'associate_contacts'
         if controller.next_import == 'associate_contacts':
-            self.next_offset_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_contacts(
+            self.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_contacts(
                 self.next_offset)
             if self.next_offset == -1:
                 controller.next_import = 'associate_companies'
