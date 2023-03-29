@@ -54,20 +54,20 @@ class HubSpotTicket(models.Model):
     user_id = fields.Many2one("res.users", compute="_compute_owner", store=True)
 
     @api.model
-    def import_associated_contacts(self):
-        self.import_associations('ticket', 'contact', 'associated_contacts')
+    def import_associated_contacts(self, next_offset: int) -> int:
+        return self.import_associations('ticket', 'contact', 'associated_contacts', next_offset)
 
     @api.model
-    def import_associated_companies(self):
-        self.import_associations('ticket', 'company', 'associated_companies')
+    def import_associated_companies(self, next_offset: int) -> int:
+        return self.import_associations('ticket', 'company', 'associated_companies', next_offset)
 
     @api.model
-    def import_associated_emails(self):
-        self.import_associations('ticket', 'email', 'associated_emails')
+    def import_associated_emails(self, next_offset: int) -> int:
+        return self.import_associations('ticket', 'email', 'associated_emails', next_offset)
 
     @api.model
-    def import_associated_notes(self):
-        self.import_associations('ticket', 'note', 'associated_notes')
+    def import_associated_notes(self, next_offset: int) -> int:
+        self.import_associations('ticket', 'note', 'associated_notes', next_offset)
 
     @api.depends("hs_pipeline", "hs_pipeline_stage")
     def _compute_pipeline(self):
@@ -104,4 +104,4 @@ class HelpdeskTicket(models.Model):
     _inherit = "helpdesk.ticket"
 
     hubspot_ticket_id = fields.Many2one("durpro_hubspot_import.hubspot_ticket", string="Original Hubspot Ticket",
-                                        help="The HubSpot ticket that this ticket was created from.",)
+                                        help="The HubSpot ticket that this ticket was created from.", )

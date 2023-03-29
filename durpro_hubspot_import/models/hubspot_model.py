@@ -97,13 +97,14 @@ class HubSpotModel(models.AbstractModel):
         return after
 
     @api.model
-    def import_associations(self, model_from_suffix, model_to_suffix, association_field):
-        rs_from = self.env[f'durpro_hubspot_import.hubspot_{model_from_suffix}'].search([])
-        rs_from_dict = {getattr(r, rs_from.hubspot_id_field): r for r in rs_from}
-        i = 0
+    def import_associations(self, model_from_suffix, model_to_suffix, association_field, start: int = 0) -> int:
+        rs_from_count = self.env[f'durpro_hubspot_import.hubspot_{model_from_suffix}'].search_count([])
+        i = start
         start_time = time.time()
         associations = {}
-        while i < len(rs_from) - 1:
+        while i < rs_from_count - 1 and self._check_time(10):
+            rs_from = self.env[f'durpro_hubspot_import.hubspot_{model_from_suffix}'].search([], offset=i, limit=100)
+            rs_from_dict = {getattr(r, rs_from.hubspot_id_field): r for r in rs_from}
             sublist = rs_from[i:min(i + 100, len(rs_from) - 1)]
             i += 100
             if i % 1000 == 0:
@@ -121,8 +122,9 @@ class HubSpotModel(models.AbstractModel):
                 if not from_rec or not rs_to:
                     continue
                 associations.setdefault(from_rec, []).extend([r for r in rs_to])
-        for from_rec, to_recs in associations.items():
-            from_rec.write({association_field: [(6, 0, [r.id for r in to_recs])]})
+            for from_rec, to_recs in associations.items():
+                from_rec.write({association_field: [(6, 0, [r.id for r in to_recs])]})
+        return i if i < rs_from_count - 1 else -1
 
     @api.model
     def hs_time_to_time(self, hs_timestamp: str) -> Union[time.struct_time, bool]:

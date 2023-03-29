@@ -47,6 +47,7 @@ class HubSpotAutoImporter(models.Model):
     ], required=False)
 
     after = fields.Char(string="After Token", help="Token for fetching the next page of results when interrupted.")
+    next_offset = fields.Integer(string="Next Offset", help="Offset integer to feed to association getters.")
 
     def _compute_page_size(self):
         self.ticket_page_size = self.env['ir.config_parameter'].sudo().get_param(constants.PAGE_SIZE_PARAM)
@@ -100,21 +101,33 @@ class HubSpotAutoImporter(models.Model):
                 return
             controller.next_import = 'associate_contacts'
         if controller.next_import == 'associate_contacts':
-            controller._check_time(800)
-            self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_contacts()
-            controller.next_import = 'associate_companies'
+            self.next_offset_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_contacts(
+                self.next_offset)
+            if self.next_offset == -1:
+                controller.next_import = 'associate_companies'
+            else:
+                return
         if controller.next_import == 'associate_companies':
-            controller._check_time(800)
-            self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_companies()
-            controller.next_import = 'associate_emails'
+            self.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_companies(
+                self.next_offset)
+            if self.next_offset == -1:
+                controller.next_import = 'associate_emails'
+            else:
+                return
         if controller.next_import == 'associate_emails':
-            controller._check_time(880)
-            self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_emails()
-            controller.next_import = 'associate_notes'
+            self.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_emails(
+                self.next_offset)
+            if self.next_offset == -1:
+                controller.next_import = 'associate_notes'
+            else:
+                return
         if controller.next_import == 'associate_notes':
-            controller._check_time(600)
-            self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_notes()
-            controller.next_import = 'note_attachments'
+            self.next_offset = self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_notes(
+                self.next_offset)
+            if self.next_offset == -1:
+                controller.next_import = 'note_attachments'
+            else:
+                return
         if controller.next_import == 'note_attachments':
             # No time check here since the _get_attachments method handles that
             if not controller._get_attachments('durpro_hubspot_import.hubspot_note'):
