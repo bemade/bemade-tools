@@ -100,11 +100,11 @@ class HubSpotAutoImporter(models.Model):
                 return
             controller.next_import = 'associate_contacts'
         if controller.next_import == 'associate_contacts':
-            controller._check_time(300)
+            controller._check_time(800)
             self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_contacts()
             controller.next_import = 'associate_companies'
         if controller.next_import == 'associate_companies':
-            controller._check_time(300)
+            controller._check_time(800)
             self.env['durpro_hubspot_import.hubspot_ticket'].import_associated_companies()
             controller.next_import = 'associate_emails'
         if controller.next_import == 'associate_emails':
