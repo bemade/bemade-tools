@@ -10,7 +10,7 @@ class HubSpotPipeline(models.Model):
     display_order = fields.Integer(string="Display Order", )
     hs_archived = fields.Boolean(string="HS archived", )
     stages = fields.One2many("durpro_hubspot_import.hubspot_pipeline_stage", "hs_pipeline_id", string="Stages")
-    hs_pipeline_id = fields.Char(string="HS Pipeline Stage", )
+    hs_pipeline_id = fields.Char(string="HS Pipeline ID", )
 
     helpdesk_team_id = fields.Many2one("helpdesk.team", string="Associated Helpdesk Team")
 
@@ -25,7 +25,10 @@ class HubSpotPipeline(models.Model):
         Results structure at https://developers.hubspot.com/docs/api/crm/pipelines under "Retrieve all pipelines"
         """
         objects_fetched = self._api_client().crm.pipelines.pipelines_api.get_all(object_type="tickets").results
+        already_loaded = self.env[self._name].search([]).mapped('hs_pipeline_id')
         for obj in objects_fetched:
+            if obj.id in already_loaded:
+                continue
             obj = obj.to_dict()
             pipeline_vars = {
                 'label': obj['label'],
