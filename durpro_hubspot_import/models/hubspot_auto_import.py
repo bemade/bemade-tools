@@ -333,16 +333,14 @@ class HubSpotAutoImporter(models.Model):
             self.env['ir.attachment'].flush()
             self.env['mail.message'].flush()
             self.env.cr.commit()
-        if offset < no_tickets:
-            _logger.info(f"Stopping Odoo Ticket Creation for server thread time limit. Processed at least"
-                         f"{offset} tickets. {no_tickets - offset} remain to be processed.")
-            return False
-        return True
-
-        # Last commit if we got interrupted by time running out
+        # Turn notifications back on
         if subtype:
             subtype.default = subtype_default_initial
         for s in notify_stages:
             s.write({'template_id': stage_template_dict[s].id})
         self.env.cr.commit()
-        return completed
+        if offset < no_tickets:
+            _logger.info(f"Stopping Odoo Ticket Creation for server thread time limit. Processed at least"
+                         f"{offset} tickets. {no_tickets - offset} remain to be processed.")
+            return False
+        return True
