@@ -11,7 +11,8 @@ class HubSpotImportWizard(models.TransientModel):
     _name = "durpro_hubspot_import.hubspot_import_wizard"
     _description = 'Allows for the importation of HubSpot data into Odoo Helpdesk Tickets (and associations)'
 
-    import_controller = fields.Many2one(string="Import Controller", compute='_get_controller')
+    import_controller = fields.Many2one(comodel_name="durpro_hubspot_import.auto_importer", string="Import Controller",
+                                        compute='_get_controller')
 
     ticket_page_size = fields.Integer(string="Ticket Page Size", compute="_compute_page_size")
 
