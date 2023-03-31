@@ -141,7 +141,8 @@ class HubSpotAutoImporter(models.Model):
                 return
             controller.next_import = 'create_tickets'
         if controller.next_import == 'create_tickets':
-            controller.create_odoo_tickets()
+            if not controller.create_odoo_tickets():
+                return
             controller.next_import = 'stop'
 
     @api.model
@@ -259,21 +260,18 @@ class HubSpotAutoImporter(models.Model):
         domain = [('id', 'not in', already_loaded_ids)]
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count(domain)
         completed = True
-        for offset in range(0, no_tickets, page_size):
-            thread_execution_time = time.time() - thread.start_time
-            if thread_execution_time + 5 > time_limit:
-                completed = False
-                break
+        offset = 0
+        while offset < no_tickets -1 and self._check_time(5):
             # Only work on tickets that have a configured pipeline and stage to which to transfer
             tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search(domain,
                                                                               offset=offset, limit=page_size).filtered(
                 lambda
                     r: r.pipeline and r.pipeline.helpdesk_team_id and r.pipeline_stage and r.pipeline_stage.helpdesk_stage)
+            offset += page_size
             for index, ticket in enumerate(tickets):
-                thread_execution_time = time.time() - thread.start_time
-                if thread_execution_time + 5 > time_limit:
-                    warn = f"Stopping Odoo Ticket Creation for server thread time limit. Processed {offset + index} " \
-                           f"tickets. {no_tickets - (offset + index)} remain to be processed."
+                if not self._check_time(5):
+                    _logger.info(f"Stopping Odoo Ticket Creation for server thread time limit. Processed "
+                                 f"{offset + index} tickets. {no_tickets - (offset + index)} remain to be processed.")
                     break
                 # Create a ticket in the right pipeline
                 hs_time = ticket.hs_time_to_time(ticket.createdate) if ticket.createdate else False
@@ -338,6 +336,11 @@ class HubSpotAutoImporter(models.Model):
             self.env['ir.attachment'].flush()
             self.env['mail.message'].flush()
             self.env.cr.commit()
+            if offset < no_tickets:
+                _logger.info(f"Stopping Odoo Ticket Creation for server thread time limit. Processed at least"
+                             f"{offset} tickets. {no_tickets - offset} remain to be processed.")
+                return False
+            return True
 
         # Last commit if we got interrupted by time running out
         if subtype:
