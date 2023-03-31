@@ -243,8 +243,6 @@ class HubSpotAutoImporter(models.Model):
         limit.
         """
         # Handle time limits, turn off notifications
-        time_limit = config['limit_time_real']
-        thread = threading.current_thread()
         already_loaded_ids = self.env['helpdesk.ticket'].search([('hubspot_ticket_id', '!=', False)]).mapped(
             'hubspot_ticket_id').ids
         # temporarily deactivate notifications
@@ -259,9 +257,8 @@ class HubSpotAutoImporter(models.Model):
         page_size = int(self.ticket_page_size)
         domain = [('id', 'not in', already_loaded_ids)]
         no_tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search_count(domain)
-        completed = True
         offset = 0
-        while offset < no_tickets -1 and self._check_time(5):
+        while offset < no_tickets - 1 and self._check_time(5):
             # Only work on tickets that have a configured pipeline and stage to which to transfer
             tickets = self.env['durpro_hubspot_import.hubspot_ticket'].search(domain,
                                                                               offset=offset, limit=page_size).filtered(
@@ -336,11 +333,11 @@ class HubSpotAutoImporter(models.Model):
             self.env['ir.attachment'].flush()
             self.env['mail.message'].flush()
             self.env.cr.commit()
-            if offset < no_tickets:
-                _logger.info(f"Stopping Odoo Ticket Creation for server thread time limit. Processed at least"
-                             f"{offset} tickets. {no_tickets - offset} remain to be processed.")
-                return False
-            return True
+        if offset < no_tickets:
+            _logger.info(f"Stopping Odoo Ticket Creation for server thread time limit. Processed at least"
+                         f"{offset} tickets. {no_tickets - offset} remain to be processed.")
+            return False
+        return True
 
         # Last commit if we got interrupted by time running out
         if subtype:
