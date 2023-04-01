@@ -58,7 +58,7 @@ class HubSpotModel(models.AbstractModel):
     def _check_time(self, delay: int) -> bool:
         time_limit = config['limit_time_real']
         if time_limit == 0:
-            return True
+            time_limit = 900  # Odoo.sh sets a fake 0 sec time limit but cuts off at 900s
         thread = threading.current_thread()
         thread_execution_time = time.time() - thread.start_time
         if thread_execution_time + delay < time_limit:

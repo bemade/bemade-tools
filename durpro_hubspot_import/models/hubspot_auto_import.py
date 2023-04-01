@@ -148,8 +148,8 @@ class HubSpotAutoImporter(models.Model):
     @api.model
     def _check_time(self, delay: int) -> bool:
         time_limit = config['limit_time_real']
-        if time_limit == 0:
-            return True
+        if time_limit == 0:  # Odoo.sh sets a fake 0 sec time limit, but cuts us off at 900s
+            time_limit = 900
         thread = threading.current_thread()
         thread_execution_time = time.time() - thread.start_time
         if thread_execution_time + delay < time_limit:
