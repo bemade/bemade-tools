@@ -192,9 +192,6 @@ class HubSpotAutoImporter(models.Model):
             attachments, semicolon separated.
         :return: bool. True if import completed, False if interrupted for time.
         """
-        time_limit = config['limit_time_real']
-        thread = threading.current_thread()
-
         page_size = 100
         already_loaded_recs = self.env['ir.attachment'].search([('res_model', '=', res_model)])
         res_ids = already_loaded_recs.mapped('res_id')
@@ -207,8 +204,7 @@ class HubSpotAutoImporter(models.Model):
             recs = self.env[res_model].search(domain, offset=offset, limit=page_size)
             offset += page_size
             for index, rec in enumerate(recs):
-                thread_execution_time = time.time() - thread.start_time
-                if thread_execution_time + 20 > time_limit:
+                if not self._check_time(20):
                     _logger.info(f"Stopping attachment import for server thread time limit. Processed "
                                  f"{offset + index} attachments. {record_count - (offset + index)} remaining.")
                     break
