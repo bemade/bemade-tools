@@ -8,6 +8,9 @@ from typing import Union
 import threading
 import time
 from odoo.tools import config
+import logging
+
+_logger = logging.getLogger(__name__)
 
 
 class HubSpotModel(models.AbstractModel):
@@ -54,6 +57,8 @@ class HubSpotModel(models.AbstractModel):
     @api.model
     def _check_time(self, delay: int) -> bool:
         time_limit = config['limit_time_real']
+        if time_limit < 30:
+            _logger.warn(f"Thread time limit: { time_limit } too low to run HubSpot Auto Import")
         thread = threading.current_thread()
         thread_execution_time = time.time() - thread.start_time
         if thread_execution_time + delay < time_limit:
