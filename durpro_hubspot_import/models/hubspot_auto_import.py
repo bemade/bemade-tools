@@ -5,6 +5,7 @@ import threading
 import time
 from .. import constants
 import logging
+from PIL import UnidentifiedImageError
 
 _logger = logging.getLogger(__name__)
 
@@ -215,12 +216,16 @@ class HubSpotAutoImporter(models.Model):
                         continue
                     raw = f.get_data()  # one API call
                     filename = f.name or "" + f.extension or ""
-                    self.env['ir.attachment'].create({
-                        'name': filename,
-                        'raw': raw,
-                        'res_model': res_model,
-                        'res_id': rec.id,
-                    })
+                    try:
+                        self.env['ir.attachment'].create({
+                            'name': filename,
+                            'raw': raw,
+                            'res_model': res_model,
+                            'res_id': rec.id,
+                        })
+                    except UnidentifiedImageError:
+                        _logger.info(f"Couldn't process attachment # {f.id}: {filename}")
+                        continue
                     if call_count == 4:
                         time.sleep(time.time() - start_time)
                         start_time = time.time()
