@@ -6,7 +6,7 @@ class WorkOrder(models.Model):
     _inherit = 'durpro_fso.work_order'
 
     converted = fields.Many2one('project.task')
-    active = fields.Boolean()
+    active = fields.Boolean(default=True)
 
     def action_convert_to_fsm(self):
         tasks = self.copy_as_fsm()
