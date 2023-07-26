@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <data>
+        <record id="tag_converted_from_fso" model="project.tags">
+            <field name="name">Converted from FSO</field>
+            <field name="color" eval="3"/>
+        </record>
+        <record id="convert_work_order_to_fsm" model="ir.actions.server">
+            <field name="name">Convert to FSM</field>
+            <field name="model_id" ref="durpro_fso.model_durpro_fso_work_order"/>
+            <field name="state">code</field>
+            <field name="code">records.action_convert_to_fsm()</field>
+        </record>
+    </data>
+</odoo>
