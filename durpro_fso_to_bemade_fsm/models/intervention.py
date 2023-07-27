@@ -22,6 +22,7 @@ class Intervention(models.Model):
             'project_id': self.env.ref('industry_fsm.fsm_project').id,
             'tag_ids': [Command.set(self.env.ref(
                 'durpro_fso_to_bemade_fsm.tag_converted_from_fso').ids)],
+            'user_ids': [Command.set(r.work_order_id._convert_assignees_to_users().ids)],
         } for r in self])
 
     def _convert_state(self):

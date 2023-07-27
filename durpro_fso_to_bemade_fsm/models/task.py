@@ -18,6 +18,8 @@ class Task(models.Model):
             'tag_ids': [Command.set(self.env.ref(
                 'durpro_fso_to_bemade_fsm.tag_converted_from_fso').ids)],
             'project_id': self.env.ref('industry_fsm.fsm_project').id,
+            'user_ids': [Command.set(self.intervention_id.work_order_id.
+                                     _convert_assignees_to_users().ids)],
             # We don't copy the intervention_id as parent_id to avoid infinite loop
         } for r in self])
 

@@ -1,4 +1,4 @@
-from odoo import models, fields, api, Command
+from odoo import models, fields, Command
 from .tools import converter
 
 
@@ -6,20 +6,14 @@ class WorkOrder(models.Model):
     _inherit = 'durpro_fso.work_order'
 
     converted = fields.Many2one('project.task')
+    visit = fields.Many2one('bemade_fsm.visit')
     active = fields.Boolean(default=True)
 
     def action_convert_to_fsm(self):
         tasks = self.copy_as_fsm()
         self._copy_actual_times_as_timesheets()
         self.active = False
-        return {
-            'view_mode': 'kanban',
-            'res_model': 'project.project',
-            'res_id': self.env.ref('industry_fsm.fsm_project').id,
-            'type': 'ir.actions.act_window',
-            'context': {'search_default_id': tasks.ids},
-            'target': 'main',
-        }
+        return tasks.ids
 
     @converter
     def copy_as_fsm(self):
@@ -37,11 +31,11 @@ class WorkOrder(models.Model):
             'planned_date_end': r.time_end_planned,
             'planned_hours': r.time_planned,
             # TODO: tools_needed are left out, see if they need to be transferred.
-            'child_ids': [Command.set(r.intervention_ids.copy_as_fsm().ids)],
             'equipment_ids': [Command.set(r.equipment_ids.copy_as_fsm().ids)],
             'tag_ids': [Command.set(self.env.ref(
-                'durpro_fso_to_bemade_fsm.tag_converted_from_fso').ids)]
-            # TODO: Figure out if we can have some logic for tying back to labour lines
+                'durpro_fso_to_bemade_fsm.tag_converted_from_fso').ids), ],
+            'visit_id': r._convert_to_visit().id,
+            'child_ids': [Command.set(r.intervention_ids.copy_as_fsm().ids)],
         } for r in self])
 
     def _convert_stage(self):
@@ -57,7 +51,6 @@ class WorkOrder(models.Model):
         fsm_new = self.env.ref('industry_fsm.planning_project_stage_0')
         fsm_parts = self.env.ref('bemade_fsm.planning_project_stage_waiting_parts')
         fsm_planned = self.env.ref('industry_fsm.planning_project_stage_1')
-        fsm_in_prog = self.env.ref('industry_fsm.planning_project_stage_2')
         fsm_executed = self.env.ref('bemade_fsm.planning_project_stage_work_completed')
         fsm_exception = self.env.ref('bemade_fsm.planning_project_stage_exception')
         fsm_done = self.env.ref('industry_fsm.planning_project_stage_3')
@@ -91,3 +84,35 @@ class WorkOrder(models.Model):
                     'project_id': rec.env.ref('industry_fsm.fsm_project').id,
                     'task_id': rec.converted.id,
                 } for u in users])
+
+    def _convert_to_visit(self):
+        if self.visit:
+            return self.visit
+        if not self.sale_id.visit_ids:
+            visit = self._add_first_visit_to_so()
+        else:
+            visit = self._add_subsequent_visit_to_so()
+        self.visit = visit
+        return visit
+
+    def _add_first_visit_to_so(self):
+        so = self.sale_id
+        visit = self.env['bemade_fsm.visit'].create({
+            'sale_order_id': so.id,
+            'label': self.name,
+            'approx_date': self.date_service,
+        })
+        visit.so_section_id.sequence = 1
+        for sol in so.order_line.filtered(lambda l: l != visit.so_section_id):
+            sol.sequence += 1
+        return visit
+
+    def _add_subsequent_visit_to_so(self):
+        visit = self.env['bemade_fsm.visit'].create({
+            'sale_order_id': self.sale_id.id,
+            'label': self.name,
+            'approx_date': self.date_service,
+        })
+        visit.so_section_id.sequence = max(
+            self.sale_id.order_line.mapped('sequence')) + 1
+        return visit
