@@ -20,7 +20,7 @@ class WorkOrder(models.Model):
         return self.env['project.task'].create([{
             'project_id': self.env.ref('industry_fsm.fsm_project').id,
             'sale_order_id': r.sale_id.id,
-            'name': f'Work Order: {r.name}',
+            'name': f'{r.name}',
             'partner_id': r.customer_shipping_id.id,
             'stage_id': r._convert_stage().id,
             'work_order_contacts': [Command.set(r.send_work_order_to.ids)],
