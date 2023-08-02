@@ -12,6 +12,7 @@ class WorkOrder(models.Model):
     def action_convert_to_fsm(self):
         tasks = self.copy_as_fsm()
         self._copy_actual_times_as_timesheets()
+        self._copy_chatter()
         self.active = False
         return tasks.ids
 
@@ -116,3 +117,7 @@ class WorkOrder(models.Model):
         visit.so_section_id.sequence = max(
             self.sale_id.order_line.mapped('sequence')) + 1
         return visit
+
+    def _copy_chatter(self):
+        for rec in self:
+            rec.message_change_thread(rec.converted)
