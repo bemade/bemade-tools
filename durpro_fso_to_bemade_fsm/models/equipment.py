@@ -8,7 +8,7 @@ class EquipmentTag(models.Model):
 
     @converter
     def copy_as_fsm(self):
-        return self.env['bemade_fsm.equipment.tag'].create([{
+        self.env['bemade_fsm.equipment.tag'].create([{
             'name': r.name,
             'color': r.color,
         } for r in self])
@@ -21,7 +21,7 @@ class Equipment(models.Model):
 
     @converter
     def copy_as_fsm(self):
-        return self.env['bemade_fsm.equipment'].create([{
+        res = self.env['bemade_fsm.equipment'].create([{
             'pid_tag': r.pid_tag,
             'name': r.name,
             'complete_name': r.complete_name,
@@ -30,3 +30,7 @@ class Equipment(models.Model):
             'location_notes': r.location_notes,
             # task_ids left blank as set in the intervention
         } for r in self])
+        # Locations with equipment should be of company type, convert them here
+        self.mapped('converted').mapped('partner_location_id').\
+            write({'company_type': 'company'})
+        return res
