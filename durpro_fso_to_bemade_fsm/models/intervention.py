@@ -10,8 +10,8 @@ class Intervention(models.Model):
     @converter
     def copy_as_fsm(self):
         return self.env['project.task'].create([{
-            'name': r.name,
-            'description': r.description,
+            'name': r.name or '' + r.description or '',
+            'description': r.comments,
             'planned_date_begin': r.date_planned,
             # Leave out parent_id since it's set by the work order side
             'equipment_ids': [Command.link(r.equipment_id.copy_as_fsm().id)],

@@ -10,8 +10,8 @@ class Task(models.Model):
     @converter
     def copy_as_fsm(self):
         return self.env['project.task'].create([{
-            'name': r.description,
-            'description': r._convert_comments(),
+            'name': r.name or '' + r.description or '',
+            'description': r.comments,
             'planned_hours': r.time_estimate,
             'stage_id': r._convert_state().id,
             'sequence': r.sequence,
@@ -23,11 +23,6 @@ class Task(models.Model):
             # We don't copy the intervention_id as parent_id to avoid infinite loop
         } for r in self])
 
-    def _convert_comments(self):
-        if not self.comments:
-            return ""
-        return f"""<p><strong>Comments:</strong></p>
-                   <p>{self.comments}</p>"""
 
     def _convert_state(self):
         if self.state == 'done':

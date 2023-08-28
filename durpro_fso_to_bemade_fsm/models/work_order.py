@@ -74,7 +74,9 @@ class WorkOrder(models.Model):
 
     def _copy_actual_times_as_timesheets(self):
         for rec in self:
-            users = rec._convert_assignees_to_users()
+            if not (rec.time_actual and rec.date_service):
+                continue
+            users = rec._convert_assignees_to_users().filtered(lambda u: u.employee_id)
             if users:
                 return rec.env['account.analytic.line'].create([{
                     'date': rec.date_service,

@@ -8,7 +8,7 @@ class EquipmentTag(models.Model):
 
     @converter
     def copy_as_fsm(self):
-        self.env['bemade_fsm.equipment.tag'].create([{
+        return self.env['bemade_fsm.equipment.tag'].create([{
             'name': r.name,
             'color': r.color,
         } for r in self])
