@@ -10,7 +10,7 @@ class Task(models.Model):
     @converter
     def copy_as_fsm(self):
         return self.env['project.task'].create([{
-            'name': r.name or '' + r.description or '',
+            'name': r.description or r.name,
             'description': r.comments,
             'planned_hours': r.time_estimate,
             'stage_id': r._convert_state().id,
