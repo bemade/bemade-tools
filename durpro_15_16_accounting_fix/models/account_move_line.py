@@ -2,6 +2,8 @@ from odoo import models, fields, api, _, Command
 from odoo.exceptions import ValidationError
 from odoo.tools import mute_logger
 import logging
+from typing import List, Set, Tuple
+from pprint import pprint
 
 _logger = logging.getLogger(__name__)
 
@@ -10,7 +12,7 @@ class AccountMoveLine(models.Model):
     _inherit = 'account.move.line'
 
     @api.model
-    def fix_problem_account_payments(self):
+    def fix(self):
         """
         The following account.payment entries are problematic for migration:
             * Have more than 1 currency in the lines
@@ -26,10 +28,17 @@ class AccountMoveLine(models.Model):
                 line.account_id == company_id.transfer_account_id
         :return:
         """
+        # Start by working on a copy of the account.move.line table
+        self.env.cr.execute("DROP TABLE IF EXISTS durpro_fix_aml")
+        self.env.cr.execute("CREATE TABLE durpro_fix_aml AS TABLE account_move_line")
+        _logger.info("Checking debit credit balances between copied table and original before proceeding.")
+        if not self._check_debit_credit_balances():
+            return
+
         _logger.info("Getting Journal Entries with more than one currency")
         self.env.cr.execute("""
             select am.id as move_id, am.currency_id as move_currency_id
-            from account_move_line aml
+            from durpro_fix_aml aml
                 inner join account_move am on am.id=aml.move_id
                 inner join account_account a on aml.account_id=a.id
             where am.state not in ('draft','cancel')
@@ -51,7 +60,7 @@ class AccountMoveLine(models.Model):
             select am.id, aml.account_id, am.currency_id as currency_id, string_agg(distinct(aml.id)::text, ',') as aml_ids, 
                 sum(aml.debit) as debit, sum(aml.amount_currency) as amount_currency, sum(aml.credit) as credit
             from account_move am 
-                inner join account_move_line aml on am.id = aml.move_id
+                inner join durpro_fix_aml aml on am.id = aml.move_id
                 inner join account_account a on aml.account_id = a.id
                 inner join res_company company on am.company_id = company.id
                 inner join account_journal j on am.journal_id = j.id
@@ -64,7 +73,10 @@ class AccountMoveLine(models.Model):
         counterpart_lines = self.env.cr.dictfetchall()
         # Merge each group of counterpart lines into a single line
         _logger.info(f"Updating {len(counterpart_lines)} Counterpart Lines")
-        self._run_updates(counterpart_lines)
+        to_merge = self._run_updates(counterpart_lines)
+        # Check debit and credit balances
+        if not self._check_debit_credit_balances():
+            return
 
         # Get the account.payment entries that have more than 1 liquidity line
         _logger.info("Getting Liquidity Lines.")
@@ -72,7 +84,7 @@ class AccountMoveLine(models.Model):
             select am.id, aml.account_id, am.currency_id as currency_id, string_agg(distinct(aml.id)::text, ',') as aml_ids, 
                 sum(aml.debit) as debit, sum(aml.amount_currency) as amount_currency, sum(aml.credit) as credit
             from account_move am 
-                inner join account_move_line aml on am.id = aml.move_id
+                inner join durpro_fix_aml aml on am.id = aml.move_id
                 inner join account_payment ap on ap.move_id = am.id
                 inner join account_payment_method_line mapml on ap.payment_method_line_id = mapml.id
                 inner join account_account a on aml.account_id = a.id
@@ -90,13 +102,14 @@ class AccountMoveLine(models.Model):
         """)
         liquidity_lines = self.env.cr.dictfetchall()
         _logger.info(f"Updating {len(liquidity_lines)} Liquidity Lines")
-        self._run_updates(liquidity_lines)
-
+        to_merge.append(self._run_updates(liquidity_lines))
+        # Check debit and credit balances
+        if not self._check_debit_credit_balances():
+            return
         # Check that all entries are now ok
-
         sql = """
             select am.id, am.name, count(aml.id), a.internal_type, string_agg(a.name, ', ')
-            from account_move_line aml
+            from durpro_fix_aml aml
                 inner join account_move am on am.id=aml.move_id
                 inner join account_account a on a.id=aml.account_id
             group by
@@ -112,23 +125,38 @@ class AccountMoveLine(models.Model):
             _logger.warning(f"There are still {len(lines)} problematic entries")
         else:
             _logger.info("All journal entries have been fixed.")
+        _logger.info("Balances match. Committing changes and merging lines.")
+        self.env.cr.execute(""" UPDATE account_move_line FROM durpro_fix_aml aml SET account_move_line.debit = aml.debit,
+                                account_move_line.credit = aml.credit, account_move_line.amount_currency = aml.amount_currency
+                                WHERE account_move_line.id = aml.id""")
+        self._merge_entries(set(to_merge))
+        _logger.info("Done merging and committing. Cleaning up.")
+        self.env.cr.execute("DROP TABLE IF EXISTS durpro_fix_aml")
         self.env.cr.commit()
 
-    def _run_updates(self, lines):
-        updates = [
-            {
-                'move_line_id': int(line['aml_ids'].split(',')[0]),
-                'line_ids_to_merge': set(int(line_id) for line_id in line['aml_ids'].split(',')[1:]),
-                'debit': max(line['debit'] - line['credit'], 0),
-                'credit': max(line['credit'] - line['debit'], 0),
-                #  Make sure that te sign on amount_currency matches the new debit/credit balance
-                'amount_currency': self._get_amount_currency(line),
-            }
-            for line in lines]
+    @api.model
+    def _run_updates(self, lines) -> List[Tuple[int, Set[int]]]:
+        updates = []
+        for line in lines:
+            move_line_id = int(line['aml_ids'].split(',')[0])
+            line_ids_to_merge = set(int(line_id) for line_id in line['aml_ids'].split(',')[1:])
+            if not line_ids_to_merge:
+                continue
+            debit = max(line['debit'] - line['credit'], 0)
+            credit = max(line['credit'] - line['debit'], 0)
+            amount_currency = self._get_amount_currency(line)
+            updates.append({
+                'move_line_id': move_line_id,
+                'line_ids_to_merge': line_ids_to_merge,
+                'debit': debit,
+                'credit': credit,
+                'amount_currency': amount_currency,
+            })
         _logger.info("Updating values for lines to keep ...")
         self._update_keeper_lines(updates)
-        _logger.info("Merging lines to delete ...")
-        self._merge_entries(updates)
+        _logger.info("Deleting extra lines ...")
+        self._delete_extra_lines(updates)
+        return [(update['move_line_id'], update['line_ids_to_merge']) for update in updates]
 
     def _update_keeper_lines(self, updates) -> None:
         """ Update the keeper lines with the new debit/credit/amount_currency
@@ -148,15 +176,18 @@ class AccountMoveLine(models.Model):
                 updates)
         mog = (self.env.cr.mogrify("(%s,%s,%s,%s)", tup).decode('utf-8') for tup in tups)
         args_str = ','.join(mog)
-        self.env.cr.execute("INSERT INTO durpro_fix_aml_keepers (move_line_id, debit, credit, amount_currency) VALUES"
-                            + args_str)
         # Update all the keepers from the temporary table
         sql = """
-            UPDATE account_move_line aml set debit = k.debit, credit = k.credit, amount_currency = k.amount_currency
+            UPDATE durpro_fix_aml aml set debit = k.debit, credit = k.credit, amount_currency = k.amount_currency
             FROM durpro_fix_aml_keepers k
             WHERE aml.id = k.move_line_id"""
         self.env.cr.execute(sql)
         self.env.cr.execute("DROP TABLE IF EXISTS durpro_fix_aml_keepers")
+
+    def _delete_extra_lines(self, updates):
+        extra_line_ids = [line_id for update in updates for line_id in update['line_ids_to_merge']]
+        sql = """DELETE FROM durpro_fix_aml WHERE id in %s""" % str(tuple(extra_line_ids))
+        self.env.cr.execute(sql)
 
     @api.model
     def _merge_entries(self, updates):
@@ -214,7 +245,7 @@ class AccountMoveLine(models.Model):
     @api.model
     def _get_amount_currency(self, line, new_currency_id=None):
         """ Work with the following constraint:
-        "account_move_line_check_amount_currency_balance_sign" CHECK
+        "durpro_fix_aml_check_amount_currency_balance_sign" CHECK
             (currency_id <> company_currency_id AND ((debit - credit) <= 0::numeric AND amount_currency <= 0::numeric
                 OR (debit - credit) >= 0::numeric AND amount_currency >= 0::numeric)
                 OR currency_id = company_currency_id AND round(debit - credit - amount_currency, 2) = 0::numeric
@@ -250,7 +281,7 @@ class AccountMoveLine(models.Model):
         sql = """
             SELECT aml.id as line_id, aml.currency_id as currency_id, aml.move_id as move_id, aml.debit as debit,
                    aml.credit as credit, aml.amount_currency as amount_currency
-            FROM account_move_line aml
+            FROM durpro_fix_aml aml
             WHERE aml.move_id in %s
         """ % move_ids
         self.env.cr.execute(sql)
@@ -267,6 +298,38 @@ class AccountMoveLine(models.Model):
         tups = [(update['id'], update['currency_id'], update['amount_currency']) for update in updates]
         mog = (self.env.cr.mogrify("(%s,%s,%s)", tup).decode('utf-8') for tup in tups)
         args_str = ','.join(mog)
-        sql = """UPDATE account_move_line SET currency_id = v.currency_id, amount_currency = v.amount_currency
-                 FROM (VALUES %s) AS v(id, currency_id, amount_currency) WHERE v.id = account_move_line.id""" % args_str
+        sql = """UPDATE durpro_fix_aml SET currency_id = v.currency_id, amount_currency = v.amount_currency
+                 FROM (VALUES %s) AS v(id, currency_id, amount_currency) WHERE v.id = durpro_fix_aml.id""" % args_str
         self.env.cr.execute(sql)
+
+    @api.model
+    def _check_debit_credit_balances(self) -> bool:
+        """ """
+        self.env.cr.execute("SELECT sum(debit) as debits, sum(credit) as credits FROM durpro_fix_aml")
+        new_balances = self.env.cr.dictfetchone()
+        self.env.cr.execute("SELECT sum(debit) as debits, sum(credit) as credits FROM account_move_line")
+        old_balances = self.env.cr.dictfetchone()
+        new_debit = round(new_balances['debits'], 2)
+        new_credit = round(new_balances['credits'], 2)
+        old_debit = round(old_balances['debits'], 2)
+        old_credit = round(old_balances['credits'], 2)
+        if new_debit != old_debit or new_credit != old_credit:
+            _logger.error(f"Mismatch detected in debit and credit totals. Debit difference is {new_debit - new_debit}, "
+                          f"credit difference is {new_credit - old_credit}"
+                          f"Calculating biggest discrepancies before aborting.")
+            sql = """
+                SELECT new.move_id, (sum(new.debit) - sum(old.debit)) as debit_diff, 
+                       (sum(new.credit) - sum(old.credit)) as credit_diff
+                FROM durpro_fix_aml new INNER JOIN account_move_line old ON new.move_id = old.move_id
+                GROUP BY new.move_id
+                HAVING sum(new.credit) != sum(old.credit) OR sum(new.debit) != sum(old.debit)
+                ORDER BY credit_diff DESC, debit_diff DESC
+                LIMIT 10
+            """
+            self.env.cr.execute(sql)
+            discrepancies = self.env.cr.dictfetchall()
+            pprint(discrepancies)
+            self.env.cr.rollback()
+            return False
+        _logger.info("Debit and credit balances match between new and old entries.")
+        return True
