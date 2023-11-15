@@ -48,7 +48,8 @@ class AccountMoveLine(models.Model):
         self._check_problematic_entries()
         _logger.info("Committing changes and merging lines.")
         self.env.cr.execute(""" UPDATE account_move_line SET debit = aml.debit, credit = aml.credit,  
-                                    balance = aml.balance, amount_currency = aml.amount_currency
+                                    balance = aml.balance, amount_currency = aml.amount_currency, 
+                                    currency_id = aml.currency_id
                                 FROM durpro_fix_aml aml
                                 WHERE account_move_line.id = aml.id""")
         self._merge_entries(to_merge)
@@ -182,7 +183,8 @@ class AccountMoveLine(models.Model):
 
         # Update all the keepers from the temporary table
         sql = """
-            UPDATE durpro_fix_aml aml set debit = k.debit, credit = k.credit, amount_currency = k.amount_currency
+            UPDATE durpro_fix_aml aml set debit = k.debit, credit = k.credit, amount_currency = k.amount_currency, 
+                balance = k.balance
             FROM durpro_fix_aml_keepers k
             WHERE aml.id = k.move_line_id"""
         self.env.cr.execute(sql)
