@@ -25,7 +25,6 @@
     'website': 'http://www.bemade.org',
     'license': 'OPL-1',
     'depends': ['account'],
-    'data': ['data/menuitems.xml'],
     'assets': {},
     'installable': True,
     'auto_install': False

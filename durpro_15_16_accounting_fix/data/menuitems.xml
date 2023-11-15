@@ -1,4 +1,0 @@
-<?xml version="1.0" encoding="UTF-8" ?>
-<data>
-    <menuitem name="Fix Journal Items" id="fix_journal_items" parent="accounting" sequence="1" action="fix_journal_items" />
-</data>
