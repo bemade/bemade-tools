@@ -12,5 +12,12 @@
             <field name="state">code</field>
             <field name="code">records.action_convert_to_fsm()</field>
         </record>
+        <record id="convert_equipment_to_fsm" model="ir.actions.server">
+            <field name="name">Convert to FSM</field>
+            <field name="binding_model_id" ref="durpro_fso.model_durpro_fso_equipment"/>
+            <field name="model_id" ref="durpro_fso.model_durpro_fso_equipment"/>
+            <field name="state">code</field>
+            <field name="code">records.copy_as_fsm()</field>
+        </record>
     </data>
 </odoo>
