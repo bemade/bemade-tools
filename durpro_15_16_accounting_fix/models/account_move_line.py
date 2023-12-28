@@ -36,6 +36,7 @@ class AccountMoveLine(models.Model):
         self._correct_multi_currency_entries()
 
         problem_lines = self._get_problem_account_move_lines()
+        to_merge = {}
         # Merge each group of counterpart lines into a single line
         if problem_lines:
             _logger.info(f"Updating {len(problem_lines)} problematic lines")
