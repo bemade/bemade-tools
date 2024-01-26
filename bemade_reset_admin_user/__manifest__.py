@@ -1,16 +1,16 @@
 {
     'name': 'Reset Admin User',
-    'version': '15.0.0.2',
+    'version': '15.0.0.1',
     'summary': 'Module for Custom Migration for resetting admin using eq_merge_duplicate_data',
     'sequence': 10,
     'description': """
     This module is for custom migration for resetting admin using eq_merge_duplicate_data
     
-    it will reactivate user id 21 (Denis Durepos) and then merge it with user id 2 (Denis Durepos)
-    Then set user id 21 email and email signature to user id 2
+    it will create new user and then merge it with user id 2 (Denis Durepos)
+    Then set new user email and email signature to user id 2
     Change partner id of user id 2 to 5021064 (Administrator)
     Change name of user id 2 to Administrator
-    Change email of user id 2 to admin
+    Change email and login of user id 2 to admin
     
     End result is user id 2 will be the admin user and user id 21 will be Denis Durepos
     """,

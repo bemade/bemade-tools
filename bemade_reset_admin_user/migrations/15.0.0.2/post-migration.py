@@ -3,6 +3,7 @@ def migrate(cr, version):
         return
 
     from odoo import api, SUPERUSER_ID
+    from odoo.fields import Command  # Importing Command
 
     env = api.Environment(cr, SUPERUSER_ID, {})
 
@@ -27,6 +28,12 @@ def migrate(cr, version):
         "notification_type": "inbox",
     })
 
+    # Update Email and Email Signature of User ID 21
+    user_id_2 = user_model.browse(2)
+
+    # Store the ids of the groups associated with user 2
+    user_2_group_ids = user_id_2.groups_id.ids
+
     # Use the wizard from the eq_merge_duplicate_data module
     merge_wizard = env['wizard.merge.data'].create({
         'duplicate_rec_id': 'res.users,2',
@@ -37,8 +44,8 @@ def migrate(cr, version):
     # Perform the merge
     merge_wizard.action_merge_duplicate_data()
 
-    # Update Email and Email Signature of User ID 21
-    user_id_2 = user_model.browse(2)
+    # Reassociate user 2 with the groups
+    user_id_2.write({'groups_id': [Command.link(id_) for id_ in user_2_group_ids]})
 
     new_user.write({
         'email': user_id_2.email,
