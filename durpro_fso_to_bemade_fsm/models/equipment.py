@@ -6,12 +6,15 @@ class EquipmentTag(models.Model):
 
     converted = fields.Many2one('bemade_fsm.equipment.tag')
 
-    @converter
     def copy_as_fsm(self):
-        return self.env['bemade_fsm.equipment.tag'].create([{
+        # Don't duplicate existing tags. Using the @converted annotation won't work here if tags have been manually
+        # created with the same name, as old FSO ones, so we do this manually.
+        new_tags = self.env['bemade_fsm.equipment.tag'].search([('name', 'in', self.mapped('name'))])
+        new_tags |= self.env['bemade_fsm.equipment.tag'].create([{
             'name': r.name,
             'color': r.color,
-        } for r in self])
+        } for r in self.filtered(lambda tag: tag.name not in new_tags.mapped("name"))])
+        return new_tags
 
 
 class Equipment(models.Model):

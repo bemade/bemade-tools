@@ -18,7 +18,7 @@
 #
 {
     'name': 'Convert FSO to FSM',
-    'version': '15.0.1.0.0',
+    'version': '15.0.1.0.1',
     'summary': 'Convert FSO to FSM',
     'description': 'Convert Durpro FSO objects to Bemade FSM equivalents',
     'category': 'Services/Field Service',
