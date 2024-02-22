@@ -1,6 +1,6 @@
 {
     'name': 'Reset Admin User',
-    'version': '15.0.0.1',
+    'version': '15.0.0.2',
     'summary': 'Module for Custom Migration for resetting admin using eq_merge_duplicate_data',
     'sequence': 10,
     'description': """
