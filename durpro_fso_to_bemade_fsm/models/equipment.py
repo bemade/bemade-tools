@@ -28,9 +28,9 @@ class Equipment(models.Model):
             'tag_ids': [Command.set(r.tag_ids.copy_as_fsm().ids)],
             'partner_location_id': r.partner_location_id.id,
             'location_notes': r.location_notes,
-            # task_ids left blank as set in the intervention
+            # MD: task_ids left blank as set in the intervention
         } for r in self])
-        # Locations with equipment should be of company type, convert them here
+        # MD: Locations with equipment should be of company type, convert them here
         self.mapped('converted').mapped('partner_location_id').\
             write({'company_type': 'company'})
         return res
