@@ -32,8 +32,8 @@
     <menuitem id="menu_sap_b1_to_odoo_databases" name="Databases"
               parent="menu_sap_b1_to_odoo" sequence="10"
               action="action_view_sap_databases"/>
-    <menuitem id="menu_sap_b1_to_odoo_databases" name="Data Mappings"
-              parent="menu_sap_b1_to_odoo" sequence="10"
+    <menuitem id="menu_sap_b1_to_odoo_data_mappings" name="Data Mappings"
+              parent="menu_sap_b1_to_odoo" sequence="20"
               action="action_view_sap_data_mappings"/>
 
 </odoo>

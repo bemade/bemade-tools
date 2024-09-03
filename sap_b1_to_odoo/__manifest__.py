@@ -25,11 +25,12 @@
     'author': 'Bemade Inc.',
     'website': 'http://www.bemade.org',
     'license': 'LGPL-3',
-    'depends': ['base'],
+    'depends': ['base', 'contacts'],
     'data': [
         "security/ir.model.access.csv",
         "data/menus_actions.xml",
         "views/sap_data_mapping_views.xml",
+        "views/sap_database_views.xml",
     ],
     'assets': {},
     'installable': True,
