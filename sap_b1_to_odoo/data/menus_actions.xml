@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<odoo>
+    <record id="action_view_sap_databases" model="ir.actions.act_window">
+        <field name="name">View SAP Databases</field>
+        <field name="res_model">sap.database</field>
+        <field name="view_mode">tree,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No SAP databases found. Let's create one!
+            </p>
+            <p>
+                SAP databases are SAP Business One databases that have been converted
+                and are hosted on a Postgresql server.
+            </p>
+        </field>
+    </record>
+    <record id="action_view_sap_data_mappings" model="ir.actions.act_window">
+        <field name="name">View SAP Data Mappings</field>
+        <field name="res_model">sap.data.mapping</field>
+        <field name="view_mode">tree,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No SAP data mappings found. Let's create one!
+            </p>
+            <p>
+                SAP data mappings define the relationship between SAP Business One
+                data and their Odoo counterparts.
+            </p>
+        </field>
+    </record>
+    <menuitem id="menu_sap_b1_to_odoo" name="SAP B1 to Odoo" sequence="10"/>
+    <menuitem id="menu_sap_b1_to_odoo_databases" name="Databases"
+              parent="menu_sap_b1_to_odoo" sequence="10"
+              action="action_view_sap_databases"/>
+    <menuitem id="menu_sap_b1_to_odoo_databases" name="Data Mappings"
+              parent="menu_sap_b1_to_odoo" sequence="10"
+              action="action_view_sap_data_mappings"/>
+
+</odoo>
