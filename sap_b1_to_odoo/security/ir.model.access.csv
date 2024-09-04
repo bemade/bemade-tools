@@ -1,3 +1,2 @@
 "id","name","model_id:id","group_id:id","perm_read","perm_write","perm_create","perm_unlink"
-sap_data_mapping_access,sap_data_mapping_access,model_sap_data_mapping,base.group_system,1,1,1,1
 sap_database_access,sap_database_access,model_sap_database,base.group_system,1,1,1,1

@@ -14,10 +14,6 @@ class SapDatabase(models.Model):
     database_password = fields.Char(required=True)
     database_port = fields.Integer(required=True)
     database_schema = fields.Char(required=True)
-    data_mapping_ids = fields.One2many(
-        comodel_name="sap.data.mapping",
-        inverse_name="sap_db_id",
-    )
 
     @api.depends("database_host", "database_name")
     def _compute_display_name(self):
@@ -40,6 +36,20 @@ class SapDatabase(models.Model):
         connection = db_connect(uri, allow_uri=True)
         return connection.cursor()
 
+    def action_import_all(self):
+        self._import_all()
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Import Successful"),
+                "message": _("The SAP records were successfully imported."),
+                "sticky": False,
+                "type": "success",
+            },
+        }
+
     def _import_all(self):
-        for rec in self:
-            self.env["sap.res.partner.importer"].import_partners(self.get_cursor())
+        with self.getCursor as cr:
+            for rec in self:
+                self.env["sap.res.partner.importer"].import_partners(cr)
