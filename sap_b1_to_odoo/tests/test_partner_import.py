@@ -21,7 +21,12 @@ class TestOdooImports(TransactionCase):
     def test_import_partners(self):
         self.env["sap.res.partner.importer"].import_partners(self.database.get_cursor())
         imported_partner_count = self.env["res.partner"].search_count(
-            [("cardcode", "!=", False)]
+            [
+                "|",
+                ("sap_card_code", "!=", False),
+                ("sap_cntct_code", "!=", False),
+                ("active", "in", [True, False]),
+            ]
         )
         cr = self.database.get_cursor()
         cr.execute(
@@ -29,20 +34,30 @@ class TestOdooImports(TransactionCase):
             f"WHERE cardname is not null and cardname <> ''"
         )
         sap_partners_count = cr.fetchall()[0][0]
+        cr.execute(f"select count(*) from OCPR WHERE name is not null and name <> '' ")
+        sap_partners_count += cr.fetchall()[0][0]
         self.assertEqual(imported_partner_count, sap_partners_count)
 
     def test_parent_child_count_matches(self):
         self.env["sap.res.partner.importer"].import_partners(self.database.get_cursor())
         cr = self.database.get_cursor()
         cr.execute(
-            "SELECT count(*) from OCRD WHERE fathercard is not null "
+            "SELECT count(*) from OCRD WHERE fathercard is not null and fathercard <> '' "
             "AND cardname is not null and cardname <> ''"
         )
         child_count_sap = cr.fetchall()[0][0]
+        cr.execute(
+            "SELECT count(*) from OCPR WHERE name is not null and name <> '' "
+            "AND cardcode is not null and cardcode <> ''"
+        )
+        child_count_sap += cr.fetchall()[0][0]
         child_count_odoo = self.env["res.partner"].search_count(
             [
-                ("cardcode", "!=", False),
+                "|",
+                ("sap_card_code", "!=", False),
+                ("sap_cntct_code", "!=", False),
                 ("parent_id", "!=", False),
+                ("active", "in", [True, False]),
             ]
         )
         self.assertEqual(child_count_sap, child_count_odoo)
