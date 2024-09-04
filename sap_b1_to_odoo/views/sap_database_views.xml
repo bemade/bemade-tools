@@ -11,6 +11,9 @@
                 <field name="database_password"
                        password="True"/>
                 <field name="database_name"/>
+                <field name="database_schema"/>
+                <button type="object" name="action_import_all" string="Import Records"
+                        class="btn btn-primary"/>
             </tree>
         </field>
     </record>
