@@ -50,6 +50,6 @@ class SapDatabase(models.Model):
         }
 
     def _import_all(self):
-        with self.getCursor as cr:
+        with self.get_cursor() as cr:
             for rec in self:
-                self.env["sap.res.partner.importer"].import_partners(cr)
+                self.env["sap.res.partner.importer"].import_partners()
