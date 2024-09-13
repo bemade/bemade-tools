@@ -28,6 +28,7 @@ class ResPartner(models.Model):
 
 class SapResPartnerImporter(models.AbstractModel):
     _name = "sap.res.partner.importer"
+    _description = "SAP Partner Importer"
 
     @api.model
     def import_partners(self, cr):
