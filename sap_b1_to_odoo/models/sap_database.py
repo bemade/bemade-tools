@@ -1,6 +1,8 @@
 from odoo import models, fields, api, _
 from odoo.sql_db import db_connect
+import logging
 
+_logger = logging.getLogger(__name__)
 PAGE_SIZE = 1000
 
 
@@ -51,5 +53,6 @@ class SapDatabase(models.Model):
 
     def _import_all(self):
         with self.get_cursor() as cr:
+            _logger.info("Beginning SAP record import.")
             for rec in self:
                 self.env["sap.res.partner.importer"].import_partners(cr)
