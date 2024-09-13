@@ -1,5 +1,8 @@
 from odoo import models, fields, api
 from .sap_database import PAGE_SIZE
+import logging
+
+_logger = logging.getLogger(__name__)
 
 
 class ResPartner(models.Model):
@@ -28,6 +31,7 @@ class SapResPartnerImporter(models.AbstractModel):
 
     @api.model
     def import_partners(self, cr):
+        _logger.info("Starting SAP partner import.")
         partners = self._import_ocrd(cr)
         partners |= self._import_ocpr(cr)
         self._link_children_parents(partners)
@@ -53,22 +57,32 @@ class SapResPartnerImporter(models.AbstractModel):
             state = None
         return country, state
 
+    def _extract_sap_street_street2(self, address, block):
+        if block and not address:
+            return block, ""
+        return address, block
+
     def _import_ocrd(self, cr):
         """Import business partners (companies)"""
         cr.execute(f"SELECT * from OCRD WHERE cardname is not null and cardname <> ''")
         sap_partners = cr.dictfetchall()
+        _logger.info(f"Importing {len(sap_partners)} companies.")
         partner_vals = []
         for sap_partner in sap_partners:
             # Start with the parent company
             country = sap_partner["country"]
             state = sap_partner["state1"]
             country, state = self._extract_sap_state_country(country, state)
+            street, street2 = self._extract_sap_street_street2(
+                sap_partner["address"],
+                sap_partner["block"],
+            )
             partner_vals.append(
                 {
                     "sap_card_code": sap_partner["cardcode"],
                     "name": sap_partner["cardname"],
-                    "street": sap_partner["address"],
-                    "street2": sap_partner["county"] or "",
+                    "street": street,
+                    "street2": street2,
                     "city": sap_partner["city"] or "",
                     "country_id": country and country.id or False,
                     "state_id": state and state.id or False,
@@ -101,15 +115,18 @@ class SapResPartnerImporter(models.AbstractModel):
             country = sap_partner["mailcountr"]
             state = sap_partner["state2"]
             country, state = self._extract_sap_state_country(country, state)
+            street, street2 = self._extract_sap_street_street2(
+                sap_partner["mailaddres"],
+                sap_partner["mailblock"],
+            )
             if sap_partner["mailaddres"] and country and state:
                 partner_vals.append(
                     {
                         # No cardcode here, we are splitting out the shipping address
                         # so it goes in the parent card field
                         "name": sap_partner["cardname"],
-                        "street": sap_partner["mailaddres"],
-                        "street2": sap_partner["mailcounty"]
-                        or sap_partner["mailblock"],
+                        "street": street,
+                        "street2": street2,
                         "city": sap_partner["mailcity"] or "",
                         "country_id": country and country.id or False,
                         "state_id": state and state.id or False,
@@ -125,6 +142,7 @@ class SapResPartnerImporter(models.AbstractModel):
 
     def _link_children_parents(self, partners):
         partner_code_map = {partner.sap_card_code: partner for partner in partners}
+        _logger.info("Linking partners to their parents in a hierarchy...")
         for partner in partners.filtered(
             lambda partner: partner.sap_parent_card != False
         ):
@@ -134,6 +152,7 @@ class SapResPartnerImporter(models.AbstractModel):
         """Import contacts"""
         cr.execute("SELECT * from OCPR WHERE name <> '' and name is not null ")
         sap_contacts = cr.dictfetchall()
+        _logger.info(f"Importing {len(sap_contacts)} contacts.")
         partner_vals = []
         for sap_contact in sap_contacts:
             sap_country = sap_contact["residcntry"]
