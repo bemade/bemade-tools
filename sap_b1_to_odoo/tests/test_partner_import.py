@@ -63,3 +63,6 @@ class TestOdooImports(TransactionCase):
                 ]
             )
             self.assertEqual(child_count_sap, child_count_odoo)
+
+    def test_import_all_runs_to_completion(self):
+        self.database.action_import_all()
