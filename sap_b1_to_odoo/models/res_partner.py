@@ -59,8 +59,8 @@ class SapResPartnerImporter(models.AbstractModel):
 
     def _extract_sap_street_street2(self, address, block):
         if block and not address:
-            return block, ""
-        return address, block
+            return (block, "")
+        return (address, block)
 
     def _import_ocrd(self, cr):
         """Import business partners (companies)"""
@@ -99,8 +99,8 @@ class SapResPartnerImporter(models.AbstractModel):
                         # No cardcode here, we are splitting out the billing address
                         # so it goes in the parent card field
                         "name": sap_partner["cardname"],
-                        "street": sap_partner["address"],
-                        "street2": sap_partner["county"] or sap_partner["block"],
+                        "street": street,
+                        "street2": street2,
                         "city": sap_partner["city"] or "",
                         "country_id": country and country.id or False,
                         "state_id": state and state.id or False,
