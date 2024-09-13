@@ -93,12 +93,12 @@ class SapResPartnerImporter(models.AbstractModel):
                 }
             )
             # Then the billing address
-            if sap_partner["address"] and state and country:
+            if (street or street2) and state and country:
                 partner_vals.append(
                     {
                         # No cardcode here, we are splitting out the billing address
                         # so it goes in the parent card field
-                        "name": sap_partner["cardname"],
+                        "name": "Comptes à payer / Accounts Payable",
                         "street": street,
                         "street2": street2,
                         "city": sap_partner["city"] or "",
@@ -119,12 +119,12 @@ class SapResPartnerImporter(models.AbstractModel):
                 sap_partner["mailaddres"],
                 sap_partner["mailblock"],
             )
-            if sap_partner["mailaddres"] and country and state:
+            if (street or street2) and country and state:
                 partner_vals.append(
                     {
                         # No cardcode here, we are splitting out the shipping address
                         # so it goes in the parent card field
-                        "name": sap_partner["cardname"],
+                        "name": "Réception / Receiving",
                         "street": street,
                         "street2": street2,
                         "city": sap_partner["mailcity"] or "",
