@@ -35,8 +35,7 @@ class SapDatabase(models.Model):
             database=self.database_name,
             schema=self.database_schema,
         )
-        connection = db_connect(uri, allow_uri=True)
-        return connection.cursor()
+        return db_connect(uri, allow_uri=True).cursor()
 
     def action_import_all(self):
         self._import_all()
