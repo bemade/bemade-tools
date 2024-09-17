@@ -1,4 +1,7 @@
 from odoo import models, fields, api
+import logging
+
+_logger = logging.getLogger(__name__)
 
 
 class Product(models.Model):
@@ -33,6 +36,7 @@ class SapProductImporter(models.AbstractModel):
 
     @api.model
     def import_products(self, cr):
+        _logger.info("Importing products and categories...")
         categories = self._import_oitb(cr)
         products = self._import_oitm(cr, categories)
         # TODO: implement BOMs with treetype, treeqty and the ITT1 table
@@ -45,6 +49,7 @@ class SapProductImporter(models.AbstractModel):
             "SELECT * FROM oitb WHERE itmsgrpnam <> '' and itmsgrpnam is not null"
         )
         sap_product_groups = cr.dictfetchall()
+        _logger.info(f"Importing {len(sap_product_groups)} product categories.")
         category_vals = []
         for sap_group in sap_product_groups:
             category_vals.append(
@@ -60,6 +65,7 @@ class SapProductImporter(models.AbstractModel):
         """Import sellable products"""
         cr.execute("SELECT * FROM oitm WHERE frgnname <> '' and frgnname is not null")
         sap_products = cr.dictfetchall()
+        _logger.info(f"Importing {len(sap_products)} products.")
         product_vals = []
         categories_map = {
             category.sap_itms_grp_cod: category for category in categories
