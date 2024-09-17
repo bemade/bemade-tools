@@ -176,3 +176,12 @@ class SapResPartnerImporter(models.AbstractModel):
                 }
             )
         return self.env["res.partner"].create(partner_vals)
+
+    def delete_all(self):
+        _logger.info("Deleting all SAP contacts.")
+        self.env["res.partner"].search(
+            [
+                ("sap_card_code", "!=", False),
+                ("active", "in", [False, True]),
+            ]
+        ).unlink()

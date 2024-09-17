@@ -14,6 +14,9 @@
                 <field name="database_schema"/>
                 <button type="object" name="action_import_all" string="Import Records"
                         class="btn btn-primary"/>
+                <button type="object" name="action_delete_all"
+                        string="Delete Records"
+                        class="btn btn-primary"/>
             </tree>
         </field>
     </record>
