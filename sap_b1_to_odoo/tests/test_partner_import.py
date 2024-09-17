@@ -1,23 +1,10 @@
 """ Run tests on an actual SAP B1 database running on a local postgresql server. """
 
 from odoo.tests import TransactionCase
+from odoo.addons.sap_b1_to_odoo.tests.test_common import TestSapImportCommon
 
 
-class TestOdooImports(TransactionCase):
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.database = cls.env["sap.database"].create(
-            {
-                "database_host": "localhost",
-                "database_port": 5433,
-                "database_name": "pneuprod",
-                "database_schema": "dbo",
-                "database_username": "postgres",
-                "database_password": "pgpassword",
-            }
-        )
-
+class TestSapPartnerImport(TestSapImportCommon):
     def test_import_partners(self):
         with self.database.get_cursor() as cr:
             self.env["sap.res.partner.importer"].import_partners(cr)

@@ -16,12 +16,12 @@ class ResPartner(models.Model):
         (
             "sap_cardcode_unique",
             "unique (sap_card_code)",
-            "An partner with that SAP cardcode already exists",
+            "An partner with that SAP cardcode already exists.",
         ),
         (
             "sap_cntct_code_unique",
             "unique (sap_cntct_code)",
-            "A partner with that SAP Contact Code already exists",
+            "A partner with that SAP Contact Code already exists.",
         ),
     ]
 
