@@ -55,3 +55,4 @@ class SapDatabase(models.Model):
             _logger.info("Beginning SAP record import.")
             for rec in self:
                 self.env["sap.res.partner.importer"].import_partners(cr)
+                self.env["sap.product.importer"].import_products(cr)
