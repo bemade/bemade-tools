@@ -79,3 +79,14 @@ class SapProductImporter(models.AbstractModel):
                 }
             )
         return self.env["product.product"].create(product_vals)
+
+    def delete_all(self):
+        self.env["product.product"].search(
+            [
+                ("sap_item_code", "!=", False),
+                ("active", "in", [True, False]),
+            ]
+        ).unlink()
+        self.env["product.category"].search(
+            [("sap_itms_grp_cod", "!=", False)]
+        ).unlink()

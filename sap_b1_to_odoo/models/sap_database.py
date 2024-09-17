@@ -56,3 +56,23 @@ class SapDatabase(models.Model):
             for rec in self:
                 self.env["sap.res.partner.importer"].import_partners(cr)
                 self.env["sap.product.importer"].import_products(cr)
+
+    def action_delete_all(self):
+        self._delete_all()
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Import Successful"),
+                "message": _("The SAP records were successfully imported."),
+                "sticky": False,
+                "type": "success",
+            },
+        }
+
+    def _delete_all(self):
+        with self.get_cursor() as cr:
+            _logger.info("Deleting all SAP records.")
+            for rec in self:
+                self.env["sap.res.partner.importer"].delete_all()
+                self.env["sap.product.importer"].delete_all()
