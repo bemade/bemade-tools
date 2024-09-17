@@ -32,3 +32,10 @@ class TestSapProductImport(TestSapImportCommon):
                     [("active", "in", [True, False])]
                 ),
             )
+            # Make sure that weird names got cleared up
+            overquoted_products = self.env["product.product"].search_count(
+                [
+                    ("name", "ilike", '"%""%"'),
+                ]
+            )
+            self.assertEqual(overquoted_products, 0)

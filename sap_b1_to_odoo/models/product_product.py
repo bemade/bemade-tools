@@ -74,8 +74,8 @@ class SapProductImporter(models.AbstractModel):
             product_vals.append(
                 {
                     "sap_item_code": sap_product["itemcode"],
-                    "code": sap_product["itemname"],
-                    "name": sap_product["frgnname"],
+                    "code": fix_quotes(sap_product["itemname"]),
+                    "name": fix_quotes(sap_product["frgnname"]),
                     "categ_id": categories_map[
                         sap_product["itmsgrpcod"]
                     ].id,  # No nulls
@@ -96,3 +96,7 @@ class SapProductImporter(models.AbstractModel):
         self.env["product.category"].search(
             [("sap_itms_grp_cod", "!=", False)]
         ).unlink()
+
+
+def fix_quotes(string):
+    return string and string.strip('"').replace('""', '"')
