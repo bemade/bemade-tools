@@ -1,6 +1,5 @@
 """ Run tests on an actual SAP B1 database running on a local postgresql server. """
 
-from odoo.tests import TransactionCase
 from odoo.addons.sap_b1_to_odoo.tests.test_common import TestSapImportCommon
 
 
