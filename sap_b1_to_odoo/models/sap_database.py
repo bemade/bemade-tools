@@ -56,6 +56,7 @@ class SapDatabase(models.Model):
             for rec in self:
                 self.env["sap.res.partner.importer"].import_partners(cr)
                 self.env["sap.product.importer"].import_products(cr)
+                self.env["sap.bom.importer"].import_boms(cr)
             _logger.info("Successfully completed SAP record import.")
 
     def action_delete_all(self):
@@ -77,3 +78,4 @@ class SapDatabase(models.Model):
             for rec in self:
                 self.env["sap.res.partner.importer"].delete_all()
                 self.env["sap.product.importer"].delete_all()
+                self.env["sap.bom.importer"].delete_all()

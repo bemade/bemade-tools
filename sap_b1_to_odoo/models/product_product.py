@@ -41,7 +41,6 @@ class SapProductImporter(models.AbstractModel):
         products = self._import_oitm(cr, categories)
         # TODO: implement BOMs with treetype, treeqty and the ITT1 table
         # TODO: grab the inventory "on hand" fields, min max, etc.
-        # TODO: grab the revenue and expense accounts
 
     def _import_oitb(self, cr):
         """Import product categories from SAP"""
