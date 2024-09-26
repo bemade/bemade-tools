@@ -39,6 +39,7 @@ class SapProductImporter(models.AbstractModel):
         _logger.info("Importing products and categories...")
         categories = self._import_oitb(cr)
         products = self._import_oitm(cr, categories)
+        orderpoints = self._import_orderpoints(cr, products)
         # TODO: implement BOMs with treetype, treeqty and the ITT1 table
         # TODO: grab the inventory "on hand" fields, min max, etc.
 
@@ -84,6 +85,31 @@ class SapProductImporter(models.AbstractModel):
                 }
             )
         return self.env["product.product"].create(product_vals)
+
+    def _import_orderpoints(self, cr, products):
+        cr.execute(
+            "SELECT itemcode, minlevel, maxlevel FROM oitm WHERE minlevel > 0 "
+            "and validfor='Y'"
+        )
+        sap_min_levels = cr.dictfetchall()
+        _logger.info(f"Importing {len(sap_min_levels)} orderpoints.")
+        codes = [lvl["itemcode"] for lvl in sap_min_levels]
+        products_dict = {
+            p.sap_item_code: p for p in products if p.sap_item_code in codes
+        }
+        for lvl in sap_min_levels:
+            # warehouse = self.env["stock.warehouse"].search(
+            #     [("company_id", "=", self.env.company.id)], limit=1
+            # )
+            # location = warehouse.lot_stock_id
+            product = products_dict[lvl["itemcode"]]
+            self.env["stock.warehouse.orderpoint"].create(
+                {
+                    "product_id": product.id,
+                    "product_min_qty": lvl["minlevel"],
+                    "product_max_qty": lvl["maxlevel"],
+                }
+            )
 
     def delete_all(self):
         self.env["product.product"].search(

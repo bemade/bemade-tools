@@ -25,6 +25,9 @@ class TestSapProductImport(TestSapImportCommon):
                 "SELECT count(*) FROM oitm WHERE frgnname <> '' and frgnname is not null"
             )
             expected_product_count = cr.fetchall()[0][0] + initial_product_count
+            initial_orderpoint_count = self.env[
+                "stock.warehouse.orderpoint"
+            ].search_count([])
             self.env["sap.product.importer"].import_products(cr)
             self.assertEqual(
                 expected_product_count,
@@ -39,3 +42,9 @@ class TestSapProductImport(TestSapImportCommon):
                 ]
             )
             self.assertEqual(overquoted_products, 0)
+            cr.execute(
+                "SELECT count(*) from oitm WHERE minlevel > 0 and " "validfor='Y'"
+            )
+            expected_orderpoint_count = cr.fetchall()[0][0] + initial_orderpoint_count
+            orderpoint_count = self.env["stock.warehouse.orderpoint"].search_count([])
+            self.assertEqual(orderpoint_count, expected_orderpoint_count)
