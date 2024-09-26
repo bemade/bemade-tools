@@ -13,7 +13,7 @@ class SapDatabase(models.Model):
     database_host = fields.Char(required=True)
     database_name = fields.Char(required=True)
     database_username = fields.Char(required=True)
-    database_password = fields.Char()
+    database_password = fields.Char(required=True)
     database_port = fields.Integer(required=True)
     database_schema = fields.Char(required=True)
 
@@ -24,18 +24,27 @@ class SapDatabase(models.Model):
 
     def get_cursor(self):
         self.ensure_one()
-        pw_url_part = f":{self.database_password}" if self.database_password else ""
-        uri = (
-            "postgresql://{user}{password}@{host}:{port}/{database}?"
-            "options=-c%20search_path%3D{schema}"
-        ).format(
-            user=self.database_username,
-            password=pw_url_part,
-            host=self.database_host,
-            port=self.database_port,
-            database=self.database_name,
-            schema=self.database_schema,
-        )
+        if self.database_password:
+            uri = (
+                "postgresql://{user}:{password}@{host}:{port}/{database}?"
+                "options=-c%20search_path%3D{schema}"
+            ).format(
+                user=self.database_username,
+                password=self.database_password,
+                host=self.database_host,
+                port=self.database_port,
+                database=self.database_name,
+                schema=self.database_schema,
+            )
+        else:
+            uri = (
+                "postgresql://{user}@/{database}?options=-c%20search_path%3D{schema}"
+            ).format(
+                user=self.database_username,
+                database=self.database_name,
+                schema=self.database_schema,
+            )
+
         return db_connect(uri, allow_uri=True).cursor()
 
     def action_import_all(self):
