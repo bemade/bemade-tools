@@ -21,9 +21,7 @@ class TestSapProductImport(TestSapImportCommon):
             initial_product_count = self.env["product.product"].search_count(
                 [("active", "in", [True, False])]
             )
-            cr.execute(
-                "SELECT count(*) FROM oitm WHERE frgnname <> '' and frgnname is not null"
-            )
+            cr.execute("SELECT count(*) FROM oitm")
             expected_product_count = cr.fetchall()[0][0] + initial_product_count
             initial_orderpoint_count = self.env[
                 "stock.warehouse.orderpoint"
@@ -48,3 +46,15 @@ class TestSapProductImport(TestSapImportCommon):
             expected_orderpoint_count = cr.fetchall()[0][0] + initial_orderpoint_count
             orderpoint_count = self.env["stock.warehouse.orderpoint"].search_count([])
             self.assertEqual(orderpoint_count, expected_orderpoint_count)
+
+            cr.execute("SELECT SUM(onhand) FROM oitm WHERE onhand<>0 and validfor='Y'")
+            expected_stock = cr.fetchall()[0][0]
+            stock = sum(
+                [
+                    q.quantity
+                    for q in self.env["stock.quant"].search(
+                        [("product_id.sap_item_code", "!=", False)]
+                    )
+                ]
+            )
+            self.assertEqual(expected_stock, stock)
