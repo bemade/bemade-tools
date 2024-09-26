@@ -40,6 +40,7 @@ class SapProductImporter(models.AbstractModel):
         categories = self._import_oitb(cr)
         products = self._import_oitm(cr, categories)
         orderpoints = self._import_orderpoints(cr, products)
+        quants = self._import_stock_quants(cr, products)
         # TODO: implement BOMs with treetype, treeqty and the ITT1 table
         # TODO: grab the inventory "on hand" fields, min max, etc.
 
@@ -63,7 +64,7 @@ class SapProductImporter(models.AbstractModel):
 
     def _import_oitm(self, cr, categories):
         """Import sellable products"""
-        cr.execute("SELECT * FROM oitm WHERE frgnname <> '' and frgnname is not null")
+        cr.execute("SELECT * FROM oitm")
         sap_products = cr.dictfetchall()
         _logger.info(f"Importing {len(sap_products)} products.")
         product_vals = []
@@ -75,13 +76,14 @@ class SapProductImporter(models.AbstractModel):
                 {
                     "sap_item_code": sap_product["itemcode"],
                     "code": fix_quotes(sap_product["itemname"]),
-                    "name": fix_quotes(sap_product["frgnname"]),
+                    "name": fix_quotes(sap_product["frgnname"] or "N/A"),
                     "categ_id": categories_map[
                         sap_product["itmsgrpcod"]
                     ].id,  # No nulls
                     "sale_ok": sap_product["sellitem"] == "Y",
                     "purchase_ok": sap_product["prchseitem"] == "Y",
                     "active": sap_product["validfor"] == "Y",
+                    "type": "product",
                 }
             )
         return self.env["product.product"].create(product_vals)
@@ -98,10 +100,6 @@ class SapProductImporter(models.AbstractModel):
             p.sap_item_code: p for p in products if p.sap_item_code in codes
         }
         for lvl in sap_min_levels:
-            # warehouse = self.env["stock.warehouse"].search(
-            #     [("company_id", "=", self.env.company.id)], limit=1
-            # )
-            # location = warehouse.lot_stock_id
             product = products_dict[lvl["itemcode"]]
             self.env["stock.warehouse.orderpoint"].create(
                 {
@@ -110,6 +108,30 @@ class SapProductImporter(models.AbstractModel):
                     "product_max_qty": lvl["maxlevel"],
                 }
             )
+
+    def _import_stock_quants(self, cr, products):
+        warehouse = self.env["stock.warehouse"].search(
+            [("company_id", "=", self.env.company.id)], limit=1
+        )
+        location = warehouse.lot_stock_id
+        cr.execute(
+            "SELECT itemcode, onhand FROM oitm WHERE validfor='Y' and onhand <> 0"
+        )
+        sap_stock = cr.dictfetchall()
+        codes = [stock["itemcode"] for stock in sap_stock]
+        products_dict = {
+            p.sap_item_code: p for p in products if p.sap_item_code in codes
+        }
+        vals = []
+        for stock in sap_stock:
+            vals.append(
+                {
+                    "product_id": products_dict[stock["itemcode"]].id,
+                    "quantity": stock["onhand"],
+                    "location_id": location.id,
+                }
+            )
+        self.env["stock.quant"].create(vals)
 
     def delete_all(self):
         self.env["product.product"].search(
