@@ -13,7 +13,7 @@ class SapDatabase(models.Model):
     database_host = fields.Char(required=True)
     database_name = fields.Char(required=True)
     database_username = fields.Char(required=True)
-    database_password = fields.Char(required=True)
+    database_password = fields.Char()
     database_port = fields.Integer(required=True)
     database_schema = fields.Char(required=True)
 
