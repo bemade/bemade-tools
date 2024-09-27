@@ -91,6 +91,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "phone": sap_partner["phone1"] or sap_partner["phone2"],
                     "email": sap_partner["e_mail"],
                     "is_company": True,
+                    "company_id": self.env.company.id,
                 }
             )
             # Then the billing address
@@ -110,6 +111,7 @@ class SapResPartnerImporter(models.AbstractModel):
                         "phone": sap_partner["phone1"] or sap_partner["phone2"],
                         "email": sap_partner["e_mail"],
                         "type": "invoice",
+                        "company_id": self.env.company.id,
                     }
                 )
             # Then the shipping address
@@ -136,6 +138,7 @@ class SapResPartnerImporter(models.AbstractModel):
                         "phone": sap_partner["phone1"] or sap_partner["phone2"],
                         "email": sap_partner["e_mail"],
                         "type": "delivery",
+                        "company_id": self.env.company.id,
                     }
                 )
 
@@ -173,6 +176,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "mobile": sap_contact["cellolar"],
                     "active": sap_contact["active"] == "Y",
                     "function": sap_contact["position"] or sap_contact["title"],
+                    "company_id": self.env.company.id,
                 }
             )
         return self.env["res.partner"].create(partner_vals)

@@ -64,9 +64,15 @@ class SapDatabase(models.Model):
         with self.get_cursor() as cr:
             _logger.info("Beginning SAP record import.")
             for rec in self:
-                self.env["sap.res.partner.importer"].import_partners(cr)
-                self.env["sap.product.importer"].import_products(cr)
-                self.env["sap.bom.importer"].import_boms(cr)
+                self.env["sap.res.partner.importer"].with_company(
+                    self.env.company
+                ).import_partners(cr)
+                self.env["sap.product.importer"].with_company(
+                    self.env.company
+                ).import_products(cr)
+                self.env["sap.bom.importer"].with_company(self.env.company).import_boms(
+                    cr
+                )
             _logger.info("Successfully completed SAP record import.")
 
     def action_delete_all(self):

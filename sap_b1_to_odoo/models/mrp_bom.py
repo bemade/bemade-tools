@@ -44,6 +44,7 @@ class SapBomImporter(models.AbstractModel):
                     "product_qty": bom["qauntity"],
                     "type": "phantom" if bom["treetype"] == "A" else "normal",
                     "sap_code": bom["code"],
+                    "company_id": self.env.company.id,
                 }
             )
         boms = self.env["mrp.bom"].create(bom_vals)
@@ -57,6 +58,7 @@ class SapBomImporter(models.AbstractModel):
                     "product_qty": line["quantity"],
                     "sequence": line["childnum"],
                     "bom_id": boms_by_code[line["father"]].id,
+                    "company_id": self.env.company.id,
                 }
             )
         self.env["mrp.bom.line"].create(component_vals)

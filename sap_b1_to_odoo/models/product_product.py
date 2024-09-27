@@ -84,6 +84,7 @@ class SapProductImporter(models.AbstractModel):
                     "purchase_ok": sap_product["prchseitem"] == "Y",
                     "active": sap_product["validfor"] == "Y",
                     "type": "product",
+                    "company_id": self.env.company.id,
                 }
             )
         return self.env["product.product"].create(product_vals)
