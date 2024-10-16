@@ -1,3 +1,5 @@
+from docutils.nodes import contact
+
 from odoo import models, fields, Command, api
 import logging
 
@@ -15,53 +17,66 @@ class SapSaleOrderImporter(models.AbstractModel):
     _name = "sap.sale.order.importer"
     _description = "SAP Sales Order Importer"
 
-    def _get_pricelist(self, sap_order):
-        if not self.cad_pricelist:
-            self.cad_pricelist = self.env["product.pricelist"].search(
-                [("currency_id.name", "=", "CAD")]
-            )
-        if not self.usd_pricelist:
-            self.usd_pricelist = self.env["product.pricelist"].search(
-                [("currency_id.name", "=", "USD")]
-            )
-        if sap_order["doccur"] == "USD":
-            return self.usd_pricelist
+    @api.model
+    def _get_partners_dict(self):
+        partners = self.env["res.partner"].search(
+            [
+                ("sap_card_code", "!=", False),
+                ("active", "in", [False, True]),
+            ]
+        )
+        return {partner.sap_card_code: partner for partner in partners}
+
+    @api.model
+    def _get_contacts_dict(self):
+        contacts = self.env["res.partner"].search(
+            [
+                ("sap_cntct_code", "!=", False),
+                ("active", "in", [False, True]),
+            ]
+        )
+        return {contact.sap_cntct_code: contact for contact in contacts}
+
+    @api.model
+    def _get_pricelist(self, sap_doccur):
+        cad_pricelist = self.env["product.pricelist"].search(
+            [("currency_id.name", "=", "CAD")]
+        )
+        usd_pricelist = self.env["product.pricelist"].search(
+            [("currency_id.name", "=", "USD")]
+        )
+        if sap_doccur == "USD":
+            return usd_pricelist
         else:
-            return self.cad_pricelist
+            return cad_pricelist
 
     def _get_partner(self, sap_order):
-        if not self.partners_dict:
-            partners = self.env["res.partner"].search(
-                [
-                    ("sap_card_code", "!=", False),
-                    ("active", "in", [False, True]),
-                ]
-            )
-            self.partners_dict = {
-                partner.sap_card_code: partner for partner in partners
-            }
-        if not self.contacts_dict:
-            contacts = self.env["res.partner"].search(
-                [
-                    ("sap_cntct_code", "!=", False),
-                    ("active", "in", [False, True]),
-                ]
-            )
-            self.contacts_dict = {
-                contact.sap_cntct_code: contact for contact in contacts
-            }
         if sap_order["cntctcode"]:
-            return self.contacts_dict[sap_order["cntctcode"]]
+            contacts_dict = self._get_contacts_dict()
+            cntctcode = sap_order["cntctcode"]
+            return (
+                contacts_dict.get(cntctcode)
+                or contacts_dict.get(cntctcode.upper())
+                or contacts_dict.get(cntctcode.lower())
+            )
         else:
-            return self.partners_dict[sap_order["cardcode"]]
+            partners_dict = self._get_partners_dict()
+            cardcode = sap_order["cardcode"]
+            return (
+                partners_dict.get(cardcode)
+                or partners_dict.get(cardcode.upper())
+                or partners_dict.get(cardcode.lower())
+            )
 
     @staticmethod
     def _find_partner_by_type(order, partner, address_type):
         # Try first to find a partner matching the address.
         address = order["address2"] if address_type == "delivery" else order["address"]
+        if not address:
+            return partner
         potential_partners = (
             partner.commercial_partner_id | partner.commercial_partner_id.child_ids
-        ).filtered(lambda partner: partner.street in address)
+        ).filtered(lambda partner: partner.street and partner.street in address)
         if len(potential_partners) == 1:
             return potential_partners
         elif len(potential_partners) > 1:
@@ -77,15 +92,20 @@ class SapSaleOrderImporter(models.AbstractModel):
         else:
             return partner
 
-    def _get_payment_terms(self, order):
-        if not self.terms_dict:
-            self.terms = self.env["account.payment.term"].search(
-                [("sap_groupnum", "!=", False)]
-            )
-            self.terms_dict = {term.sap_groupnum: term for term in self.terms}
-        return self.terms_dict[order["groupnum"]]
+    @api.model
+    def _get_payment_terms(self, sap_groupnum):
+        terms = self.env["account.payment.term"].search([("sap_groupnum", "!=", False)])
+        terms_dict = {term.sap_groupnum: term for term in terms}
+        return terms_dict[sap_groupnum]
+
+    @api.model
+    def _uppercase_all_cardcodes(self, cr):
+        """For some reason there is one record whose cardcode is lowercase but has an
+        upper-case match in the ocrd table."""
+        cr.execute("UPDATE ordr SET cardcode = UPPER(cardcode)")
 
     def import_sales_orders(self, cr):
+        self._uppercase_all_cardcodes(cr)
         terms = self._import_octg(cr)
         orders = self._import_ordr(cr)
         quotations = self._import_oqut(cr)
@@ -107,10 +127,10 @@ class SapSaleOrderImporter(models.AbstractModel):
         for order in sap_orders:
             # If there's a contact set, we use it instead of the company to be precise
             partner = self._get_partner(order)
-            pricelist = self._get_pricelist(order)
+            pricelist = self._get_pricelist(order["doccur"])
             partner_shipping_id = self._find_partner_by_type(order, partner, "delivery")
             partner_invoice_id = self._find_partner_by_type(order, partner, "invoice")
-            terms = self._get_payment_terms(order)
+            terms = self._get_payment_terms(order["groupnum"])
             order_vals.append(
                 {
                     "sap_docentry": order["docentry"],
@@ -122,12 +142,16 @@ class SapSaleOrderImporter(models.AbstractModel):
                     "date_order": order["docdate"],
                     "commitment_date": order["docduedate"],
                     "client_order_ref": order["numatcard"],
-                    "order_line": [
-                        Command.create(
-                            self._get_row_vals(row)
-                            for row in order_rows_dict[order["docentry"]]
-                        )
-                    ],
+                    "order_line": (
+                        [
+                            Command.create(
+                                self._get_row_vals(row)
+                                for row in order_rows_dict[order["docentry"]]
+                            )
+                        ]
+                        if order_rows_dict.get(order["docentry"])
+                        else False
+                    ),
                 }
             )
         self.env["sale.order"].create(order_vals)
@@ -143,15 +167,13 @@ class SapSaleOrderImporter(models.AbstractModel):
             "tax_ids": None,
         }
 
+    @api.model
     def _get_product(self, itemcode):
-        if not self.products_dict:
-            products = self.env["product.product"].search(
-                [("sap_item_code", "!=", False), ("active", "in", [True, False])]
-            )
-            self.products_dict = {
-                product.sap_item_code: product for product in products
-            }
-            return self.products_dict.get(itemcode)
+        products = self.env["product.product"].search(
+            [("sap_item_code", "!=", False), ("active", "in", [True, False])]
+        )
+        products_dict = {product.sap_item_code: product for product in products}
+        return products_dict.get(itemcode)
 
     def _import_oqut(self, cr):
         pass
