@@ -1,7 +1,7 @@
-from docutils.nodes import contact
-
 from odoo import models, fields, Command, api
 import logging
+from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
+from odoo.tools.sql import SQL
 
 _logger = logging.getLogger(__name__)
 
@@ -16,6 +16,14 @@ class SalesOrder(models.Model):
 class SapSaleOrderImporter(models.AbstractModel):
     _name = "sap.sale.order.importer"
     _description = "SAP Sales Order Importer"
+
+    _products_dict = None
+
+    def import_sales_orders(self, cr):
+        self._uppercase_all_cardcodes(cr)
+        terms = self._import_octg(cr)
+        orders = self._import_ordr(cr)
+        quotations = self._import_oqut(cr)
 
     @api.model
     def _get_partners_dict(self):
@@ -104,75 +112,80 @@ class SapSaleOrderImporter(models.AbstractModel):
         upper-case match in the ocrd table."""
         cr.execute("UPDATE ordr SET cardcode = UPPER(cardcode)")
 
-    def import_sales_orders(self, cr):
-        self._uppercase_all_cardcodes(cr)
-        terms = self._import_octg(cr)
-        orders = self._import_ordr(cr)
-        quotations = self._import_oqut(cr)
-
     def _import_ordr(self, cr):
-        cr.execute("SELECT * FROM ordr")
-        sap_orders = cr.dictfetchall()
-        cr.execute("SELECT * FROM RDR1")
-        sap_order_rows = cr.dictfetchall()
-        _logger.info(
-            f"Importing {len(sap_orders)} sales orders with "
-            f"{len(sap_order_rows)} rows."
-        )
-        order_rows_dict = {}
-        for row in sap_order_rows:
-            order_rows_dict.setdefault(row["docentry"], []).append(row)
-
-        order_vals = []
-        for order in sap_orders:
-            # If there's a contact set, we use it instead of the company to be precise
-            partner = self._get_partner(order)
-            pricelist = self._get_pricelist(order["doccur"])
-            partner_shipping_id = self._find_partner_by_type(order, partner, "delivery")
-            partner_invoice_id = self._find_partner_by_type(order, partner, "invoice")
-            terms = self._get_payment_terms(order["groupnum"])
-            order_vals.append(
-                {
-                    "sap_docentry": order["docentry"],
-                    "partner_id": partner.id,
-                    "pricelist_id": pricelist.id,
-                    "partner_invoice_id": partner_invoice_id.id,
-                    "partner_shipping_id": partner_shipping_id.id,
-                    "payment_term_id": terms.id,
-                    "date_order": order["docdate"],
-                    "commitment_date": order["docduedate"],
-                    "client_order_ref": order["numatcard"],
-                    "order_line": (
-                        [
-                            Command.create(
-                                self._get_row_vals(row)
-                                for row in order_rows_dict[order["docentry"]]
-                            )
-                        ]
-                        if order_rows_dict.get(order["docentry"])
-                        else False
-                    ),
-                }
+        pager = PagingIterator(cr, "select * from ordr", "select count(*) " "from ordr")
+        for sap_orders in pager:
+            docentries = [order["docentry"] for order in sap_orders]
+            query = SQL("SELECT * FROM RDR1 WHERE docentry in %s", tuple(docentries))
+            cr.execute(query)
+            sap_order_rows = cr.dictfetchall()
+            _logger.info(
+                f"Importing {len(sap_orders)} sales orders with "
+                f"{len(sap_order_rows)} rows."
             )
-        self.env["sale.order"].create(order_vals)
+            order_rows_dict = {}
+            for row in sap_order_rows:
+                order_rows_dict.setdefault(row["docentry"], []).append(row)
+
+            order_vals = []
+            for order in sap_orders:
+                # If there's a contact set, we use it instead of the company to be precise
+                partner = self._get_partner(order)
+                pricelist = self._get_pricelist(order["doccur"])
+                partner_shipping_id = self._find_partner_by_type(
+                    order, partner, "delivery"
+                )
+                partner_invoice_id = self._find_partner_by_type(
+                    order, partner, "invoice"
+                )
+                terms = self._get_payment_terms(order["groupnum"])
+                order_vals.append(
+                    {
+                        "sap_docentry": order["docentry"],
+                        "partner_id": partner.id,
+                        "pricelist_id": pricelist.id,
+                        "partner_invoice_id": partner_invoice_id.id,
+                        "partner_shipping_id": partner_shipping_id.id,
+                        "payment_term_id": terms.id,
+                        "date_order": order["docdate"].replace(tzinfo=None),
+                        "commitment_date": order["docduedate"].replace(tzinfo=None),
+                        "client_order_ref": order["numatcard"],
+                        "order_line": (
+                            [
+                                Command.create(self._get_row_vals(row))
+                                for row in order_rows_dict[order["docentry"]]
+                            ]
+                            if order_rows_dict.get(order["docentry"])
+                            else False
+                        ),
+                    }
+                )
+            self.env["sale.order"].create(order_vals)
+            self.env["sale.order"].flush_model()
+            self.env["sale.order.line"].flush_model()
 
     def _get_row_vals(self, row):
         product = self._get_product(row["itemcode"])
-        tax_ids = self._get_tax(row["vatprcnt"])
-        vals = {
+        # TODO: confirm tax_ids come in properly with fiscal positions
+        # tax_ids = self._get_tax(row["vatprcnt"])
+        return {
             "product_id": product.id,
             "product_uom_qty": row["quantity"],
             "price_unit": row["price"],
-            "discount": row["discprscnt"],  # Likely problematic
-            "tax_ids": None,
+            "discount": row["discprcnt"],  # Likely problematic
+            # "tax_ids": None,
         }
 
     @api.model
     def _get_product(self, itemcode):
-        products = self.env["product.product"].search(
-            [("sap_item_code", "!=", False), ("active", "in", [True, False])]
-        )
-        products_dict = {product.sap_item_code: product for product in products}
+        products_dict = self._products_dict
+        if products_dict is None:
+            products = self.env["product.product"].search(
+                [("sap_item_code", "!=", False), ("active", "in", [True, False])]
+            )
+            SapSaleOrderImporter._products_dict = products_dict = {
+                product.sap_item_code: product for product in products
+            }
         return products_dict.get(itemcode)
 
     def _import_oqut(self, cr):
