@@ -7,7 +7,7 @@ _logger = logging.getLogger(__name__)
 class MrpBom(models.Model):
     _inherit = "mrp.bom"
 
-    sap_code = fields.Char(index="trigram")
+    sap_code = fields.Char(index="btree")
 
 
 class SapBomImporter(models.AbstractModel):
@@ -64,7 +64,5 @@ class SapBomImporter(models.AbstractModel):
         self.env["mrp.bom.line"].create(component_vals)
         return boms
 
-    def delete_all(self):
-        self.env["mrp.bom"].search(
-            [("sap_code", "!=", False), ("active", "in", [False, True])]
-        ).unlink()
+    def _delete_all(self):
+        self.env.cr.execute("DELETE FROM mrp_bom WHERE sap_code is not null")

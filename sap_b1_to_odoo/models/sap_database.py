@@ -92,6 +92,7 @@ class SapDatabase(models.Model):
         with self.get_cursor() as cr:
             _logger.info("Deleting all SAP records.")
             for rec in self:
-                self.env["sap.res.partner.importer"].delete_all()
-                self.env["sap.product.importer"].delete_all()
-                self.env["sap.bom.importer"].delete_all()
+                self.env["sap.res.partner.importer"]._delete_all()
+                self.env["sap.product.importer"]._delete_all()
+                self.env["sap.bom.importer"]._delete_all()
+                self.env["sap.sale.order.importer"]._delete_all()

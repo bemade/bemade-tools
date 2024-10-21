@@ -7,7 +7,7 @@ _logger = logging.getLogger(__name__)
 class Product(models.Model):
     _inherit = "product.product"
 
-    sap_item_code = fields.Char(index="trigram")
+    sap_item_code = fields.Char(index="btree")
     _sql_constraints = [
         (
             "sap_item_code_unique",
@@ -134,16 +134,13 @@ class SapProductImporter(models.AbstractModel):
             )
         self.env["stock.quant"].create(vals)
 
-    def delete_all(self):
-        self.env["product.product"].search(
-            [
-                ("sap_item_code", "!=", False),
-                ("active", "in", [True, False]),
-            ]
-        ).unlink()
-        self.env["product.category"].search(
-            [("sap_itms_grp_cod", "!=", False)]
-        ).unlink()
+    def _delete_all(self):
+        self.env.cr.execute(
+            "DELETE from product_product WHERE sap_item_code is not null"
+        )
+        self.env.cr.execute(
+            "DELETE from product_category WHERE sap_itms_grp_cod is not null"
+        )
 
 
 def fix_quotes(string):

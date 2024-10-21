@@ -8,8 +8,8 @@ _logger = logging.getLogger(__name__)
 class ResPartner(models.Model):
     _inherit = "res.partner"
 
-    sap_card_code = fields.Char(index="trigram")
-    sap_parent_card = fields.Char(index="trigram")
+    sap_card_code = fields.Char(index="btree")
+    sap_parent_card = fields.Char(index="btree")
     sap_cntct_code = fields.Integer(index="btree")
 
     _sql_constraints = [
@@ -181,11 +181,11 @@ class SapResPartnerImporter(models.AbstractModel):
             )
         return self.env["res.partner"].create(partner_vals)
 
-    def delete_all(self):
-        _logger.info("Deleting all SAP contacts.")
-        self.env["res.partner"].search(
-            [
-                ("sap_card_code", "!=", False),
-                ("active", "in", [False, True]),
-            ]
-        ).unlink()
+    def _delete_all(self):
+        self.env.cr.execute(
+            """
+            DELETE FROM res_partner WHERE sap_card_code is not null 
+            or sap_cntct_code is not null 
+            or sap_parent_card is not null
+            """
+        )
