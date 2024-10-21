@@ -215,6 +215,14 @@ class SapSaleOrderImporter(models.AbstractModel):
             )
         return self.env["account.payment.term"].create(vals)
 
+    def _delete_all(self):
+        self.env.cr.execute(
+            "DELETE from sale_order WHERE sap_docentry is not null or sap_docnum is not null"
+        )
+        self.env.cr.execute(
+            "DELETE from account_payment_term WHERE sap_groupnum is not null"
+        )
+
 
 class PaymentTerms(models.Model):
     _inherit = "account.payment.term"
