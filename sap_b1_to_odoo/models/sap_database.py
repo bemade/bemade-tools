@@ -73,6 +73,9 @@ class SapDatabase(models.Model):
                 self.env["sap.bom.importer"].with_company(self.env.company).import_boms(
                     cr
                 )
+                self.env["sap.sale.order.importer"].with_company(
+                    self.env.company
+                ).import_sales_orders(cr)
             _logger.info("Successfully completed SAP record import.")
 
     def action_delete_all(self):
