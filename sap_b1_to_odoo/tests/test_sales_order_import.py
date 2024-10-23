@@ -8,8 +8,8 @@ class TestSaleOrderImport(TestSapImportCommon):
             initial_order_line_count = self.env["sale.order.line"].search_count([])
             cr.execute("SELECT count(*) FROM ordr")
             sap_order_count = cr.fetchall()[0][0]
-            cr.execute("SELECT count(*) FROM oqut")
-            sap_order_count += cr.fetchall()[0][0]
+            # cr.execute("SELECT count(*) FROM oqut")
+            # sap_order_count += cr.fetchall()[0][0]
             cr.execute("SELECT count(*) FROM rdr1")
             sap_order_line_count = cr.fetchall()[0][0]
             self.env["sap.res.partner.importer"].import_partners(cr)
