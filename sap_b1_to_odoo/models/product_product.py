@@ -1,5 +1,6 @@
 from odoo import models, fields, api
 import logging
+from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
 
 _logger = logging.getLogger(__name__)
 
@@ -39,8 +40,8 @@ class SapProductImporter(models.AbstractModel):
         _logger.info("Importing products and categories...")
         categories = self._import_oitb(cr)
         products = self._import_oitm(cr, categories)
-        orderpoints = self._import_orderpoints(cr, products)
-        quants = self._import_stock_quants(cr, products)
+        self._import_orderpoints(cr, products)
+        self._import_stock_quants(cr, products)
         # TODO: implement BOMs with treetype, treeqty and the ITT1 table
         # TODO: grab the inventory "on hand" fields, min max, etc.
 
@@ -64,30 +65,38 @@ class SapProductImporter(models.AbstractModel):
 
     def _import_oitm(self, cr, categories):
         """Import sellable products"""
-        cr.execute("SELECT * FROM oitm")
-        sap_products = cr.dictfetchall()
-        _logger.info(f"Importing {len(sap_products)} products.")
-        product_vals = []
-        categories_map = {
-            category.sap_itms_grp_cod: category for category in categories
-        }
-        for sap_product in sap_products:
-            product_vals.append(
-                {
-                    "sap_item_code": sap_product["itemcode"],
-                    "code": fix_quotes(sap_product["itemname"]),
-                    "name": fix_quotes(sap_product["frgnname"] or "N/A"),
-                    "categ_id": categories_map[
-                        sap_product["itmsgrpcod"]
-                    ].id,  # No nulls
-                    "sale_ok": sap_product["sellitem"] == "Y",
-                    "purchase_ok": sap_product["prchseitem"] == "Y",
-                    "active": sap_product["validfor"] == "Y",
-                    "type": "product",
-                    "company_id": self.env.company.id,
-                }
-            )
-        return self.env["product.product"].create(product_vals)
+        pager = PagingIterator(
+            cr,
+            "SELECT * FROM oitm",
+            "SELECT count(*) " "from oitm",
+            limit=1000,
+            orderby="itemcode",
+        )
+        products = self.env["product.product"]
+        for sap_products in pager:
+            _logger.info(f"Importing {len(sap_products)} products.")
+            product_vals = []
+            categories_map = {
+                category.sap_itms_grp_cod: category for category in categories
+            }
+            for sap_product in sap_products:
+                product_vals.append(
+                    {
+                        "sap_item_code": sap_product["itemcode"],
+                        "code": fix_quotes(sap_product["itemname"]),
+                        "name": fix_quotes(sap_product["frgnname"] or "N/A"),
+                        "categ_id": categories_map[
+                            sap_product["itmsgrpcod"]
+                        ].id,  # No nulls
+                        "sale_ok": sap_product["sellitem"] == "Y",
+                        "purchase_ok": sap_product["prchseitem"] == "Y",
+                        "active": sap_product["validfor"] == "Y",
+                        "type": "product",
+                        "company_id": self.env.company.id,
+                    }
+                )
+            products |= self.env["product.product"].create(product_vals)
+        return products
 
     def _import_orderpoints(self, cr, products):
         cr.execute(
