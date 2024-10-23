@@ -1,3 +1,5 @@
+from black.concurrency import cancel
+
 from odoo import models, fields, Command, api
 import logging
 from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
@@ -12,6 +14,14 @@ class SalesOrder(models.Model):
     sap_docentry = fields.Integer(index="btree")
     sap_docnum = fields.Integer(index="btree")
 
+    _sql_constraints = [
+        (
+            "sap_docentry_unique",
+            "UNIQUE (sap_docentry)",
+            "Another sale order with this docentry already exists",
+        )
+    ]
+
 
 class SapSaleOrderImporter(models.AbstractModel):
     _name = "sap.sale.order.importer"
@@ -21,9 +31,9 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     def import_sales_orders(self, cr):
         self._uppercase_all_cardcodes(cr)
-        terms = self._import_octg(cr)
-        orders = self._import_ordr(cr)
-        quotations = self._import_oqut(cr)
+        self._import_octg(cr)
+        self._import_ordr(cr)
+        self._import_oqut(cr)
 
     @api.model
     def _get_partners_dict(self):
@@ -48,10 +58,16 @@ class SapSaleOrderImporter(models.AbstractModel):
     @api.model
     def _get_pricelist(self, sap_doccur):
         cad_pricelist = self.env["product.pricelist"].search(
-            [("currency_id.name", "=", "CAD")]
+            [
+                ("currency_id.name", "=", "CAD"),
+                ("company_id", "=", self.env.company.id),
+            ]
         )
         usd_pricelist = self.env["product.pricelist"].search(
-            [("currency_id.name", "=", "USD")]
+            [
+                ("currency_id.name", "=", "USD"),
+                ("company_id", "=", self.env.company.id),
+            ]
         )
         if sap_doccur == "USD":
             return usd_pricelist
@@ -113,7 +129,14 @@ class SapSaleOrderImporter(models.AbstractModel):
         cr.execute("UPDATE ordr SET cardcode = UPPER(cardcode)")
 
     def _import_ordr(self, cr):
-        pager = PagingIterator(cr, "select * from ordr", "select count(*) " "from ordr")
+        pager = PagingIterator(
+            cr,
+            fetch_query="select * from ordr",
+            count_query="select count(*) " "from ordr",
+            limit=1000,
+            orderby="docentry",
+            logger=_logger,
+        )
         for sap_orders in pager:
             docentries = [order["docentry"] for order in sap_orders]
             query = SQL("SELECT * FROM RDR1 WHERE docentry in %s", tuple(docentries))
@@ -150,6 +173,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                         "date_order": order["docdate"].replace(tzinfo=None),
                         "commitment_date": order["docduedate"].replace(tzinfo=None),
                         "client_order_ref": order["numatcard"],
+                        "picking_policy": self._get_picking_policy(order),
                         "order_line": (
                             [
                                 Command.create(self._get_row_vals(row))
@@ -163,6 +187,9 @@ class SapSaleOrderImporter(models.AbstractModel):
             self.env["sale.order"].create(order_vals)
             self.env["sale.order"].flush_model()
             self.env["sale.order.line"].flush_model()
+        self._cancel_canceled_orders(cr)
+        self._confirm_closed_orders(cr)
+        self._confirm_open_orders(cr)
 
     def _get_row_vals(self, row):
         product = self._get_product(row["itemcode"])
@@ -215,13 +242,59 @@ class SapSaleOrderImporter(models.AbstractModel):
             )
         return self.env["account.payment.term"].create(vals)
 
-    def _delete_all(self):
-        self.env.cr.execute(
-            "DELETE from sale_order WHERE sap_docentry is not null or sap_docnum is not null"
-        )
-        self.env.cr.execute(
-            "DELETE from account_payment_term WHERE sap_groupnum is not null"
-        )
+    @api.model
+    def _get_picking_policy(self, ordr):
+        return "direct" if ordr["partsupply"] == "Y" else "direct"
+
+    def _confirm_closed_orders(self, cr):
+        """Mark confirmed orders that are confirmed and closed in SAP. This does NOT
+        create delivery orders as the confirmation is just flagged directly in the DB.
+        """
+        sql = """
+        SELECT docentry FROM ordr 
+        WHERE confirmed = 'Y' AND invntsttus = 'C' AND canceled = 'N'
+        """
+        cr.execute(SQL(sql))
+        confirmed_orders = [order[0] for order in cr.fetchall()]
+        if confirmed_orders:
+            _logger.info(
+                f"Marking {len(confirmed_orders)} orders as confirmed and closed "
+                f"(no delivery order)."
+            )
+            sql = """
+                UPDATE sale_order set state='sale' WHERE sap_docentry in %s
+                """
+            self.env.cr.execute(SQL(sql, tuple(confirmed_orders)))
+
+    def _cancel_canceled_orders(self, cr):
+        """Mark canceled orders as cancelled directly in the DB."""
+        sql = """
+        SELECT docentry FROM ordr
+        WHERE canceled = 'Y'
+        """
+        cr.execute(SQL(sql))
+        canceled_orders = [order[0] for order in cr.fetchall()]
+        if canceled_orders:
+            _logger.info(f"Cancelling {len(canceled_orders)} cancelled orders ...")
+            sql = """
+                UPDATE sale_order set state='cancel' WHERE sap_docentry in %s
+                """
+            self.env.cr.execute(SQL(sql, tuple(canceled_orders)))
+
+    def _confirm_open_orders(self, cr):
+        """Mark confirmed orders that are open and confirmed in SAP. This is done
+        separately due to the long runtime of confirming orders through the ORM."""
+        sql = """
+        SELECT docentry FROM ordr
+        WHERE canceled='N' and confirmed='Y' and invntsttus='O'
+        """
+        cr.execute(SQL(sql))
+        open_orders = [order[0] for order in cr.fetchall()]
+        if open_orders:
+            _logger.info(f"Confirming {len(open_orders)} open orders ...")
+            self.env["sale.order"].search(
+                [("sap_docentry", "in", open_orders)]
+            ).state = "sale"
 
 
 class PaymentTerms(models.Model):
