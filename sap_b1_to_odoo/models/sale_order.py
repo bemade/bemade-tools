@@ -16,9 +16,9 @@ class SalesOrder(models.Model):
 
     _sql_constraints = [
         (
-            "sap_docentry_unique",
-            "UNIQUE (sap_docentry)",
-            "Another sale order with this docentry already exists",
+            "sap_docnum_unique",
+            "UNIQUE (sap_docnum)",
+            "Another sale order with this docnum already exists",
         )
     ]
 
@@ -32,8 +32,7 @@ class SapSaleOrderImporter(models.AbstractModel):
     def import_sales_orders(self, cr):
         self._uppercase_all_cardcodes(cr)
         self._import_octg(cr)
-        self._import_ordr(cr)
-        self._import_oqut(cr)
+        self._import_orders_and_quotations(cr)
 
     @api.model
     def _get_partners_dict(self):
@@ -128,8 +127,8 @@ class SapSaleOrderImporter(models.AbstractModel):
         upper-case match in the ocrd table."""
         cr.execute("UPDATE ordr SET cardcode = UPPER(cardcode)")
 
-    def _import_ordr(self, cr):
-        pager = PagingIterator(
+    def _import_orders_and_quotations(self, cr):
+        order_pager = PagingIterator(
             cr,
             fetch_query="select * from ordr",
             count_query="select count(*) " "from ordr",
@@ -137,59 +136,88 @@ class SapSaleOrderImporter(models.AbstractModel):
             orderby="docentry",
             logger=_logger,
         )
+        where = """
+        where docentry not in (
+        select baseentry from rdr1 where basetype = 23
+        )"""
+        quote_pager = PagingIterator(
+            cr,
+            fetch_query=f"select * from oqut {where}",
+            count_query=f"select count(*) from oqut {where}",
+            limit=1000,
+            orderby="docentry",
+            logger=_logger,
+        )
+        self._create_orders(cr, order_pager, "rdr1")
+        self._confirm_closed_orders(cr)
+        self._confirm_open_orders(cr)
+        self._create_orders(cr, quote_pager, "qut1")
+        self._cancel_canceled_orders_quotations(cr)
+
+    def _create_orders(self, cr, pager, lines_table):
         for sap_orders in pager:
             docentries = [order["docentry"] for order in sap_orders]
-            query = SQL("SELECT * FROM RDR1 WHERE docentry in %s", tuple(docentries))
+            query = SQL(
+                "SELECT * FROM %s WHERE docentry in %s",
+                SQL.identifier(lines_table),
+                tuple(docentries),
+            )
             cr.execute(query)
             sap_order_rows = cr.dictfetchall()
             _logger.info(
-                f"Importing {len(sap_orders)} sales orders with "
-                f"{len(sap_order_rows)} rows."
+                f"Importing {len(sap_orders)} orders with "
+                f"{len(sap_order_rows)} rows from {lines_table}."
             )
-            order_rows_dict = {}
-            for row in sap_order_rows:
-                order_rows_dict.setdefault(row["docentry"], []).append(row)
-
-            order_vals = []
-            for order in sap_orders:
-                # If there's a contact set, we use it instead of the company to be precise
-                partner = self._get_partner(order)
-                pricelist = self._get_pricelist(order["doccur"])
-                partner_shipping_id = self._find_partner_by_type(
-                    order, partner, "delivery"
-                )
-                partner_invoice_id = self._find_partner_by_type(
-                    order, partner, "invoice"
-                )
-                terms = self._get_payment_terms(order["groupnum"])
-                order_vals.append(
-                    {
-                        "sap_docentry": order["docentry"],
-                        "partner_id": partner.id,
-                        "pricelist_id": pricelist.id,
-                        "partner_invoice_id": partner_invoice_id.id,
-                        "partner_shipping_id": partner_shipping_id.id,
-                        "payment_term_id": terms.id,
-                        "date_order": order["docdate"].replace(tzinfo=None),
-                        "commitment_date": order["docduedate"].replace(tzinfo=None),
-                        "client_order_ref": order["numatcard"],
-                        "picking_policy": self._get_picking_policy(order),
-                        "order_line": (
-                            [
-                                Command.create(self._get_row_vals(row))
-                                for row in order_rows_dict[order["docentry"]]
-                            ]
-                            if order_rows_dict.get(order["docentry"])
-                            else False
-                        ),
-                    }
-                )
+            order_vals = self._get_order_vals(sap_order_rows, sap_orders)
             self.env["sale.order"].create(order_vals)
             self.env["sale.order"].flush_model()
             self.env["sale.order.line"].flush_model()
-        self._cancel_canceled_orders(cr)
-        self._confirm_closed_orders(cr)
-        self._confirm_open_orders(cr)
+
+    def _get_order_vals(self, sap_order_rows, sap_orders):
+        order_rows_dict = {}
+        for row in sap_order_rows:
+            order_rows_dict.setdefault(row["docentry"], []).append(row)
+        order_vals = []
+        for order in sap_orders:
+            # If there's a contact set, we use it instead of the company to be precise
+
+            partner = self._get_partner(order)
+            pricelist = self._get_pricelist(order["doccur"])
+            partner_shipping_id = self._find_partner_by_type(
+                order,
+                partner,
+                "delivery",
+            )
+            partner_invoice_id = self._find_partner_by_type(
+                order,
+                partner,
+                "invoice",
+            )
+            terms = self._get_payment_terms(order["groupnum"])
+            order_vals.append(
+                {
+                    "sap_docnum": order["docnum"],
+                    "sap_docentry": order["docentry"],
+                    "partner_id": partner.id,
+                    "pricelist_id": pricelist.id,
+                    "partner_invoice_id": partner_invoice_id.id,
+                    "partner_shipping_id": partner_shipping_id.id,
+                    "payment_term_id": terms.id,
+                    "date_order": order["docdate"].replace(tzinfo=None),
+                    "commitment_date": order["docduedate"].replace(tzinfo=None),
+                    "client_order_ref": order["numatcard"],
+                    "picking_policy": self._get_picking_policy(order),
+                    "order_line": (
+                        [
+                            Command.create(self._get_row_vals(row))
+                            for row in order_rows_dict[order["docentry"]]
+                        ]
+                        if order_rows_dict.get(order["docentry"])
+                        else False
+                    ),
+                }
+            )
+        return order_vals
 
     def _get_row_vals(self, row):
         product = self._get_product(row["itemcode"])
@@ -214,9 +242,6 @@ class SapSaleOrderImporter(models.AbstractModel):
                 product.sap_item_code: product for product in products
             }
         return products_dict.get(itemcode)
-
-    def _import_oqut(self, cr):
-        pass
 
     def _import_octg(self, cr):
         """Import payment terms."""
@@ -251,7 +276,7 @@ class SapSaleOrderImporter(models.AbstractModel):
         create delivery orders as the confirmation is just flagged directly in the DB.
         """
         sql = """
-        SELECT docentry FROM ordr 
+        SELECT docnum FROM ordr 
         WHERE confirmed = 'Y' AND invntsttus = 'C' AND canceled = 'N'
         """
         cr.execute(SQL(sql))
@@ -262,14 +287,17 @@ class SapSaleOrderImporter(models.AbstractModel):
                 f"(no delivery order)."
             )
             sql = """
-                UPDATE sale_order set state='sale' WHERE sap_docentry in %s
+                UPDATE sale_order set state='sale' WHERE sap_docnum in %s
                 """
             self.env.cr.execute(SQL(sql, tuple(confirmed_orders)))
 
-    def _cancel_canceled_orders(self, cr):
+    def _cancel_canceled_orders_quotations(self, cr):
         """Mark canceled orders as cancelled directly in the DB."""
         sql = """
-        SELECT docentry FROM ordr
+        SELECT docnum FROM ordr
+        WHERE canceled = 'Y'
+        UNION
+        SELECT docnum FROM oqut
         WHERE canceled = 'Y'
         """
         cr.execute(SQL(sql))
@@ -277,7 +305,7 @@ class SapSaleOrderImporter(models.AbstractModel):
         if canceled_orders:
             _logger.info(f"Cancelling {len(canceled_orders)} cancelled orders ...")
             sql = """
-                UPDATE sale_order set state='cancel' WHERE sap_docentry in %s
+                UPDATE sale_order set state='cancel' WHERE sap_docnum in %s
                 """
             self.env.cr.execute(SQL(sql, tuple(canceled_orders)))
 
@@ -285,7 +313,7 @@ class SapSaleOrderImporter(models.AbstractModel):
         """Mark confirmed orders that are open and confirmed in SAP. This is done
         separately due to the long runtime of confirming orders through the ORM."""
         sql = """
-        SELECT docentry FROM ordr
+        SELECT docnum FROM ordr
         WHERE canceled='N' and confirmed='Y' and invntsttus='O'
         """
         cr.execute(SQL(sql))
@@ -293,7 +321,7 @@ class SapSaleOrderImporter(models.AbstractModel):
         if open_orders:
             _logger.info(f"Confirming {len(open_orders)} open orders ...")
             self.env["sale.order"].search(
-                [("sap_docentry", "in", open_orders)]
+                [("sap_docnum", "in", open_orders)]
             ).state = "sale"
 
 
