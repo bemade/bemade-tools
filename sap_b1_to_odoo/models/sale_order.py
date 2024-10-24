@@ -1,5 +1,3 @@
-from black.concurrency import cancel
-
 from odoo import models, fields, Command, api
 import logging
 from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
