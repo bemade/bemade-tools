@@ -22,6 +22,45 @@ class SapDatabase(models.Model):
         for rec in self:
             rec.display_name = f"{rec.database_host}/{rec.database_name}"
 
+    @api.model
+    def _success_notification(self):
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Import Successful"),
+                "message": _("The SAP records were successfully imported."),
+                "sticky": False,
+                "type": "success",
+            },
+        }
+
+    def action_import_partners(self):
+        with self.get_cursor() as cr:
+            self.env["sap.res.partner.importer"].with_company(
+                self.env.company
+            ).import_partners(cr)
+        return self._success_notification()
+
+    def action_import_products(self):
+        with self.get_cursor() as cr:
+            self.env["sap.product.importer"].with_company(
+                self.env.company
+            ).import_products(cr)
+        return self._success_notification()
+
+    def action_import_boms(self):
+        with self.get_cursor() as cr:
+            self.env["sap.bom.importer"].with_company(self.env.company).import_boms(cr)
+        return self._success_notification()
+
+    def action_import_sales_orders(self):
+        with self.get_cursor() as cr:
+            self.env["sap.sale.order.importer"].with_company(
+                self.env.company
+            ).import_sales_orders(cr)
+        return self._success_notification()
+
     def get_cursor(self):
         self.ensure_one()
         if self.database_password:
