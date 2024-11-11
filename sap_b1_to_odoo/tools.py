@@ -4,14 +4,23 @@ from datetime import datetime, date
 
 class PagingIterator:
     def __init__(
-        self, cr, fetch_query, count_query, limit=1000, orderby=None, logger=None
+        self,
+        cr,
+        fetch_query,
+        count_query,
+        fetch_args=[],
+        count_args=[],
+        limit=1000,
+        orderby=None,
+        logger=None,
     ):
         self.logger = logger
         self.cr = cr
         self.orderby = orderby
         orderby_str = f" ORDER BY %s" if orderby else ""
         self.fetch_query = f"{fetch_query}{orderby_str} OFFSET %s  LIMIT %s"
-        cr.execute(SQL(count_query))
+        self.fetch_args = fetch_args
+        cr.execute(SQL(count_query, *count_args))
         self.count = cr.fetchall()[0][0]
         self.limit = limit
         self.offset = 0
@@ -28,6 +37,7 @@ class PagingIterator:
             self.cr.execute(
                 SQL(
                     self.fetch_query,
+                    *self.fetch_args,
                     self.offset,
                     self.limit,
                 )
@@ -36,6 +46,7 @@ class PagingIterator:
             self.cr.execute(
                 SQL(
                     self.fetch_query,
+                    *self.fetch_args,
                     SQL.identifier(self.orderby),
                     self.offset,
                     self.limit,
