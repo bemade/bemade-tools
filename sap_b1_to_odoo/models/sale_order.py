@@ -36,7 +36,9 @@ class SapSaleOrderImporter(models.AbstractModel):
     def _get_partners_dict(self):
         partners = self.env["res.partner"].search(
             [
+                "|",
                 ("sap_card_code", "!=", False),
+                ("sap_cntct_code", "!=", False),
                 ("active", "in", [False, True]),
             ]
         )
@@ -75,11 +77,7 @@ class SapSaleOrderImporter(models.AbstractModel):
         if sap_order["cntctcode"]:
             contacts_dict = self._get_contacts_dict()
             cntctcode = sap_order["cntctcode"]
-            return (
-                contacts_dict.get(cntctcode)
-                or contacts_dict.get(cntctcode.upper())
-                or contacts_dict.get(cntctcode.lower())
-            )
+            return contacts_dict.get(cntctcode)
         else:
             partners_dict = self._get_partners_dict()
             cardcode = sap_order["cardcode"]
@@ -137,11 +135,20 @@ class SapSaleOrderImporter(models.AbstractModel):
         where = """
         where docentry not in (
         select baseentry from rdr1 where basetype = 23
-        )"""
+        )
+        """
+        imported_docnums = tuple(self._get_imported_docnums())
+        args = []
+        if imported_docnums:
+            where += " and docnum not in %s"
+            args = [imported_docnums]
+
         quote_pager = PagingIterator(
             cr,
             fetch_query=f"select * from oqut {where}",
+            fetch_args=args,
             count_query=f"select count(*) from oqut {where}",
+            count_args=args,
             limit=1000,
             orderby="docentry",
             logger=_logger,
@@ -166,8 +173,11 @@ class SapSaleOrderImporter(models.AbstractModel):
                 f"Importing {len(sap_orders)} orders with "
                 f"{len(sap_order_rows)} rows from {lines_table}."
             )
+            _logger.info("Getting order vals...")
             order_vals = self._get_order_vals(sap_order_rows, sap_orders)
+            _logger.info("Creating objects...")
             self.env["sale.order"].create(order_vals)
+            _logger.info("Flushing to the database...")
             self.env["sale.order"].flush_model()
             self.env["sale.order.line"].flush_model()
 
@@ -321,6 +331,15 @@ class SapSaleOrderImporter(models.AbstractModel):
             self.env["sale.order"].search(
                 [("sap_docnum", "in", open_orders)]
             ).state = "sale"
+
+    def _get_imported_docnums(self):
+        sql = """
+        SELECT distinct(sap_docnum) from sale_order where sap_docnum is not null
+        """
+        cr = self.env.cr
+        cr.execute(SQL(sql))
+        docnums = [order[0] for order in cr.fetchall()]
+        return docnums
 
 
 class PaymentTerms(models.Model):
