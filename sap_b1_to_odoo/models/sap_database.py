@@ -54,11 +54,25 @@ class SapDatabase(models.Model):
             self.env["sap.bom.importer"].with_company(self.env.company).import_boms(cr)
         return self._success_notification()
 
+    def action_import_payment_terms(self):
+        with self.get_cursor() as cr:
+            self.env["sap.sale.purchase.importer.mixin"].with_company(
+                self.env.company
+            ).import_sales_orders(cr)
+        return self._success_notification()
+
     def action_import_sales_orders(self):
         with self.get_cursor() as cr:
             self.env["sap.sale.order.importer"].with_company(
                 self.env.company
             ).import_sales_orders(cr)
+        return self._success_notification()
+
+    def action_import_purchase_orders(self):
+        with self.get_cursor() as cr:
+            self.env["sap.purchase.order.importer"].with_company(
+                self.env.company
+            ).import_purchase_orders(cr)
         return self._success_notification()
 
     def get_cursor(self):
@@ -112,9 +126,15 @@ class SapDatabase(models.Model):
                 self.env["sap.bom.importer"].with_company(self.env.company).import_boms(
                     cr
                 )
+                self.env["sap.sale.purchase.importer.mixin"].with_company(
+                    self.env.company
+                ).import_payment_terms()
                 self.env["sap.sale.order.importer"].with_company(
                     self.env.company
                 ).import_sales_orders(cr)
+                self.env["sap.purchase.order.importer"].with_company(
+                    self.env.company
+                ).import_purchase_orders(cr)
             _logger.info("Successfully completed SAP record import.")
 
     def action_delete_all(self):
