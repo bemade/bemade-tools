@@ -94,26 +94,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "company_id": self.env.company.id,
                 }
             )
-            # Then the billing address
-            if (street or street2) and state and country:
-                partner_vals.append(
-                    {
-                        # No cardcode here, we are splitting out the billing address
-                        # so it goes in the parent card field
-                        "name": "Comptes à payer / Accounts Payable",
-                        "street": street,
-                        "street2": street2,
-                        "city": sap_partner["city"] or "",
-                        "country_id": country and country.id or False,
-                        "state_id": state and state.id or False,
-                        "sap_parent_card": sap_partner["cardcode"],
-                        "is_company": False,
-                        "phone": sap_partner["phone1"] or sap_partner["phone2"],
-                        "email": sap_partner["e_mail"],
-                        "type": "invoice",
-                        "company_id": self.env.company.id,
-                    }
-                )
+
             # Then the shipping address
             country = sap_partner["mailcountr"]
             state = sap_partner["state2"]
