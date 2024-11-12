@@ -24,6 +24,7 @@ class SalesOrder(models.Model):
 class SapSaleOrderImporter(models.AbstractModel):
     _name = "sap.sale.order.importer"
     _description = "SAP Sales Order Importer"
+    _inherit = ["sap.sale.purchase.importer.mixin"]
 
     _products_dict = None
 
@@ -32,27 +33,27 @@ class SapSaleOrderImporter(models.AbstractModel):
         self._import_octg(cr)
         self._import_orders_and_quotations(cr)
 
-    @api.model
-    def _get_partners_dict(self):
-        partners = self.env["res.partner"].search(
-            [
-                "|",
-                ("sap_card_code", "!=", False),
-                ("sap_cntct_code", "!=", False),
-                ("active", "in", [False, True]),
-            ]
-        )
-        return {partner.sap_card_code: partner for partner in partners}
-
-    @api.model
-    def _get_contacts_dict(self):
-        contacts = self.env["res.partner"].search(
-            [
-                ("sap_cntct_code", "!=", False),
-                ("active", "in", [False, True]),
-            ]
-        )
-        return {contact.sap_cntct_code: contact for contact in contacts}
+    # @api.model
+    # def _get_partners_dict(self):
+    #     partners = self.env["res.partner"].search(
+    #         [
+    #             "|",
+    #             ("sap_card_code", "!=", False),
+    #             ("sap_cntct_code", "!=", False),
+    #             ("active", "in", [False, True]),
+    #         ]
+    #     )
+    #     return {partner.sap_card_code: partner for partner in partners}
+    #
+    # @api.model
+    # def _get_contacts_dict(self):
+    #     contacts = self.env["res.partner"].search(
+    #         [
+    #             ("sap_cntct_code", "!=", False),
+    #             ("active", "in", [False, True]),
+    #         ]
+    #     )
+    #     return {contact.sap_cntct_code: contact for contact in contacts}
 
     @api.model
     def _get_pricelist(self, sap_doccur):
@@ -72,20 +73,6 @@ class SapSaleOrderImporter(models.AbstractModel):
             return usd_pricelist
         else:
             return cad_pricelist
-
-    def _get_partner(self, sap_order):
-        if sap_order["cntctcode"]:
-            contacts_dict = self._get_contacts_dict()
-            cntctcode = sap_order["cntctcode"]
-            return contacts_dict.get(cntctcode)
-        else:
-            partners_dict = self._get_partners_dict()
-            cardcode = sap_order["cardcode"]
-            return (
-                partners_dict.get(cardcode)
-                or partners_dict.get(cardcode.upper())
-                or partners_dict.get(cardcode.lower())
-            )
 
     @staticmethod
     def _find_partner_by_type(order, partner, address_type):
@@ -111,17 +98,18 @@ class SapSaleOrderImporter(models.AbstractModel):
         else:
             return partner
 
-    @api.model
-    def _get_payment_terms(self, sap_groupnum):
-        terms = self.env["account.payment.term"].search([("sap_groupnum", "!=", False)])
-        terms_dict = {term.sap_groupnum: term for term in terms}
-        return terms_dict[sap_groupnum]
+    # @api.model
+    # def _get_payment_terms(self, sap_groupnum):
+    #     terms = self.env["account.payment.term"].search([("sap_groupnum", "!=", False)])
+    #     terms_dict = {term.sap_groupnum: term for term in terms}
+    #     return terms_dict[sap_groupnum]
 
     @api.model
     def _uppercase_all_cardcodes(self, cr):
         """For some reason there is one record whose cardcode is lowercase but has an
         upper-case match in the ocrd table."""
         cr.execute("UPDATE ordr SET cardcode = UPPER(cardcode)")
+        cr.execute("UPDATE oqut SET cardcode = UPPER(cardcode)")
 
     def _import_orders_and_quotations(self, cr):
         order_pager = PagingIterator(
@@ -153,33 +141,11 @@ class SapSaleOrderImporter(models.AbstractModel):
             orderby="docentry",
             logger=_logger,
         )
-        self._create_orders(cr, order_pager, "rdr1")
+        self._create_orders(cr, order_pager, "rdr1", "sale.order", "sale.order.line")
         self._confirm_closed_orders(cr)
         self._confirm_open_orders(cr)
-        self._create_orders(cr, quote_pager, "qut1")
+        self._create_orders(cr, quote_pager, "qut1", "sale.order", "sale.order.line")
         self._cancel_canceled_orders_quotations(cr)
-
-    def _create_orders(self, cr, pager, lines_table):
-        for sap_orders in pager:
-            docentries = [order["docentry"] for order in sap_orders]
-            query = SQL(
-                "SELECT * FROM %s WHERE docentry in %s",
-                SQL.identifier(lines_table),
-                tuple(docentries),
-            )
-            cr.execute(query)
-            sap_order_rows = cr.dictfetchall()
-            _logger.info(
-                f"Importing {len(sap_orders)} orders with "
-                f"{len(sap_order_rows)} rows from {lines_table}."
-            )
-            _logger.info("Getting order vals...")
-            order_vals = self._get_order_vals(sap_order_rows, sap_orders)
-            _logger.info("Creating objects...")
-            self.env["sale.order"].create(order_vals)
-            _logger.info("Flushing to the database...")
-            self.env["sale.order"].flush_model()
-            self.env["sale.order.line"].flush_model()
 
     def _get_order_vals(self, sap_order_rows, sap_orders):
         order_rows_dict = {}
@@ -227,130 +193,20 @@ class SapSaleOrderImporter(models.AbstractModel):
             )
         return order_vals
 
-    def _get_row_vals(self, row):
-        product = self._get_product(row["itemcode"])
-        # TODO: confirm tax_ids come in properly with fiscal positions
-        # tax_ids = self._get_tax(row["vatprcnt"])
-        return {
-            "product_id": product.id,
-            "product_uom_qty": row["quantity"],
-            "price_unit": row["price"],
-            "discount": row["discprcnt"],  # Likely problematic
-            # "tax_ids": None,
-        }
-
-    @api.model
-    def _get_product(self, itemcode):
-        products_dict = self._products_dict
-        if products_dict is None:
-            products = self.env["product.product"].search(
-                [("sap_item_code", "!=", False), ("active", "in", [True, False])]
-            )
-            SapSaleOrderImporter._products_dict = products_dict = {
-                product.sap_item_code: product for product in products
-            }
-        return products_dict.get(itemcode)
-
-    def _import_octg(self, cr):
-        """Import payment terms."""
-        cr.execute("SELECT * from octg")
-        sap_terms = cr.dictfetchall()
-        vals = []
-        for term in sap_terms:
-            vals.append(
-                {
-                    "name": term["pymntgroup"],
-                    "sap_groupnum": term["groupnum"],
-                    "line_ids": [
-                        Command.create(
-                            {
-                                "value_amount": 100.0,
-                                "value": "percent",
-                                "nb_days": term["extradays"],
-                                "delay_type": "days_after",
-                            }
-                        )
-                    ],
-                }
-            )
-        return self.env["account.payment.term"].create(vals)
-
     @api.model
     def _get_picking_policy(self, ordr):
         return "direct" if ordr["partsupply"] == "Y" else "direct"
 
     def _confirm_closed_orders(self, cr):
-        """Mark confirmed orders that are confirmed and closed in SAP. This does NOT
-        create delivery orders as the confirmation is just flagged directly in the DB.
-        """
-        sql = """
-        SELECT docnum FROM ordr 
-        WHERE confirmed = 'Y' AND invntsttus = 'C' AND canceled = 'N'
-        """
-        cr.execute(SQL(sql))
-        confirmed_orders = [order[0] for order in cr.fetchall()]
-        if confirmed_orders:
-            _logger.info(
-                f"Marking {len(confirmed_orders)} orders as confirmed and closed "
-                f"(no delivery order)."
-            )
-            sql = """
-                UPDATE sale_order set state='sale' WHERE sap_docnum in %s
-                """
-            self.env.cr.execute(SQL(sql, tuple(confirmed_orders)))
+        self._confirm_closed_orders_by_table("ordr", "sale.order")
 
     def _cancel_canceled_orders_quotations(self, cr):
-        """Mark canceled orders as cancelled directly in the DB."""
-        sql = """
-        SELECT docnum FROM ordr
-        WHERE canceled = 'Y'
-        UNION
-        SELECT docnum FROM oqut
-        WHERE canceled = 'Y'
-        """
-        cr.execute(SQL(sql))
-        canceled_orders = [order[0] for order in cr.fetchall()]
-        if canceled_orders:
-            _logger.info(f"Cancelling {len(canceled_orders)} cancelled orders ...")
-            sql = """
-                UPDATE sale_order set state='cancel' WHERE sap_docnum in %s
-                """
-            self.env.cr.execute(SQL(sql, tuple(canceled_orders)))
+        self._cancel_canceled_orders_and_quotations_by_table(
+            "ordr", "oqut", "sale.order"
+        )
 
     def _confirm_open_orders(self, cr):
-        """Mark confirmed orders that are open and confirmed in SAP. This is done
-        separately due to the long runtime of confirming orders through the ORM."""
-        sql = """
-        SELECT docnum FROM ordr
-        WHERE canceled='N' and confirmed='Y' and invntsttus='O'
-        """
-        cr.execute(SQL(sql))
-        open_orders = [order[0] for order in cr.fetchall()]
-        if open_orders:
-            _logger.info(f"Confirming {len(open_orders)} open orders ...")
-            self.env["sale.order"].search(
-                [("sap_docnum", "in", open_orders)]
-            ).state = "sale"
+        self._confirm_closed_orders_by_table(cr, "ordr", "sale.order", "sale")
 
     def _get_imported_docnums(self):
-        sql = """
-        SELECT distinct(sap_docnum) from sale_order where sap_docnum is not null
-        """
-        cr = self.env.cr
-        cr.execute(SQL(sql))
-        docnums = [order[0] for order in cr.fetchall()]
-        return docnums
-
-
-class PaymentTerms(models.Model):
-    _inherit = "account.payment.term"
-
-    sap_groupnum = fields.Integer(index="btree")
-
-    _sql_constraints = [
-        (
-            "unique_sap_groupnum",
-            "UNIQUE(sap_groupnum)",
-            "A payment term with this SAP ID already exists.",
-        )
-    ]
+        return self._get_imported_docnums_from_table("sale_order")
