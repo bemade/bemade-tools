@@ -54,7 +54,7 @@ class SapBomImporter(models.AbstractModel):
         for line in sap_bom_lines:
             component_vals.append(
                 {
-                    "product_id": odoo_products[bom["code"]].product_variant_id.id,
+                    "product_id": odoo_products[line["code"]].product_variant_id.id,
                     "product_qty": line["quantity"],
                     "sequence": line["childnum"],
                     "bom_id": boms_by_code[line["father"]].id,
