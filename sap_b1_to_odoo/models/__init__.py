@@ -5,3 +5,5 @@ from . import mrp_bom
 from . import sale_purchase_common
 from . import sale_order
 from . import purchase_order
+from . import carrier_account
+from . import product_pricelist

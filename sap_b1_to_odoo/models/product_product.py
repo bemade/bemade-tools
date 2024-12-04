@@ -80,10 +80,15 @@ class SapProductImporter(models.AbstractModel):
                 category.sap_itms_grp_cod: category for category in categories
             }
             for sap_product in sap_products:
+                country_of_origin = sap_product["u_fcsdk_coo"]
+                if country_of_origin:
+                    country_of_origin = self.env["res.country"].search(
+                        [("code", "=", country_of_origin)]
+                    )
                 product_vals.append(
                     {
                         "sap_item_code": sap_product["itemcode"],
-                        "code": fix_quotes(sap_product["itemname"]),
+                        "default_code": fix_quotes(sap_product["itemname"]),
                         "name": fix_quotes(sap_product["frgnname"] or "N/A"),
                         "categ_id": categories_map[
                             sap_product["itmsgrpcod"]
@@ -93,6 +98,10 @@ class SapProductImporter(models.AbstractModel):
                         "active": sap_product["validfor"] == "Y",
                         "type": "product",
                         "company_id": self.env.company.id,
+                        "hs_code": sap_product["u_fcsdk_hst"] or None,
+                        "country_of_origin": country_of_origin
+                        and country_of_origin.id
+                        or None,
                     }
                 )
             products |= self.env["product.product"].create(product_vals)

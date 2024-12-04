@@ -25,7 +25,15 @@
     "author": "Bemade Inc.",
     "website": "http://www.bemade.org",
     "license": "LGPL-3",
-    "depends": ["base", "contacts", "sale", "stock", "mrp", "durpro_purchase"],
+    "depends": [
+        "base",
+        "contacts",
+        "sale",
+        "stock_delivery",
+        "mrp",
+        "durpro_purchase",
+        "delivery_carrier_partner_account",
+    ],
     "data": [
         "security/ir.model.access.csv",
         "data/menus_actions.xml",
