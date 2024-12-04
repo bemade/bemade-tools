@@ -1,4 +1,4 @@
-from odoo import models, fields, api, Command
+from odoo import models, fields, api
 import logging
 
 _logger = logging.getLogger(__name__)
@@ -52,6 +52,8 @@ class SapBomImporter(models.AbstractModel):
         component_vals = []
         _logger.info(f"Importing {len(sap_bom_lines)} BOM lines...")
         for line in sap_bom_lines:
+            if not line["code"]:
+                continue
             component_vals.append(
                 {
                     "product_id": odoo_products[line["code"]].product_variant_id.id,

@@ -7,6 +7,7 @@ _logger = logging.getLogger(__name__)
 
 class SapSalePurchaseImporterMixin(models.AbstractModel):
     _name = "sap.sale.purchase.importer.mixin"
+    _description = "SAP Sale and Purchase Order Importer Mixin"
 
     _products_dict = None
     _contacts_dict = None
@@ -45,13 +46,28 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         product = self._get_product(row["itemcode"])
         # TODO: confirm tax_ids come in properly with fiscal positions
         # tax_ids = self._get_tax(row["vatprcnt"])
-        return {
-            "product_id": product.id,
-            "product_uom_qty": row["quantity"],
-            "price_unit": row["price"],
-            "discount": row["discprcnt"],  # Likely problematic
-            # "tax_ids": None,
-        }
+        if product:
+            return {
+                "product_id": product.id,
+                "product_uom_qty": row["quantity"] if row["quantity"] else 0.0,
+                "price_unit": row["price"],
+                "discount": row["discprcnt"],  # Likely problematic
+                # "tax_ids": None,
+            }
+        else:
+            # Some PO lines in SAP have no product linked, so we make a note in Odoo
+            price = row["price"]
+            discount = row["discprcnt"]
+            quantity = row["quantity"] if row["quantity"] else 0.0
+            price = f" {price} $" if price else ""
+            discount = f" {discount}%" if discount else ""
+            quantity = f" {quantity} x"
+            return {
+                "product_id": False,
+                "product_uom_qty": 0.0,
+                "display_type": "line_note",
+                "name": f"{row['dscription']}{quantity}{price}{discount}",
+            }
 
     @api.model
     def _get_product(self, itemcode):
@@ -171,16 +187,24 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         """
         cr.execute(SQL(sql, SQL.identifier(sap_table)))
         confirmed_orders = [order[0] for order in cr.fetchall()]
+        state = getattr(self, "_confirmed_state")
         if confirmed_orders:
             _logger.info(
                 f"Marking {len(confirmed_orders)} orders as confirmed and closed "
                 f"(no delivery order)."
             )
             sql = """
-                    UPDATE %s set state='sale' WHERE sap_docnum in %s
+                    UPDATE %s set state=%s WHERE sap_docnum in %s
                     """
             self.env.cr.execute(
-                SQL(sql, SQL.identifier(odoo_table), tuple(confirmed_orders))
+                SQL(
+                    sql,
+                    SQL.identifier(odoo_table),
+                    state,
+                    tuple(
+                        confirmed_orders,
+                    ),
+                )
             )
 
     @api.model
@@ -196,7 +220,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         WHERE canceled = 'Y'
         """
         cr.execute(
-            SQL(sql), SQL.identifier(sap_order_table), SQL.identifier(sap_quote_table)
+            SQL(sql, SQL.identifier(sap_order_table), SQL.identifier(sap_quote_table))
         )
         canceled_orders = [order[0] for order in cr.fetchall()]
         if canceled_orders:
@@ -209,20 +233,21 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             )
 
     @api.model
-    def _confirm_open_orders_by_table(self, cr, sap_table, odoo_model, confirmed_state):
+    def _confirm_open_orders_by_table(self, cr, sap_table, odoo_model, confirm_method):
         """Mark confirmed orders that are open and confirmed in SAP. This is done
         separately due to the long runtime of confirming orders through the ORM."""
         sql = """
         SELECT docnum FROM %s
         WHERE canceled='N' and confirmed='Y' and invntsttus='O'
         """
-        cr.execute(SQL(sql), SQL.identifier(sap_table))
+        cr.execute(SQL(sql, SQL.identifier(sap_table)))
         open_orders = [order[0] for order in cr.fetchall()]
         if open_orders:
             _logger.info(f"Confirming {len(open_orders)} open orders ...")
-            self.env[odoo_model].search(
-                [("sap_docnum", "in", open_orders)]
-            ).state = confirmed_state
+            recs = self.env[odoo_model].search([("sap_docnum", "in", open_orders)])
+            for rec in recs:
+                method = getattr(rec, confirm_method)
+                method()
 
 
 class PaymentTerms(models.Model):

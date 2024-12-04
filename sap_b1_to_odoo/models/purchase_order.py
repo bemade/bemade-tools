@@ -1,5 +1,4 @@
 from odoo import models, fields, api, Command
-from odoo.sql_db import SQL
 from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
 import logging
 
@@ -21,6 +20,7 @@ class SapPurchaseOrderImporter(models.AbstractModel):
     _name = "sap.purchase.order.importer"
     _description = "SAP Purchase Order Importer"
     _inherit = "sap.sale.purchase.importer.mixin"
+    _confirmed_state = "purchase"
 
     _products_dict = None
 
@@ -117,12 +117,22 @@ class SapPurchaseOrderImporter(models.AbstractModel):
 
     @api.model
     def _confirm_closed_orders(self, cr):
-        self._confirm_closed_orders_by_table("opor", "purchase.order")
+        self._confirm_closed_orders_by_table(cr, "opor", "purchase_order")
 
+    @api.model
     def _cancel_canceled_orders_and_quotations(self, cr):
         self._cancel_canceled_orders_and_quotations_by_table(
-            cr, "ordr", "oqut", "purchase.order"
+            cr, "ordr", "oqut", "purchase_order"
         )
 
+    @api.model
     def _confirm_open_orders(self, cr):
-        self._confirm_open_orders_by_table(cr, "opor", "purchase.order", "purchase")
+        self._confirm_open_orders_by_table(
+            cr, "opor", "purchase.order", "button_confirm"
+        )
+
+    @api.model
+    def _get_row_vals(self, row):
+        vals = super()._get_row_vals(row)
+        vals.update(product_qty=vals["product_uom_qty"])
+        return vals
