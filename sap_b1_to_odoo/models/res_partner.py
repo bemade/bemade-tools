@@ -1,5 +1,4 @@
 from odoo import models, fields, api
-from .sap_database import PAGE_SIZE
 import logging
 
 _logger = logging.getLogger(__name__)
@@ -58,10 +57,11 @@ class SapResPartnerImporter(models.AbstractModel):
             state = None
         return country, state
 
+    @api.model
     def _extract_sap_street_street2(self, address, block):
         if block and not address:
-            return (block, "")
-        return (address, block)
+            return block, ""
+        return address, block
 
     def _import_ocrd(self, cr):
         """Import business partners (companies)"""
@@ -92,6 +92,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "email": sap_partner["e_mail"],
                     "is_company": True,
                     "company_id": self.env.company.id,
+                    "comment": sap_partner["notes"],
                 }
             )
 
@@ -120,11 +121,13 @@ class SapResPartnerImporter(models.AbstractModel):
                         "email": sap_partner["e_mail"],
                         "type": "delivery",
                         "company_id": self.env.company.id,
+                        "comment": sap_partner["notes"],
                     }
                 )
 
         return self.env["res.partner"].create(partner_vals)
 
+    @api.model
     def _link_children_parents(self, partners):
         partner_code_map = {partner.sap_card_code: partner for partner in partners}
         _logger.info("Linking partners to their parents in a hierarchy...")
@@ -158,6 +161,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "active": sap_contact["active"] == "Y",
                     "function": sap_contact["position"] or sap_contact["title"],
                     "company_id": self.env.company.id,
+                    "comment": sap_contact["notes1"] or sap_contact["notes2"] or "",
                 }
             )
         return self.env["res.partner"].create(partner_vals)

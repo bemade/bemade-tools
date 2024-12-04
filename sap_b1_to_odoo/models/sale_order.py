@@ -26,34 +26,35 @@ class SapSaleOrderImporter(models.AbstractModel):
     _description = "SAP Sales Order Importer"
     _inherit = ["sap.sale.purchase.importer.mixin"]
 
-    _products_dict = None
+    _sources_dict = None
+    _confirmed_state = "sale"
 
     def import_sales_orders(self, cr):
         self._uppercase_all_cardcodes(cr)
-        self._import_octg(cr)
+        self._import_utm_sources(cr)
         self._import_orders_and_quotations(cr)
 
-    # @api.model
-    # def _get_partners_dict(self):
-    #     partners = self.env["res.partner"].search(
-    #         [
-    #             "|",
-    #             ("sap_card_code", "!=", False),
-    #             ("sap_cntct_code", "!=", False),
-    #             ("active", "in", [False, True]),
-    #         ]
-    #     )
-    #     return {partner.sap_card_code: partner for partner in partners}
-    #
-    # @api.model
-    # def _get_contacts_dict(self):
-    #     contacts = self.env["res.partner"].search(
-    #         [
-    #             ("sap_cntct_code", "!=", False),
-    #             ("active", "in", [False, True]),
-    #         ]
-    #     )
-    #     return {contact.sap_cntct_code: contact for contact in contacts}
+    @api.model
+    def _import_utm_sources(self, cr):
+        sql = (
+            "SELECT DISTINCT u_fcsdk_source FROM ORDR "
+            "WHERE u_fcsdk_source IS NOT null AND u_fcsdk_source <> ''"
+        )
+        cr.execute(SQL(sql))
+        sources = cr.dictfetchall()
+        sql = "SELECT DISTINCT name from utm_source"
+        self.env.cr.execute(SQL(sql))
+        existing_sources = set([source[0] for source in cr.fetchall()])
+        vals_list = []
+        for source in sources:
+            if source["u_fcsdk_source"] not in existing_sources:
+                vals_list.append(
+                    {
+                        "name": source["u_fcsdk_source"],
+                    }
+                )
+        if vals_list:
+            self.env["utm.source"].create(vals_list)
 
     @api.model
     def _get_pricelist(self, sap_doccur):
@@ -61,18 +62,39 @@ class SapSaleOrderImporter(models.AbstractModel):
             [
                 ("currency_id.name", "=", "CAD"),
                 ("company_id", "=", self.env.company.id),
+                ("name", "=", "Default CAD Pricelist"),
             ]
         )
         usd_pricelist = self.env["product.pricelist"].search(
             [
                 ("currency_id.name", "=", "USD"),
                 ("company_id", "=", self.env.company.id),
+                ("name", "=", "Default USD Pricelist"),
             ]
         )
+        if not cad_pricelist:
+            cad_pricelist = self.env["product.pricelist"].create({
+                "name": "Default CAD Pricelist",
+                "currency_id": self.env["res.currency"].search([("name", "=", "CAD")]).id,
+            })
+        if not usd_pricelist:
+            usd_pricelist = self.env["product.pricelist"].create({
+                "name": "Default USD Pricelist",
+                "currency_id": self.env["res.currency"].search([("name", "=", "USD")]).id,
+            })
         if sap_doccur == "USD":
             return usd_pricelist
         else:
             return cad_pricelist
+
+    @api.model
+    def _get_source(self, order):
+        sources_dict = self.__class__._sources_dict
+        if sources_dict is None:
+            sources_dict = self.__class__._sources_dict = {
+                source.name: source.id for source in self.env["utm.source"].search([])
+            }
+        return sources_dict.get(order["u_fcsdk_source"], False)
 
     @staticmethod
     def _find_partner_by_type(order, partner, address_type):
@@ -82,12 +104,12 @@ class SapSaleOrderImporter(models.AbstractModel):
             return partner
         potential_partners = (
             partner.commercial_partner_id | partner.commercial_partner_id.child_ids
-        ).filtered(lambda partner: partner.street and partner.street in address)
+        ).filtered(lambda prt: prt.street and prt.street in address)
         if len(potential_partners) == 1:
             return potential_partners
         elif len(potential_partners) > 1:
             shipping_addresses = potential_partners.filtered(
-                lambda partner: partner.type == address_type
+                lambda prt: prt.type == address_type
             )
             if shipping_addresses:
                 return shipping_addresses[0]
@@ -179,7 +201,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                     "payment_term_id": terms.id,
                     "date_order": order["docdate"].replace(tzinfo=None),
                     "commitment_date": order["docduedate"].replace(tzinfo=None),
-                    "client_order_ref": order["numatcard"],
+                    "client_order_ref": order["numatcard"] or "N/A",
                     "picking_policy": self._get_picking_policy(order),
                     "order_line": (
                         [
@@ -189,6 +211,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                         if order_rows_dict.get(order["docentry"])
                         else False
                     ),
+                    "source_id": self._get_source(order),
                 }
             )
         return order_vals
@@ -198,15 +221,15 @@ class SapSaleOrderImporter(models.AbstractModel):
         return "direct" if ordr["partsupply"] == "Y" else "direct"
 
     def _confirm_closed_orders(self, cr):
-        self._confirm_closed_orders_by_table("ordr", "sale.order")
+        self._confirm_closed_orders_by_table(cr, "ordr", "sale_order")
 
     def _cancel_canceled_orders_quotations(self, cr):
         self._cancel_canceled_orders_and_quotations_by_table(
-            "ordr", "oqut", "sale.order"
+            cr, "ordr", "oqut", "sale_order"
         )
 
     def _confirm_open_orders(self, cr):
-        self._confirm_closed_orders_by_table(cr, "ordr", "sale.order", "sale")
+        self._confirm_open_orders_by_table(cr, "ordr", "sale.order", "action_confirm")
 
     def _get_imported_docnums(self):
         return self._get_imported_docnums_from_table("sale_order")
