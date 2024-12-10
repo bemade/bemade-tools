@@ -90,7 +90,7 @@ class ProductPricelistImporter(models.AbstractModel):
         pricelists = self.env["product.pricelist"].create(pricelist_vals)
         _logger.info(
             f"{len(pricelists)} Product pricelists imported "
-            f"with {len(pricelists.mapped("item_ids"))} lines."
+            f"with {len(pricelists.mapped('item_ids'))} lines."
         )
         self._set_partner_default_pricelists(
             sap_blanket_orders, pricelists, partners_dict
