@@ -15,7 +15,7 @@ class ProductPricelist(models.Model):
         index="btree",
     )
     sap_loginstanc = fields.Integer(index="btree")
-
+    sap_listnum = fields.Integer(index="btree")  # ID in OPLN table
     _sql_constraints = [
         (
             "sap_abs_id_loginstanc_unique",
@@ -69,12 +69,19 @@ class ProductPricelistImporter(models.AbstractModel):
         return partners_dict
 
     @api.model
+    def _get_sap_basic_pricelists(self, cr):
+        sql = "SELECT * FROM opln"
+        cr.execute(SQL(sql))
+        return cr.dictfetchall()
+
+    @api.model
     def import_all(self, cr):
         return self._import_all(cr)
 
     @api.model
     def _import_all(self, cr):
         _logger.info(f"Importing pricelists.")
+        self._import_basic_pricelists(cr)
         sap_blanket_orders = self._get_all_sap_blanket_orders(cr)
         sap_blanket_lines_dict = self._get_sap_blanket_lines_dict(cr)
         _logger.info(
@@ -95,6 +102,41 @@ class ProductPricelistImporter(models.AbstractModel):
         self._set_partner_default_pricelists(
             sap_blanket_orders, pricelists, partners_dict
         )
+
+    def _import_basic_pricelists(self, cr):
+        """For simple pricelists in the OPLN table, we just import the name and the
+        linenum so that we can later reference them. Each pricelist that isn't the base
+        pricelist gets one line, simply using the main pricelist as its base. This is
+        done so that we can associate clients to the pricelists and then apply the
+        discount levels appropriately after import via manual config.
+
+        The public pricelist gets renamed to the pricelist with ID 1 ("END USER") and
+        gets its linenum set."""
+        basic_lists = self._get_sap_basic_pricelists(cr)
+        public_pricelist = self.env["product.pricelist"].search(
+            [
+                ("name", "contains", "public"),
+                ("currency_id", "=", self.env.ref("base.CAD").id),
+            ]
+        )
+        for pricelist in basic_lists:
+            if pricelist["listnum"] == 1:
+                public_pricelist.name = pricelist["listname"]
+                public_pricelist.sap_listnum = pricelist["listnum"]
+            else:
+                self.env["product.pricelist"].create(
+                    {
+                        "sap_listnum": pricelist["listnum"],
+                        "name": pricelist["listname"],
+                        "item_ids": Command.create(
+                            {
+                                "applied_on": "all",
+                                "base": "pricelist",
+                                "base_pricelist_id": public_pricelist.id,
+                            }
+                        ),
+                    }
+                )
 
     @api.model
     def _set_partner_default_pricelists(
@@ -166,11 +208,19 @@ class ProductPricelistImporter(models.AbstractModel):
                 start,
                 end,
             )
+            # Add the final line to refer back to the base pricelist for all other products
+            item_vals += [
+                {
+                    "applied_on": "all",
+                    "base": "pricelist",
+                    "base_pricelist_id": partner.property_product_pricelist.id,
+                }
+            ]
             vals.append(
                 {
                     "sap_abs_id": blanket["absid"],
                     "sap_loginstanc": blanket["loginstanc"],
-                    "name": name,
+                    "name": partner.name + " - " + name,
                     "active": active,
                     "currency_id": currency.id,
                     "item_ids": [Command.create(val) for val in item_vals],
