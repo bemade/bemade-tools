@@ -29,6 +29,8 @@ class SapResPartnerImporter(models.AbstractModel):
     _name = "sap.res.partner.importer"
     _description = "SAP Partner Importer"
 
+    _basic_pricelists_dict = {}
+
     @api.model
     def import_partners(self, cr):
         _logger.info("Starting SAP partner import.")
@@ -58,6 +60,18 @@ class SapResPartnerImporter(models.AbstractModel):
         return country, state
 
     @api.model
+    def _get_basic_pricelists_dict(self):
+        lists_dict = self.__class__._basic_pricelists_dict
+        if not lists_dict:
+            pricelists = self.env["product.pricelist"].search(
+                [("sap_listnum", "!=", False)]
+            )
+            lists_dict = self.__class__._basic_pricelists_dict = {
+                pricelist.sap_listnum: pricelist for pricelist in pricelists
+            }
+        return lists_dict
+
+    @api.model
     def _extract_sap_street_street2(self, address, block):
         if block and not address:
             return block, ""
@@ -69,6 +83,7 @@ class SapResPartnerImporter(models.AbstractModel):
         sap_partners = cr.dictfetchall()
         _logger.info(f"Importing {len(sap_partners)} companies.")
         partner_vals = []
+        basic_pricelists = self._get_basic_pricelists_dict(cr)
         for sap_partner in sap_partners:
             # Start with the parent company
             country = sap_partner["country"]
@@ -93,6 +108,9 @@ class SapResPartnerImporter(models.AbstractModel):
                     "is_company": True,
                     "company_id": self.env.company.id,
                     "comment": sap_partner["notes"],
+                    "property_product_pricelist": basic_pricelists[
+                        sap_partner["listnum"]
+                    ],
                 }
             )
 
