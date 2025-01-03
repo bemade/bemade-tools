@@ -119,7 +119,7 @@ class SapResPartnerImporter(models.AbstractModel):
         sap_partners = cr.dictfetchall()
         _logger.info(f"Importing {len(sap_partners)} companies.")
         partner_vals = []
-        basic_pricelists = self._get_basic_pricelists_dict(cr)
+        basic_pricelists = self._get_basic_pricelists_dict()
         for sap_partner in sap_partners:
             # Start with the parent company
             country = sap_partner["country"]
@@ -148,7 +148,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "comment": sap_partner["notes"],
                     "property_product_pricelist": basic_pricelists[
                         sap_partner["listnum"],
-                    "user_id": user and user.id,
+                        "user_id" : user and user.id,
                     ],
                 }
             )
