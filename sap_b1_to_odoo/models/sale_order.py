@@ -28,6 +28,21 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     _sources_dict = None
     _confirmed_state = "sale"
+    _sap_users_dict = None
+
+    @classmethod
+    def _get_user(cls, sap_slpcode):
+        if cls._sap_users_dict is None:
+            cls._sap_users_dict = {
+                user.sap_slpcode: user.id
+                for user in cls.env["res.users"].search(
+                    [
+                        ("sap_slpcode", "!=", False),
+                        ("active", "in", [False, True]),
+                    ]
+                )
+            }
+        return cls._sap_users_dict.get(sap_slpcode, False)
 
     def import_sales_orders(self, cr):
         self._uppercase_all_cardcodes(cr)
@@ -55,6 +70,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                 )
         if vals_list:
             self.env["utm.source"].create(vals_list)
+            self.env["utm.source"].flush_model()
 
     @api.model
     def _get_pricelist(self, sap_doccur):
@@ -73,15 +89,23 @@ class SapSaleOrderImporter(models.AbstractModel):
             ]
         )
         if not cad_pricelist:
-            cad_pricelist = self.env["product.pricelist"].create({
-                "name": "Default CAD Pricelist",
-                "currency_id": self.env["res.currency"].search([("name", "=", "CAD")]).id,
-            })
+            cad_pricelist = self.env["product.pricelist"].create(
+                {
+                    "name": "Default CAD Pricelist",
+                    "currency_id": self.env["res.currency"]
+                    .search([("name", "=", "CAD")])
+                    .id,
+                }
+            )
         if not usd_pricelist:
-            usd_pricelist = self.env["product.pricelist"].create({
-                "name": "Default USD Pricelist",
-                "currency_id": self.env["res.currency"].search([("name", "=", "USD")]).id,
-            })
+            usd_pricelist = self.env["product.pricelist"].create(
+                {
+                    "name": "Default USD Pricelist",
+                    "currency_id": self.env["res.currency"]
+                    .search([("name", "=", "USD")])
+                    .id,
+                }
+            )
         if sap_doccur == "USD":
             return usd_pricelist
         else:
@@ -117,8 +141,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                 return partner
             if partner.commercial_partner_id in potential_partners:
                 return partner.commercial_partner_id
-        else:
-            return partner
+        return partner
 
     # @api.model
     # def _get_payment_terms(self, sap_groupnum):
@@ -178,6 +201,12 @@ class SapSaleOrderImporter(models.AbstractModel):
             # If there's a contact set, we use it instead of the company to be precise
 
             partner = self._get_partner(order)
+            if not partner:
+                raise Exception(
+                    f"Failed to find partner for order {order['docnum']}\n"
+                    f"cntctcode: {order['cntctcode']}\n"
+                    f"cardcode: {order['cardcode']}\n"
+                )
             pricelist = self._get_pricelist(order["doccur"])
             partner_shipping_id = self._find_partner_by_type(
                 order,
@@ -190,6 +219,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                 "invoice",
             )
             terms = self._get_payment_terms(order["groupnum"])
+            user = self._get_user(order["slpcode"])
             order_vals.append(
                 {
                     "sap_docnum": order["docnum"],
@@ -212,6 +242,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                         else False
                     ),
                     "source_id": self._get_source(order),
+                    "user_id": user and user.id,
                 }
             )
         return order_vals

@@ -35,6 +35,13 @@ class SapDatabase(models.Model):
             },
         }
 
+    def action_import_users(self):
+        with self.get_cursor() as cr:
+            self.env["res.users.importer"].with_company(
+                self.env.company
+            ).import_salespeople(cr)
+        return self._success_notification()
+
     def action_import_partners(self):
         with self.get_cursor() as cr:
             self.env["sap.res.partner.importer"].with_company(
@@ -80,6 +87,20 @@ class SapDatabase(models.Model):
             self.env["sap.purchase.order.importer"].with_company(
                 self.env.company
             ).import_purchase_orders(cr)
+        return self._success_notification()
+
+    def action_import_sale_stock_pickings(self):
+        with self.get_cursor() as cr:
+            self.env["sap.stock.picking.importer"].with_company(
+                self.env.company
+            ).import_sale_pickings(cr)
+        return self._success_notification()
+
+    def action_import_purchase_stock_pickings(self):
+        with self.get_cursor() as cr:
+            self.env["sap.stock.picking.importer"].with_company(
+                self.env.company
+            ).import_puchase_pickings(cr)
         return self._success_notification()
 
     def action_import_product_pricelist(self):
@@ -131,28 +152,17 @@ class SapDatabase(models.Model):
         self.ensure_one()
         with self.get_cursor() as cr:
             _logger.info("Beginning SAP record import.")
-            self.env["sap.res.partner.importer"].with_company(
-                self.env.company
-            ).import_partners(cr)
-            self.env["delivery.carrier.account.importer"].with_company(
-                self.env.company
-            ).import_all(cr)
-            self.env["sap.product.importer"].with_company(
-                self.env.company
-            ).import_products(cr)
-            self.env["sap.bom.importer"].with_company(self.env.company).import_boms(cr)
-            self.env["sap.sale.purchase.importer.mixin"].with_company(
-                self.env.company
-            ).import_payment_terms(cr)
-            self.env["sap.sale.order.importer"].with_company(
-                self.env.company
-            ).import_sales_orders(cr)
-            self.env["sap.purchase.order.importer"].with_company(
-                self.env.company
-            ).import_purchase_orders(cr)
-            self.env["sap.product.pricelist.importer"].with_company(
-                self.env.company
-            ).import_all(cr)
+            self.action_import_users()
+            self.action_import_partners()
+            self.action_import_carrier_accounts()
+            self.action_import_products()
+            self.action_import_boms()
+            self.action_import_payment_terms()
+            self.action_import_sales_orders()
+            self.action_import_purchase_orders()
+            self.action_import_sale_stock_pickings()
+            self.action_import_purchase_stock_pickings()
+            self.action_import_product_pricelist()
             _logger.info("Successfully completed SAP record import.")
 
     def action_delete_all(self):
