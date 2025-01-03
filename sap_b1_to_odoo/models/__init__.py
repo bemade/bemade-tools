@@ -7,3 +7,5 @@ from . import sale_order
 from . import purchase_order
 from . import carrier_account
 from . import product_pricelist
+from . import stock_picking
+from . import res_users

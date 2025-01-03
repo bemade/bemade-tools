@@ -41,9 +41,10 @@ class SapProductImporter(models.AbstractModel):
         categories = self._import_oitb(cr)
         products = self._import_oitm(cr, categories)
         self._import_orderpoints(cr, products)
-        self._import_stock_quants(cr, products)
-        # TODO: implement BOMs with treetype, treeqty and the ITT1 table
-        # TODO: grab the inventory "on hand" fields, min max, etc.
+
+    @api.model
+    def import_inventory(self, cr):
+        self._import_stock_quants(cr)
 
     def _import_oitb(self, cr):
         """Import product categories from SAP"""
@@ -128,14 +129,15 @@ class SapProductImporter(models.AbstractModel):
                 }
             )
 
-    def _import_stock_quants(self, cr, products):
+    def _import_stock_quants(self, cr):
+        products = self.env["product.product"].search(
+            [("active", "in", [True, False]), ("sap_item_code", "!=", False)]
+        )
         warehouse = self.env["stock.warehouse"].search(
             [("company_id", "=", self.env.company.id)], limit=1
         )
         location = warehouse.lot_stock_id
-        cr.execute(
-            "SELECT itemcode, onhand FROM oitm WHERE validfor='Y' and onhand <> 0"
-        )
+        cr.execute("SELECT itemcode, onhand FROM oitm WHERE validfor='Y'")
         sap_stock = cr.dictfetchall()
         codes = [stock["itemcode"] for stock in sap_stock]
         products_dict = {

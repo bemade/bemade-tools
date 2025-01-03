@@ -1,5 +1,6 @@
-from odoo import models, fields, api
 import logging
+
+from odoo import models, fields, api
 
 _logger = logging.getLogger(__name__)
 
@@ -30,34 +31,69 @@ class SapResPartnerImporter(models.AbstractModel):
     _description = "SAP Partner Importer"
 
     _basic_pricelists_dict = {}
+    _sap_users_dict = None
+    _countries_dict = None
+    _states_dict = None
+
+    @api.model
+    def _get_user(self, sap_slpcode):
+        cls = self.__class__
+        if cls._sap_users_dict is None:
+            cls._sap_users_dict = {
+                user.sap_slpcode: user.id
+                for user in self.env["res.users"].search(
+                    [
+                        ("sap_slpcode", "!=", False),
+                        ("active", "in", [False, True]),
+                    ]
+                )
+            }
+        return cls._sap_users_dict.get(sap_slpcode, False)
 
     @api.model
     def import_partners(self, cr):
         _logger.info("Starting SAP partner import.")
         partners = self._import_ocrd(cr)
+        partners |= self._import_crd1(cr)
         partners |= self._import_ocpr(cr)
         self._link_children_parents(partners)
 
+    @api.model
+    def _get_state(self, code, country_code=None):
+        """Get the state associated with code and country_code. If no country_code is
+        set, try first a Canadian province and, if not found, a US state."""
+        try:
+            cls = self.__class__
+            if cls._states_dict is None:
+                cls._states_dict = {
+                    state.country_id.code: {state.code: state}
+                    for state in self.env["res.country.state"].search([])
+                }
+            if not code:
+                return False
+            if not country_code:
+                return cls._states_dict.get("CA").get(
+                    code, False
+                ) or cls._states_dict.get("US").get(code, False)
+            return cls._states_dict.get(country_code).get(code, False)
+        except Exception as e:
+            _logger.error(f"Error getting state {code} for country {country_code}")
+            raise e
+
+    @api.model
+    def _get_country(self, code):
+        cls = self.__class__
+        if cls._countries_dict is None:
+            cls._countries_dict = {
+                country.code: country for country in self.env["res.country"].search([])
+            }
+        return cls._countries_dict.get(code, False)
+
+    @api.model
     def _extract_sap_state_country(self, country, state):
-        country = (
-            self.env["res.country"].search([("code", "=", country)])
-            if country and country != "XX"
-            else None
-        )
-        if country and state:
-            state = self.env["res.country.state"].search(
-                [("code", "=", state), ("country_id", "=", country.id)]
-            )
-        elif state:
-            state = self.env["res.country.state"].search(
-                [
-                    ("code", "=", state),
-                    ("country_id.code", "in", ["CA", "US"]),
-                ]
-            )
-        else:
-            state = None
-        return country, state
+        odoo_country = self._get_country(country)
+        odoo_state = self._get_state(state, country)
+        return odoo_country, odoo_state
 
     @api.model
     def _get_basic_pricelists_dict(self):
@@ -93,6 +129,7 @@ class SapResPartnerImporter(models.AbstractModel):
                 sap_partner["address"],
                 sap_partner["block"],
             )
+            user = self._get_user(sap_partner["slpcode"])
             partner_vals.append(
                 {
                     "sap_card_code": sap_partner["cardcode"],
@@ -102,6 +139,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "city": sap_partner["city"] or "",
                     "country_id": country and country.id or False,
                     "state_id": state and state.id or False,
+                    "zip": sap_partner["zipcode"],
                     "sap_parent_card": sap_partner["fathercard"] or False,
                     "phone": sap_partner["phone1"] or sap_partner["phone2"],
                     "email": sap_partner["e_mail"],
@@ -109,7 +147,8 @@ class SapResPartnerImporter(models.AbstractModel):
                     "company_id": self.env.company.id,
                     "comment": sap_partner["notes"],
                     "property_product_pricelist": basic_pricelists[
-                        sap_partner["listnum"]
+                        sap_partner["listnum"],
+                    "user_id": user and user.id,
                     ],
                 }
             )
@@ -122,6 +161,7 @@ class SapResPartnerImporter(models.AbstractModel):
                 sap_partner["mailaddres"],
                 sap_partner["mailblock"],
             )
+            user = self._get_user(sap_partner["slpcode"])
             if (street or street2) and country and state:
                 partner_vals.append(
                     {
@@ -140,9 +180,57 @@ class SapResPartnerImporter(models.AbstractModel):
                         "type": "delivery",
                         "company_id": self.env.company.id,
                         "comment": sap_partner["notes"],
+                        "user_id": user and user.id,
                     }
                 )
 
+        return self.env["res.partner"].create(partner_vals)
+
+    def _import_crd1(self, cr):
+        cr.execute(f"SELECT * FROM crd1")
+        sap_addresses = cr.dictfetchall()
+        _logger.info(f"Importing {len(sap_addresses)} addresses.")
+        partner_vals = []
+
+        def _extract_name_street_street2(address, street, address2, address3):
+            """Addresses in SAP have 4 possible lines that would match with street1
+            and street2 from Odoo. Intelligently concatenate depending on which
+            lines are set or not set."""
+            addressParts = [
+                part for part in [address, street, address2, address3] if part
+            ]
+            if len(addressParts) > 3:
+                return addressParts[0], addressParts[1], ", ".join(addressParts[2:])
+            else:
+                addressParts += ["" for _ in range(3 - len(addressParts))]
+                return tuple(addressParts)
+
+        for sap_address in sap_addresses:
+            name, street, street2 = _extract_name_street_street2(
+                sap_address["address"],
+                sap_address["street"],
+                sap_address["address2"],
+                sap_address["address3"],
+            )
+            parent_card = sap_address["cardcode"]
+            country, state = self._extract_sap_state_country(
+                sap_address["country"], sap_address["state"]
+            )
+            zip = sap_address["zipcode"]
+            partner_vals.append(
+                {
+                    "name": name,
+                    "street": street,
+                    "street2": street2,
+                    "city": sap_address["city"],
+                    "country_id": country and country.id or False,
+                    "state_id": state and state.id or False,
+                    "sap_parent_card": parent_card,
+                    "type": "delivery",
+                    "is_company": False,
+                    "user_id": False,
+                }
+            )
         return self.env["res.partner"].create(partner_vals)
 
     @api.model
