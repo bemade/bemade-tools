@@ -115,7 +115,7 @@ class ProductPricelistImporter(models.AbstractModel):
         basic_lists = self._get_sap_basic_pricelists(cr)
         public_pricelist = self.env["product.pricelist"].search(
             [
-                ("name", "contains", "public"),
+                ("name", "ilike", "public"),
                 ("currency_id", "=", self.env.ref("base.CAD").id),
             ]
         )
@@ -128,13 +128,15 @@ class ProductPricelistImporter(models.AbstractModel):
                     {
                         "sap_listnum": pricelist["listnum"],
                         "name": pricelist["listname"],
-                        "item_ids": Command.create(
-                            {
-                                "applied_on": "all",
-                                "base": "pricelist",
-                                "base_pricelist_id": public_pricelist.id,
-                            }
-                        ),
+                        "item_ids": [
+                            Command.create(
+                                {
+                                    "applied_on": "3_global",
+                                    "base": "pricelist",
+                                    "base_pricelist_id": public_pricelist.id,
+                                }
+                            )
+                        ],
                     }
                 )
 
