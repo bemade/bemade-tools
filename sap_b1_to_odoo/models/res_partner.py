@@ -148,8 +148,8 @@ class SapResPartnerImporter(models.AbstractModel):
                     "comment": sap_partner["notes"],
                     "property_product_pricelist": basic_pricelists[
                         sap_partner["listnum"],
-                        "user_id" : user and user.id,
                     ],
+                    "user_id": user and user.id,
                 }
             )
 
