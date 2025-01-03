@@ -146,9 +146,6 @@ class SapResPartnerImporter(models.AbstractModel):
                     "is_company": True,
                     "company_id": self.env.company.id,
                     "comment": sap_partner["notes"],
-                    "property_product_pricelist": basic_pricelists[
-                        sap_partner["listnum"],
-                    ],
                     "user_id": user and user.id,
                 }
             )
