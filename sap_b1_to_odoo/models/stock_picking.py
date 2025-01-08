@@ -1,9 +1,22 @@
-from odoo import models, fields, api, Command
-from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
-from odoo.tools.sql import SQL
 import logging
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
+import psycopg2
+
+from odoo import models, fields, api, Command, registry
+from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
+from odoo.addons.stock.models.stock_picking import Picking
+from odoo.tools.sql import SQL
 
 _logger = logging.getLogger(__name__)
+
+workers = 8
+
+
+def _dummy_set_scheduled_date(self):
+    for picking in self:
+        picking.move_ids.write({"date": picking.scheduled_date})
 
 
 class StockPicking(models.Model):
@@ -42,56 +55,406 @@ class StockPickingImporter(models.AbstractModel):
     _description = "SAP Stock Picking Importer"
 
     _sale_orders_dict = None
-    _products_dict = None
-    _carriers_dict = None
 
     @api.model
-    def _get_carrier(self, trnspcode: str):
-        carriers_dict = self.__class__._carriers_dict
-        if not carriers_dict:
-            sap_transporters = self.env["sap.transporter"].search([])
-            carriers_dict = self.__class__._carriers_dict = {
-                transporter.sap_trnspcode: transporter.delivery_carrier_id
-                for transporter in sap_transporters
-            }
-        return carriers_dict.get(trnspcode)
+    def _get_carriers_dict(self):
+        return {
+            transporter.sap_trnspcode: transporter.delivery_carrier_id.id
+            for transporter in self.env["sap.transporter"].search([])
+        }
 
     @api.model
-    def _get_product(self, itemcode: str):
-        products_dict = self.__class__._products_dict
-        if not products_dict:
-            products = self.env["product.product"].search(
-                [["sap_item_code", "!=", False], ["active", "in", [True, False]]]
+    def _get_products_dict(self):
+        return {
+            product["sap_item_code"]: product["id"]
+            for product in self.env["product.product"].search_read(
+                [["sap_item_code", "!=", False], ["active", "in", [True, False]]],
+                ["id", "sap_item_code"],
             )
-            products_dict = self.__class__._products_dict = {
-                product.sap_item_code: product for product in products
-            }
-        return products_dict.get(itemcode)
+        }
 
     @api.model
-    def _get_sale_order(self, sap_docentry: int):
-        sales_dict = self.__class__._sale_orders_dict
-        if not sales_dict:
-            orders = self.env["sale.order"].search([("sap_docentry", "!=", False)])
-            sales_dict = self.__class__._sale_orders_dict = {
-                order.sap_docentry: order for order in orders
-            }
-        return sales_dict.get(sap_docentry)
+    def _get_sales_dict(self):
+        return {
+            order.sap_docentry: order
+            for order in self.env["sale.order"].search([("sap_docentry", "!=", False)])
+        }
+
+    @api.model
+    def _get_purchases_dict(self):
+        return {
+            order.sap_docentry: order
+            for order in self.env["purchase.order"].search(
+                [("sap_docentry", "!=", False)]
+            )
+        }
 
     @api.model
     def import_sale_pickings(self, cr):
+        _logger.info(f"Checking for already imported pickings.")
+        self.env.cr.execute(
+            "SELECT sap_docnum FROM stock_picking WHERE sap_docnum IS NOT NULL"
+        )
+        imported_pickings = tuple(row[0] for row in self.env.cr.fetchall())
+        _logger.info(f"Found {len(imported_pickings)} imported pickings.")
         where = "WHERE canceled = 'N'"
+        args = []
+        if imported_pickings:
+            where += " AND docnum not in %s"
+            args = [imported_pickings]
+
+        chunk_size = 500
         delivery_pager = PagingIterator(
             cr,
             fetch_query=f"SELECT * FROM odln {where}",
+            fetch_args=args,
             count_query=f"SELECT count(*) FROM odln {where}",
-            limit=1000,
+            count_args=args,
+            limit=chunk_size,
             orderby="docentry",
             logger=_logger,
         )
+        _logger.info(f"Delivery pager with {delivery_pager.count} entries ...")
+        carriers_dict = self._get_carriers_dict()
+        products_dict = self._get_products_dict()
+        start_method = multiprocessing.get_start_method()
+        chunks = [
+            [chunk, self._get_sales_delivery_lines(cr, chunk)]
+            for chunk in delivery_pager
+        ]
+        multiprocessing.set_start_method("fork", force=True)
+        real_func = Picking._set_scheduled_date
+        Picking._set_scheduled_date = _dummy_set_scheduled_date
+        active_automations = self.env["base.automation"].search([("active", "=", True)])
+        active_automations.active = False
+        self.env["base.automation"].flush_model()
+        processed_chunks = 0
+        total_chunks = len(chunks)
+
+        try:
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._import_sales_pickings_sub,
+                        self._cr.dbname,
+                        self._uid,
+                        dict(self._context),
+                        carriers_dict,
+                        products_dict,
+                        chunk[0],
+                        chunk[1],
+                    )
+                    for chunk in chunks
+                ]
+                for future in futures:
+                    future.result()
+                    processed_chunks += chunk_size
+                    _logger.info(
+                        f"Processed {processed_chunks} pickings in chunks of {chunk_size}."
+                        f" {total_chunks - processed_chunks} chunks to go."
+                    )
+            # for chunk in chunks:
+            #     self._import_sales_pickings_sub_single_process(
+            #         carriers_dict,
+            #         products_dict,
+            #         chunk[0],
+            #         chunk[1],
+            #     )
+        finally:
+            multiprocessing.set_start_method(start_method, force=True)
+            Picking._set_scheduled_date = real_func
+            active_automations.active = True
+
+    @api.model
+    def _import_sales_pickings_sub_single_process(
+        self, carriers_dict, products_dict, deliveries, delivery_lines
+    ):
+        env = self.env
+        sales_dict = self._get_sales_dict()
+        warehouse = self.env["stock.warehouse"].search([])
         picking_vals = []
-        for deliveries in delivery_pager:
-            sql = """
+        lines_dict = {}
+        for line in delivery_lines:
+            lines_dict.setdefault(line["docentry"], []).append(line)
+        for delivery in deliveries:
+            new_vals = self._get_sales_picking_vals(
+                delivery,
+                lines_dict.get(delivery["docentry"], []),
+                carriers_dict,
+                products_dict,
+                sales_dict,
+                warehouse,
+            )
+            if new_vals:
+                picking_vals.append(new_vals)
+        _logger.info(f"Creating {len(picking_vals)} picking records.")
+        env["stock.picking"].create(picking_vals)
+        _logger.info(f"Flushing models.")
+        env["stock.picking"].flush_model()
+        env["stock.move"].flush_model()
+        env["stock.move.line"].flush_model()
+        _logger.info(f"Picking records successfully created.")
+
+    @staticmethod
+    def _import_sales_pickings_sub(
+        dbname,
+        uid,
+        context,
+        carriers_dict,
+        products_dict,
+        deliveries,
+        delivery_lines,
+    ):
+        try:
+            pid = os.getpid()
+            _logger.info(
+                f"Subprocess {pid} is processing {len(deliveries)} deliveries."
+            )
+            with registry(dbname).cursor() as cr:
+                retry_limit = 3
+                retry_count = 0
+                while retry_count < retry_limit:
+                    try:
+                        env = api.Environment(cr, uid, context)
+                        self = env["sap.stock.picking.importer"]
+                        sales_dict = self._get_sales_dict()
+                        warehouse = self.env["stock.warehouse"].search([])
+                        picking_vals = []
+                        lines_dict = {}
+                        for line in delivery_lines:
+                            lines_dict.setdefault(line["docentry"], []).append(line)
+                        for delivery in deliveries:
+                            new_vals = self._get_sales_picking_vals(
+                                delivery,
+                                lines_dict.get(delivery["docentry"], []),
+                                carriers_dict,
+                                products_dict,
+                                sales_dict,
+                                warehouse,
+                            )
+                            if new_vals:
+                                picking_vals.append(new_vals)
+                        _logger.info(
+                            f"[PID {pid}] Creating {len(picking_vals)} picking records."
+                        )
+                        env["stock.picking"].create(picking_vals)
+                        _logger.info(f"[PID {pid}] Flushing models.")
+                        env["stock.picking"].flush_model()
+                        env["stock.move"].flush_model()
+                        env["stock.move.line"].flush_model()
+                        _logger.info(
+                            f"[PID {pid}] Picking records successfully created."
+                        )
+                    except psycopg2.errors.SerializationFailure as e:
+                        retry_count += 1
+                        _logger.warning(
+                            f"[PID {pid}] Serialization failure encountered. Retrying {retry_count}/{retry_limit}. Exception: {e}"
+                        )
+                        cr.rollback()
+                        if retry_count >= retry_limit:
+                            _logger.error(
+                                f"[PID {pid}] Exceeded maximum retry attempts for serialization failure."
+                            )
+                            raise
+                    break  # Exit retry loop on success
+        except Exception as e:
+            _logger.error("Subprocess threw an exception.", exc_info=e)
+            raise e
+
+    @api.model
+    def _get_sales_picking_vals(
+        self, delivery, lines, carriers_dict, products_dict, sales_dict, warehouse
+    ):
+        vals = self._get_picking_vals(
+            delivery,
+            lines,
+            carriers_dict,
+            products_dict,
+            warehouse.out_type_id,
+        )
+        if not vals:
+            return None
+        sale = sales_dict.get(delivery["docentry"])
+        vals.update(
+            name=f"SAP/OUT/{delivery['docnum']}",
+            sale_id=sale.id,
+            partner_id=sale.partner_id.id,
+            origin=sale.name,
+            picking_type_id=warehouse.out_type_id.id,
+            sap_odln_docentry=delivery["docentry"],
+        )
+        return vals
+
+    @api.model
+    def _get_purchase_picking_vals(
+        self, delivery, lines, carriers_dict, products_dict, purchase_dict, warehouse
+    ):
+        vals = self._get_picking_vals(
+            delivery,
+            lines,
+            carriers_dict,
+            products_dict,
+            warehouse.in_type_id,
+        )
+        purchase = purchase_dict.get(delivery["docentry"])
+        vals.update(
+            name=f"SAP/IN/{purchase.name}",
+            purchase_id=purchase.id,
+            partner_id=purchase.partner_id.id,
+            origin=purchase.name,
+            sap_odpn_docentry=delivery["docentry"],
+        )
+        return vals
+
+    @api.model
+    def _get_picking_vals(
+        self, delivery, lines, carriers_dict, products_dict, operation_type
+    ):
+        if not lines:
+            return None
+        sap_docnum = delivery["docnum"]
+        scheduled_date = delivery["docdate"].replace(tzinfo=None)
+        date_done = delivery["docduedate"].replace(tzinfo=None)
+        carrier = carriers_dict.get(delivery["trnspcode"], False)
+        src = operation_type.default_location_src_id or self.env.ref(
+            "stock.stock_location_suppliers"
+        )
+        dest = operation_type.default_location_dest_id or self.env.ref(
+            "stock.stock_location_customers"
+        )
+        picking_vals = {
+            "sap_docnum": sap_docnum,
+            "move_ids": [
+                Command.create(self._get_move_vals(line, products_dict, src, dest))
+                for line in lines
+            ],
+            "carrier_id": carrier,
+            "scheduled_date": scheduled_date,
+            "date_done": date_done,
+            "picking_type_id": operation_type.id,
+        }
+        return picking_vals
+
+    @api.model
+    def _get_move_vals(self, line, products_dict, src, dest):
+        product_qty = line["quantity"]
+        qty_open = line["openqty"]
+        product_uom_qty = product_qty + qty_open
+        product = products_dict.get(line["itemcode"], False)
+        if not product:
+            raise Exception(
+                f"Product {line['itemcode']} not found in Odoo. "
+                "Please import products from SAP B1."
+            )
+        date = (
+            line["shipdate"]
+            and line["shipdate"].replace(tzinfo=None)
+            or fields.Datetime.now()
+        )
+        state = "done" if line["linestatus"] == "C" else "confirmed"
+
+        def _get_move_line_vals():
+            if not product_qty:
+                return None
+            return {
+                "product_id": product,
+                "quantity": product_qty,
+                "date": date,
+            }
+
+        move_line_vals = _get_move_line_vals()
+        return {
+            "name": f"SAP Delivery Line {line['linenum']} for product {product}, docentry {line['docentry']}",
+            "product_id": product,
+            "product_uom_qty": product_uom_qty,
+            "quantity": product_uom_qty,
+            "date": date,
+            "picking_id": 1,
+            "move_line_ids": (
+                [Command.create(move_line_vals)] if move_line_vals else False
+            ),
+            "state": state,
+            "location_id": src.id,
+            "location_dest_id": dest.id,
+        }
+
+    @api.model
+    def import_purchase_pickings(self, cr):
+        imported_pickings = tuple(
+            pick["sap_docnum"]
+            for pick in self.env["stock.picking"].search_read(
+                [("sap_docnum", "!=", False)]
+            )
+        )
+        where = "WHERE canceled = 'N'"
+        args = []
+        if imported_pickings:
+            where += " AND docnum not in %s"
+            args = [imported_pickings]
+
+        delivery_pager = PagingIterator(
+            cr,
+            fetch_query=f"SELECT * FROM opdn {where}",
+            fetch_args=args,
+            count_query=f"SELECT count(*) FROM opdn {where}",
+            count_args=args,
+            limit=500,
+            orderby="docentry",
+            logger=_logger,
+        )
+        carriers_dict = self._get_carriers_dict()
+        products_dict = self._get_products_dict()
+        start_method = multiprocessing.get_start_method()
+        multiprocessing.set_start_method("fork", force=True)
+        try:
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._import_purchase_pickings_sub,
+                        self._cr.dbname,
+                        self._uid,
+                        dict(self._context),
+                        chunk,
+                        carriers_dict,
+                        products_dict,
+                        self._get_purchase_delivery_lines(cr, chunk),
+                    )
+                    for chunk in delivery_pager
+                ]
+                for future in futures:
+                    future.result()
+        finally:
+            multiprocessing.set_start_method(start_method, force=True)
+
+    @staticmethod
+    def _import_purchase_pickings_sub(
+        dbname, uid, context, deliveries, carriers_dict, products_dict, delivery_lines
+    ):
+        with registry(dbname).cursor() as cr:
+            env = api.Environment(cr, uid, context)
+            self = env["sap.stock.picking.importer"]
+            purchase_dict = self._get_purchases_dict()
+            warehouse = env["stock.warehouse"].search([])
+            picking_vals = []
+            lines_dict = {}
+            for line in delivery_lines:
+                lines_dict.setdefault(line["docentry"], []).append(line)
+            for delivery in deliveries:
+                new_vals = self._get_purchase_picking_vals(
+                    delivery,
+                    lines_dict.get(delivery["docentry"], []),
+                    carriers_dict,
+                    products_dict,
+                    purchase_dict,
+                    warehouse,
+                )
+                if new_vals:
+                    picking_vals.append(new_vals)
+            self.env["stock.picking"].create(picking_vals)
+
+    @staticmethod
+    def _get_sales_delivery_lines(cr, deliveries):
+        sql = """
             WITH RECURSIVE sale_delivery_lines AS (
                 SELECT * FROM dln1 WHERE basetype=17
                 
@@ -106,81 +469,28 @@ class StockPickingImporter(models.AbstractModel):
                 AND docentry IN %s
             ORDER BY docentry, linenum
             """
-            cr.execute(
-                SQL(
-                    sql,
-                    tuple([delivery["docentry"] for delivery in deliveries]),
-                )
+        cr.execute(
+            SQL(
+                sql,
+                tuple([delivery["docentry"] for delivery in deliveries]),
             )
-            delivery_lines = cr.dictfetchall()
-            lines_dict = {}
-            for line in delivery_lines:
-                lines_dict.setdefault(line["docentry"], []).append(line)
-            for delivery in deliveries:
-                new_vals = self._get_picking_vals(
-                    delivery,
-                    lines_dict.get(delivery["docentry"], []),
-                )
-                if new_vals:
-                    picking_vals.append(new_vals)
+        )
+        delivery_lines = cr.dictfetchall()
+        return delivery_lines
 
-    @api.model
-    def _get_picking_vals(self, delivery, lines):
-        if not lines:
-            return None
-        name = f"SAP/OUT/{delivery['docnum']}"
-        sale_order = self._get_sale_order(delivery["docentry"])
-        warehouse = self.env["stock.warehouse"].search([], limit=1)
-        type = warehouse.out_type_id
-        sale_id = sale_order.id
-        origin = sale_order.name
-        sap_docentry = delivery["docentry"]
-        sap_docnum = delivery["docnum"]
-        date = delivery["docdate"]
-        ship_date = delivery["docduedate"]
-        carrier = self._get_carrier(delivery["trnspcode"])
-        picking_vals = {
-            "name": name,
-            "origin": origin,
-            "type": type.name,
-            "location_id": type.default_location_dest_id.id,
-            "location_dest_id": type.default_location_src_id.id,
-            "partner_id": sale_order.partner_id.id,
-            "sale_id": sale_id,
-            "move_ids": [Command.create(self._get_move_vals(line)) for line in lines],
-            "carrier_id": carrier.id if carrier else False,
-        }
-
-    @api.model
-    def _get_move_vals(self, line):
-        product_qty = line["quantity"]
-        qty_open = line["openqty"]
-        product_uom_qty = product_qty + qty_open
-        product = self._get_product(line["itemcode"])
-        if not product:
-            raise Exception(
-                f"Product {line['itemcode']} not found in Odoo. "
-                "Please import products from SAP B1."
+    @staticmethod
+    def _get_purchase_delivery_lines(cr, deliveries):
+        sql = """
+            SELECT * FROM DLN1 WHERE 
+                docentry IN (SELECT docentry FROM purchase_delivery_lines WHERE basetype in (20, 22))
+                AND docentry IN %s
+            ORDER BY docentry, linenum
+            """
+        cr.execute(
+            SQL(
+                sql,
+                tuple([delivery["docentry"] for delivery in deliveries]),
             )
-        date = line["shipdate"]
-        state = "done" if line["linestatus"] == "C" else "confirmed"
-
-        def _get_move_line_vals():
-            return {
-                "product_id": product.id,
-                "quantity": product_qty,
-                "date": date,
-            }
-
-        return {
-            "product_id": product.id,
-            "product_uom_qty": product_uom_qty,
-            "date": date,
-            "picking_id": 1,
-            "move_line_ids": [Command.create(_get_move_line_vals())],
-            "state": state,
-        }
-
-    @api.model
-    def import_puchase_pickings(self, cr):
-        pass
+        )
+        delivery_lines = cr.dictfetchall()
+        return delivery_lines

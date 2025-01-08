@@ -45,7 +45,6 @@ class SapProductImporter(models.AbstractModel):
         _logger.info("Importing products and categories...")
         category_ids = self._import_oitb(cr)
         self._import_oitm(cr, category_ids)
-        self._import_orderpoints(cr)
 
     @api.model
     def import_inventory(self, cr):
@@ -170,11 +169,12 @@ class SapProductImporter(models.AbstractModel):
                 {
                     "name": sap_group["itmsgrpnam"],
                     "sap_itms_grp_cod": sap_group["itmsgrpcod"],
+                    "property_cost_method": "fifo",
                 }
             )
         return self.env["product.category"].create(category_vals)
 
-    def _import_orderpoints(self, cr):
+    def import_orderpoints(self, cr):
         existing_orderpoints = tuple(
             self.env["stock.warehouse.orderpoint"]
             .search(

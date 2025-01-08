@@ -111,16 +111,13 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         return {contact.sap_cntct_code: contact for contact in contacts}
 
     @api.model
-    def _get_payment_terms(self, sap_groupnum):
-        terms_dict = SapSalePurchaseImporterMixin._payment_terms_dict
-        if not terms_dict:
-            terms = self.env["account.payment.term"].search(
+    def _get_payment_terms_dict(self):
+        return {
+            term.sap_groupnum: term
+            for term in self.env["account.payment.term"].search(
                 [("sap_groupnum", "!=", False)]
             )
-            SapSalePurchaseImporterMixin._payment_terms_dict = terms_dict = {
-                term.sap_groupnum: term for term in terms
-            }
-        return terms_dict[sap_groupnum]
+        }
 
     def _get_imported_docnums_from_table(self, table):
         sql = SQL(
