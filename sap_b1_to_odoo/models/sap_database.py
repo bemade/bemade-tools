@@ -35,6 +35,11 @@ class SapDatabase(models.Model):
             },
         }
 
+    def action_init_pricelists(self):
+        self.env["sap.sale.order.importer"].with_company(
+            self.env.company
+        ).init_pricelists()
+
     def action_import_users(self):
         with self.get_cursor() as cr:
             self.env["res.users.importer"].with_company(
@@ -46,7 +51,7 @@ class SapDatabase(models.Model):
         with self.get_cursor() as cr:
             self.env["sap.res.partner.importer"].with_company(
                 self.env.company
-            ).import_partners(cr)
+            ).import_partners_concurrent(cr)
         return self._success_notification()
 
     def action_import_carrier_accounts(self):

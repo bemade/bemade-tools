@@ -89,8 +89,10 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         for row in sap_order_rows:
             order_rows_dict.setdefault(row["docentry"], []).append(row)
         order_vals = []
+        contacts_dict = self._get_contacts_dict()
+        partners_dict = self._get_partners_dict()
         for order in sap_orders:
-            partner = self._get_partner(order)
+            partner = self._get_partner(order, contacts_dict, partners_dict)
             terms = self._get_payment_terms(order["groupnum"])
             order_vals.append(
                 {
@@ -133,6 +135,7 @@ class SapPurchaseOrderImporter(models.AbstractModel):
 
     @api.model
     def _get_row_vals(self, row):
-        vals = super()._get_row_vals(row)
+        products_dict = self._get_products_dict()
+        vals = super()._get_row_vals(row, products_dict)
         vals.update(product_qty=vals["product_uom_qty"])
         return vals

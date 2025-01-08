@@ -1,8 +1,22 @@
 import logging
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+from odoo.tools.sql import SQL
 
-from odoo import models, fields, api
+from odoo import models, fields, api, registry
 
 _logger = logging.getLogger(__name__)
+max_workers = 8
+
+
+def _create_partners_concurrent(dbname, uid, context, sap_partners, vals_func_name):
+    _logger.info(f"Creating partners from {len(sap_partners)} SAP partners.")
+    _logger.info(f"Spawning a cursor for db name {dbname}")
+    with registry(dbname).cursor() as cr:
+        env = api.Environment(cr, uid, context)
+        vals_func = getattr(env["sap.res.partner.importer"], vals_func_name)
+        partner_vals = vals_func(sap_partners)
+        return env["res.partner"].create(partner_vals).ids
 
 
 class ResPartner(models.Model):
@@ -30,106 +44,67 @@ class SapResPartnerImporter(models.AbstractModel):
     _name = "sap.res.partner.importer"
     _description = "SAP Partner Importer"
 
-    _basic_pricelists_dict = {}
-    _sap_users_dict = None
-    _countries_dict = None
-    _states_dict = None
-
     @api.model
-    def _get_user(self, sap_slpcode):
-        cls = self.__class__
-        if cls._sap_users_dict is None:
-            cls._sap_users_dict = {
-                user.sap_slpcode: user.id
-                for user in self.env["res.users"].search(
-                    [
-                        ("sap_slpcode", "!=", False),
-                        ("active", "in", [False, True]),
-                    ]
-                )
-            }
-        return cls._sap_users_dict.get(sap_slpcode, False)
-
-    @api.model
-    def import_partners(self, cr):
-        _logger.info("Starting SAP partner import.")
-        partners = self._import_ocrd(cr)
-        partners |= self._import_crd1(cr)
-        partners |= self._import_ocpr(cr)
-        self._link_children_parents(partners)
-
-    @api.model
-    def _get_state(self, code, country_code=None):
-        """Get the state associated with code and country_code. If no country_code is
-        set, try first a Canadian province and, if not found, a US state."""
-        try:
-            cls = self.__class__
-            if cls._states_dict is None:
-                cls._states_dict = {
-                    state.country_id.code: {state.code: state}
-                    for state in self.env["res.country.state"].search([])
-                }
-            if not code:
-                return False
-            if not country_code:
-                return cls._states_dict.get("CA").get(
-                    code, False
-                ) or cls._states_dict.get("US").get(code, False)
-            return cls._states_dict.get(country_code).get(code, False)
-        except Exception as e:
-            _logger.error(f"Error getting state {code} for country {country_code}")
-            raise e
-
-    @api.model
-    def _get_country(self, code):
-        cls = self.__class__
-        if cls._countries_dict is None:
-            cls._countries_dict = {
-                country.code: country for country in self.env["res.country"].search([])
-            }
-        return cls._countries_dict.get(code, False)
-
-    @api.model
-    def _extract_sap_state_country(self, country, state):
-        odoo_country = self._get_country(country)
-        odoo_state = self._get_state(state, country)
-        return odoo_country, odoo_state
-
-    @api.model
-    def _get_basic_pricelists_dict(self):
-        lists_dict = self.__class__._basic_pricelists_dict
-        if not lists_dict:
-            pricelists = self.env["product.pricelist"].search(
-                [("sap_listnum", "!=", False)]
+    def _get_users_dict(self):
+        return {
+            user.sap_slpcode: user.id
+            for user in self.env["res.users"].search(
+                [
+                    ("sap_slpcode", "!=", False),
+                    ("active", "in", [False, True]),
+                ]
             )
-            lists_dict = self.__class__._basic_pricelists_dict = {
-                pricelist.sap_listnum: pricelist for pricelist in pricelists
-            }
-        return lists_dict
+        }
 
     @api.model
-    def _extract_sap_street_street2(self, address, block):
-        if block and not address:
-            return block, ""
-        return address, block
+    def import_partners_concurrent(self, cr):
+        _logger.info("Starting SAP partner import.")
+        partner_ids = self._import_ocrd_concurrent(cr)
+        partner_ids += self._import_crd1_concurrent(cr)
+        partner_ids += self._import_ocpr_concurrent(cr)
+        self.env.invalidate_all()
+        partners = self.env["res.partner"].browse(partner_ids)
+        self._link_children_parents_concurrent()
 
-    def _import_ocrd(self, cr):
-        """Import business partners (companies)"""
-        cr.execute(f"SELECT * from OCRD WHERE cardname is not null and cardname <> ''")
-        sap_partners = cr.dictfetchall()
-        _logger.info(f"Importing {len(sap_partners)} companies.")
+    def _import_ocrd_concurrent(self, cr):
+        return self._import_concurrent(
+            cr,
+            self._get_sap_partners_ocrd,
+            self._get_ocrd_partner_vals,
+        )
+
+    def _import_crd1_concurrent(self, cr):
+        return self._import_concurrent(
+            cr,
+            self._get_sap_partners_crd1,
+            self._get_crd1_partner_vals,
+        )
+
+    def _import_ocpr_concurrent(self, cr):
+        return self._import_concurrent(
+            cr,
+            self._get_sap_partners_ocpr,
+            self._get_ocpr_partner_vals,
+        )
+
+    @api.model
+    def _get_ocrd_partner_vals(self, sap_partners):
         partner_vals = []
-        basic_pricelists = self._get_basic_pricelists_dict()
+        countries_dict = self._get_countries_dict()
+        states_dict = self._get_states_dict()
+        users_dict = self._get_users_dict()
         for sap_partner in sap_partners:
             # Start with the parent company
             country = sap_partner["country"]
             state = sap_partner["state1"]
-            country, state = self._extract_sap_state_country(country, state)
+            country, state = self._extract_sap_state_country(
+                country, state, countries_dict, states_dict
+            )
             street, street2 = self._extract_sap_street_street2(
                 sap_partner["address"],
                 sap_partner["block"],
             )
-            user = self._get_user(sap_partner["slpcode"])
+            user = users_dict.get(sap_partner["slpcode"], False)
             partner_vals.append(
                 {
                     "sap_card_code": sap_partner["cardcode"],
@@ -146,19 +121,22 @@ class SapResPartnerImporter(models.AbstractModel):
                     "is_company": True,
                     "company_id": self.env.company.id,
                     "comment": sap_partner["notes"],
-                    "user_id": user and user.id,
+                    "user_id": user,
                 }
             )
 
             # Then the shipping address
             country = sap_partner["mailcountr"]
             state = sap_partner["state2"]
-            country, state = self._extract_sap_state_country(country, state)
+            users_dict = self._get_users_dict()
+            country, state = self._extract_sap_state_country(
+                country, state, countries_dict, states_dict
+            )
             street, street2 = self._extract_sap_street_street2(
                 sap_partner["mailaddres"],
                 sap_partner["mailblock"],
             )
-            user = self._get_user(sap_partner["slpcode"])
+            user = users_dict.get(sap_partner["slpcode"], False)
             if (street or street2) and country and state:
                 partner_vals.append(
                     {
@@ -177,16 +155,133 @@ class SapResPartnerImporter(models.AbstractModel):
                         "type": "delivery",
                         "company_id": self.env.company.id,
                         "comment": sap_partner["notes"],
-                        "user_id": user and user.id,
+                        "user_id": user,
                     }
                 )
+        return partner_vals
 
+    @api.model
+    def import_partners(self, cr):
+        _logger.info("Starting SAP partner import.")
+        partners = self._import_ocrd(cr)
+        partners |= self._import_crd1(cr)
+        partners |= self._import_ocpr(cr)
+        self._link_children_parents(partners)
+
+    @api.model
+    def _get_state(self, states_dict, code, country_code=None):
+        """Get the state associated with code and country_code. If no country_code is
+        set, try first a Canadian province and, if not found, a US state."""
+        if not code:
+            return False
+        if not country_code:
+            return states_dict.get("CA").get(code, False) or states_dict.get("US").get(
+                code, False
+            )
+        return states_dict.get(country_code).get(code, False)
+
+    @api.model
+    def _get_countries_dict(self):
+        return {country.code: country for country in self.env["res.country"].search([])}
+
+    @api.model
+    def _get_states_dict(self):
+        return {
+            state.country_id.code: {state.code: state}
+            for state in self.env["res.country.state"].search([])
+        }
+
+    @api.model
+    def _extract_sap_state_country(self, country, state, country_dict, states_dict):
+        odoo_country = country_dict.get(country)
+        odoo_state = self._get_state(states_dict, state, country)
+        return odoo_country, odoo_state
+
+    @api.model
+    def _get_basic_pricelists_dict(self):
+        pricelists = self.env["product.pricelist"].search(
+            [("sap_listnum", "!=", False)]
+        )
+        lists_dict = self.__class__._basic_pricelists_dict = {
+            pricelist.sap_listnum: pricelist for pricelist in pricelists
+        }
+        return lists_dict
+
+    @api.model
+    def _extract_sap_street_street2(self, address, block):
+        if block and not address:
+            return block, ""
+        return address, block
+
+    def _import_ocrd(self, cr):
+        """Import business partners (companies)"""
+        sap_partners = self._get_sap_partners_ocrd(cr)
+        _logger.info(f"Importing {len(sap_partners)} companies.")
+        partner_vals = self._get_ocrd_partner_vals(sap_partners)
         return self.env["res.partner"].create(partner_vals)
 
+    def _import_concurrent(self, cr, sap_partners_func, vals_func):
+        sap_partners = sap_partners_func(cr)
+        chunk_size = min(500, len(sap_partners) // max_workers + 1)
+        _logger.info(f"Importing {len(sap_partners)} partners.")
+        chunks = [
+            sap_partners[i : i + chunk_size]
+            for i in range(0, len(sap_partners), chunk_size)
+        ]
+        partners = []
+        spawn_method = multiprocessing.get_start_method()
+        multiprocessing.set_start_method("fork", force=True)
+        try:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        _create_partners_concurrent,
+                        self.env.cr.dbname,
+                        self.env.uid,
+                        dict(self.env.context),
+                        chunk,
+                        vals_func.__name__,
+                    )
+                    for chunk in chunks
+                ]
+
+                for future in futures:
+                    partners += future.result()
+            return partners
+        finally:
+            multiprocessing.set_start_method(spawn_method, force=True)
+
+    def _get_sap_partners_ocrd(self, cr):
+        self.env.cr.execute(
+            "SELECT distinct sap_card_code FROM res_partner WHERE sap_card_code is not null"
+        )
+        existing_cardcodes = tuple([row[0] for row in self.env.cr.fetchall()])
+        if existing_cardcodes:
+            sql = SQL(
+                "SELECT * from OCRD WHERE cardname is not null and cardname <> ''"
+                "AND cardcode not in %s",
+                existing_cardcodes,
+            )
+        else:
+            sql = SQL(
+                "SELECT * from OCRD WHERE cardname is not null and cardname <> ''"
+            )
+        cr.execute(sql)
+        sap_partners = cr.dictfetchall()
+        return sap_partners
+
     def _import_crd1(self, cr):
+        sap_addresses = self._get_sap_partners_crd1(cr)
+        _logger.info(f"Importing {len(sap_addresses)} addresses.")
+        partner_vals = self._get_crd1_partner_vals(sap_addresses)
+        return self.env["res.partner"].create(partner_vals)
+
+    def _get_sap_partners_crd1(self, cr):
         cr.execute(f"SELECT * FROM crd1")
         sap_addresses = cr.dictfetchall()
-        _logger.info(f"Importing {len(sap_addresses)} addresses.")
+        return sap_addresses
+
+    def _get_crd1_partner_vals(self, sap_addresses):
         partner_vals = []
 
         def _extract_name_street_street2(address, street, address2, address3):
@@ -202,6 +297,9 @@ class SapResPartnerImporter(models.AbstractModel):
                 addressParts += ["" for _ in range(3 - len(addressParts))]
                 return tuple(addressParts)
 
+        countries_dict = self._get_countries_dict()
+        states_dict = self._get_states_dict()
+
         for sap_address in sap_addresses:
             name, street, street2 = _extract_name_street_street2(
                 sap_address["address"],
@@ -211,7 +309,10 @@ class SapResPartnerImporter(models.AbstractModel):
             )
             parent_card = sap_address["cardcode"]
             country, state = self._extract_sap_state_country(
-                sap_address["country"], sap_address["state"]
+                sap_address["country"],
+                sap_address["state"],
+                countries_dict,
+                states_dict,
             )
             zip = sap_address["zipcode"]
             partner_vals.append(
@@ -228,7 +329,60 @@ class SapResPartnerImporter(models.AbstractModel):
                     "user_id": False,
                 }
             )
-        return self.env["res.partner"].create(partner_vals)
+        return partner_vals
+
+    @api.model
+    def _link_children_parents_concurrent(self):
+        children = self.env["res.partner"].search(
+            [
+                ("sap_parent_card", "!=", False),
+                ("parent_id", "=", False),
+                ("active", "in", [False, True]),
+            ]
+        )
+        child_ids = [child.id for child in children]
+        chunk_size = min(500, len(children) // max_workers + 1)
+        _logger.info(
+            f"Linking {len(children)} child partners to their parents in a hierarchy..."
+        )
+        spawn_method = multiprocessing.get_start_method()
+        multiprocessing.set_start_method("fork", force=True)
+        chunks = [
+            child_ids[i : i + chunk_size] for i in range(0, len(children), chunk_size)
+        ]
+        try:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._link_children_parents_concurrent_sub,
+                        self.env.cr.dbname,
+                        self.env.uid,
+                        dict(self.env.context),
+                        chunk,
+                    )
+                    for chunk in chunks
+                ]
+                for future in futures:
+                    future.result()
+        finally:
+            multiprocessing.set_start_method(spawn_method, force=True)
+
+    @staticmethod
+    def _link_children_parents_concurrent_sub(dbname, uid, context, child_ids):
+        _logger.info(
+            f"Subprocess: Linking {len(child_ids)} child partners to their parents..."
+        )
+        with registry(dbname).cursor() as cr:
+            env = api.Environment(cr, uid, context)
+            children = env["res.partner"].browse(child_ids)
+            parents = env["res.partner"].search(
+                [("sap_card_code", "in", [child.sap_parent_card for child in children])]
+            )
+            partner_code_map = {partner.sap_card_code: partner for partner in parents}
+            for child in children:
+                parent_id = partner_code_map.get(child.sap_parent_card)
+                if parent_id:
+                    child.parent_id = parent_id
 
     @api.model
     def _link_children_parents(self, partners):
@@ -241,14 +395,41 @@ class SapResPartnerImporter(models.AbstractModel):
 
     def _import_ocpr(self, cr):
         """Import contacts"""
-        cr.execute("SELECT * from OCPR WHERE name <> '' and name is not null ")
-        sap_contacts = cr.dictfetchall()
+        sap_contacts = self._get_sap_partners_ocpr(cr)
         _logger.info(f"Importing {len(sap_contacts)} contacts.")
+        partner_vals = self._get_ocpr_partner_vals(sap_contacts)
+        return self.env["res.partner"].create(partner_vals)
+
+    def _get_sap_partners_ocpr(self, cr):
+        self.env.cr.execute(
+            "SELECT sap_cntct_code FROM res_partner WHERE sap_cntct_code is not null"
+        )
+        existing_cntctcodes = tuple([row[0] for row in self.env.cr.fetchall()])
+        if existing_cntctcodes:
+            sql = SQL(
+                "SELECT * from OCPR WHERE cntctcode is not null "
+                "AND cntctcode not in %s",
+                existing_cntctcodes,
+            )
+        else:
+            sql = SQL("SELECT * from OCPR WHERE cntctcode is not null")
+        cr.execute(sql)
+        sap_contacts = cr.dictfetchall()
+        return sap_contacts
+
+    def _get_ocpr_partner_vals(self, sap_contacts):
         partner_vals = []
+        countries_dict = self._get_countries_dict()
+        states_dict = self._get_states_dict()
         for sap_contact in sap_contacts:
             sap_country = sap_contact["residcntry"]
             sap_state = sap_contact["residstate"]
-            country, state = self._extract_sap_state_country(sap_country, sap_state)
+            country, state = self._extract_sap_state_country(
+                sap_country,
+                sap_state,
+                countries_dict,
+                states_dict,
+            )
             partner_vals.append(
                 {
                     "name": sap_contact["name"],
@@ -267,7 +448,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "comment": sap_contact["notes1"] or sap_contact["notes2"] or "",
                 }
             )
-        return self.env["res.partner"].create(partner_vals)
+        return partner_vals
 
     def _delete_all(self):
         self.env.cr.execute(

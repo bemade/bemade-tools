@@ -24,6 +24,12 @@ class ProductPricelist(models.Model):
         )
     ]
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        res = super().create(vals_list)
+        _logger.info(f"Created pricelists {res.ids} with names {res.mapped('name')}")
+        return res
+
 
 class ProductPricelistImporter(models.AbstractModel):
     _name = "sap.product.pricelist.importer"
@@ -152,7 +158,10 @@ class ProductPricelistImporter(models.AbstractModel):
             pricelist.sap_abs_id: pricelist
             for pricelist in (
                 pricelists.mapped("item_ids")
-                .filtered(lambda line: line.date_start <= now <= line.date_end)
+                .filtered(
+                    lambda line: (not line.date_start or line.date_start <= now)
+                    and (not line.date_end or now <= line.date_end)
+                )
                 .mapped("pricelist_id")
             )
         }
@@ -213,7 +222,7 @@ class ProductPricelistImporter(models.AbstractModel):
             # Add the final line to refer back to the base pricelist for all other products
             item_vals += [
                 {
-                    "applied_on": "all",
+                    "applied_on": "3_global",
                     "base": "pricelist",
                     "base_pricelist_id": partner.property_product_pricelist.id,
                 }

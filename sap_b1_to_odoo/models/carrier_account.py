@@ -2,6 +2,9 @@ from odoo import fields, models, api, Command
 from odoo.tools.sql import SQL
 import re
 from fuzzywuzzy import process
+import logging
+
+_logger = logging.getLogger(__name__)
 
 # Threshold for fuzzy matching
 fuzzy_threshold = 80
@@ -133,15 +136,18 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
         carriers, accounts = self.extract_all(cr)
 
         carrier_vals = []
-        product = self.env['product.product'].create({
-            "name": "Delivery",
-            "type": "service",
-            "service_policy": "delivered_manual",
-            "service_tracking": "no",
-            "default_code": "LIVRAISON",
-            "sale_ok": True,
-            "purchase_ok": True,
-        })
+        product = self.env["product.product"].create(
+            {
+                "name": "Delivery",
+                "type": "service",
+                "service_policy": "delivered_manual",
+                "service_tracking": "no",
+                "default_code": "LIVRAISON",
+                "sale_ok": True,
+                "purchase_ok": True,
+                "company_id": self.env.company.id,
+            }
+        )
         for name, trnspcodes in carriers.items():
             carrier_vals.append(
                 {
@@ -155,6 +161,7 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
                     "product_id": product.id,
                 }
             )
+        _logger.info(f"Creating delivery carriers: {carrier_vals}")
         carriers = self.env["delivery.carrier"].create(carrier_vals)
         carriers_dict = {carrier.name: carrier for carrier in carriers}
         account_vals = []
