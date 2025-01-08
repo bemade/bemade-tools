@@ -1,6 +1,11 @@
 from odoo import models, fields, api
 import logging
-from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+from odoo import registry
+from odoo.sql_db import SQL
+
+workers = 8
 
 _logger = logging.getLogger(__name__)
 
@@ -38,19 +43,125 @@ class SapProductImporter(models.AbstractModel):
     @api.model
     def import_products(self, cr):
         _logger.info("Importing products and categories...")
-        categories = self._import_oitb(cr)
-        products = self._import_oitm(cr, categories)
-        self._import_orderpoints(cr, products)
+        category_ids = self._import_oitb(cr)
+        self._import_oitm(cr, category_ids)
+        self._import_orderpoints(cr)
 
     @api.model
     def import_inventory(self, cr):
         self._import_stock_quants(cr)
 
+    @staticmethod
+    def _sub_import_oitm(dbname, uid, context, chunk, categories_map):
+        _logger.info(f"Subprocess: Importing {len(chunk)} products.")
+        try:
+            with registry(dbname).cursor() as cr:
+                env = api.Environment(cr, uid, context)
+                product_vals = []
+                for sap_product in chunk:
+                    country_of_origin = sap_product["u_fcsdk_coo"]
+                    if country_of_origin:
+                        country_of_origin = env["res.country"].search(
+                            [("code", "=", country_of_origin)]
+                        )
+                    categ = (
+                        categories_map[sap_product["itmsgrpcod"]]
+                        if sap_product["itmsgrpcod"]
+                        and sap_product["itmsgrpcod"] in categories_map
+                        else False
+                    )
+                    vals = {
+                        "sap_item_code": sap_product["itemcode"],
+                        "default_code": fix_quotes(sap_product["itemname"]),
+                        "name": fix_quotes(sap_product["frgnname"] or "N/A"),
+                        "sale_ok": sap_product["sellitem"] == "Y",
+                        "purchase_ok": sap_product["prchseitem"] == "Y",
+                        "active": sap_product["validfor"] == "Y",
+                        "type": "product",
+                        "company_id": env.company.id,
+                        "hs_code": sap_product["u_fcsdk_hst"] or None,
+                        "country_of_origin": country_of_origin
+                        and country_of_origin.id
+                        or None,
+                    }
+                    if categ:
+                        vals["categ_id"] = categ
+                    product_vals.append(vals)
+                env["product.product"].create(product_vals)
+        except Exception as e:
+            _logger.error("An exception occurred in a subprocess.", exc_info=True)
+            raise
+
+    def _import_oitm(self, cr, categories):
+        """Import sellable products"""
+        existing_products = tuple(
+            [
+                p["sap_item_code"]
+                for p in self.env["product.product"].search_read(
+                    [
+                        ("sap_item_code", "!=", False),
+                        ("active", "in", [True, False]),
+                    ],
+                    ["sap_item_code"],
+                )
+            ]
+        )
+        _logger.info(f"Found {len(existing_products)} existing products.")
+        sql = "SELECT * FROM oitm"
+        if existing_products:
+            sql += " WHERE itemcode not in %s"
+            sql = SQL(sql, existing_products)
+        else:
+            sql = SQL(sql)
+        cr.execute(sql)
+        sap_products = cr.dictfetchall()
+        chunk_size = 500
+        chunks = [
+            sap_products[i : i + chunk_size]
+            for i in range(0, len(sap_products), chunk_size)
+        ]
+        start_method = multiprocessing.get_start_method()
+        multiprocessing.set_start_method("fork", force=True)
+        categories_map = {
+            category.sap_itms_grp_cod: category.id for category in categories
+        }
+        try:
+            _logger.info(
+                f"Importing {len(sap_products)} products in {len(chunks)} chunks."
+            )
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._sub_import_oitm,
+                        self.env.cr.dbname,
+                        self.env.uid,
+                        dict(self.env.context),
+                        chunk,
+                        categories_map,
+                    )
+                    for chunk in chunks
+                ]
+                for future in futures:
+                    future.result()
+        except Exception as e:
+            raise e
+        finally:
+            multiprocessing.set_start_method(start_method, force=True)
+
     def _import_oitb(self, cr):
         """Import product categories from SAP"""
-        cr.execute(
-            "SELECT * FROM oitb WHERE itmsgrpnam <> '' and itmsgrpnam is not null"
+        existing_groups = tuple(
+            self.env["product.category"]
+            .search([("sap_itms_grp_cod", "!=", False)])
+            .mapped("sap_itms_grp_cod")
         )
+        sql = "SELECT * FROM oitb WHERE itmsgrpnam <> '' and itmsgrpnam is not null"
+        if existing_groups:
+            sql += " and itmsgrpcod not in %s"
+            sql = SQL(sql, existing_groups)
+        else:
+            sql = SQL(sql)
+        cr.execute(sql)
         sap_product_groups = cr.dictfetchall()
         _logger.info(f"Importing {len(sap_product_groups)} product categories.")
         category_vals = []
@@ -62,60 +173,37 @@ class SapProductImporter(models.AbstractModel):
                 }
             )
         return self.env["product.category"].create(category_vals)
-        # TODO: import related account info logically if data exists
 
-    def _import_oitm(self, cr, categories):
-        """Import sellable products"""
-        pager = PagingIterator(
-            cr,
-            "SELECT * FROM oitm",
-            "SELECT count(*) " "from oitm",
-            limit=1000,
-            orderby="itemcode",
+    def _import_orderpoints(self, cr):
+        existing_orderpoints = tuple(
+            self.env["stock.warehouse.orderpoint"]
+            .search(
+                [
+                    ("product_id.sap_item_code", "!=", False),
+                    ("active", "in", [True, False]),
+                ],
+            )
+            .mapped("product_id.sap_item_code")
         )
-        products = self.env["product.product"]
-        for sap_products in pager:
-            _logger.info(f"Importing {len(sap_products)} products.")
-            product_vals = []
-            categories_map = {
-                category.sap_itms_grp_cod: category for category in categories
-            }
-            for sap_product in sap_products:
-                country_of_origin = sap_product["u_fcsdk_coo"]
-                if country_of_origin:
-                    country_of_origin = self.env["res.country"].search(
-                        [("code", "=", country_of_origin)]
-                    )
-                product_vals.append(
-                    {
-                        "sap_item_code": sap_product["itemcode"],
-                        "default_code": fix_quotes(sap_product["itemname"]),
-                        "name": fix_quotes(sap_product["frgnname"] or "N/A"),
-                        "categ_id": categories_map[
-                            sap_product["itmsgrpcod"]
-                        ].id,  # No nulls
-                        "sale_ok": sap_product["sellitem"] == "Y",
-                        "purchase_ok": sap_product["prchseitem"] == "Y",
-                        "active": sap_product["validfor"] == "Y",
-                        "type": "product",
-                        "company_id": self.env.company.id,
-                        "hs_code": sap_product["u_fcsdk_hst"] or None,
-                        "country_of_origin": country_of_origin
-                        and country_of_origin.id
-                        or None,
-                    }
-                )
-            products |= self.env["product.product"].create(product_vals)
-        return products
-
-    def _import_orderpoints(self, cr, products):
-        cr.execute(
+        sql = (
             "SELECT itemcode, minlevel, maxlevel FROM oitm WHERE minlevel > 0 "
             "and validfor='Y'"
         )
+        if existing_orderpoints:
+            sql += " and itemcode not in %s"
+            sql = SQL(sql, existing_orderpoints)
+        else:
+            sql = SQL(sql)
+        cr.execute(sql)
         sap_min_levels = cr.dictfetchall()
         _logger.info(f"Importing {len(sap_min_levels)} orderpoints.")
         codes = [lvl["itemcode"] for lvl in sap_min_levels]
+        products = self.env["product.product"].search(
+            [("sap_item_code", "!=", False), ("active", "in", [False, True])]
+        )
+        _logger.info(
+            f"Importing min/max levels for products: {products.mapped("sap_item_code")}"
+        )
         products_dict = {
             p.sap_item_code: p for p in products if p.sap_item_code in codes
         }
