@@ -95,11 +95,6 @@ class SapSaleOrderImporter(models.AbstractModel):
                 return partner.commercial_partner_id
         return partner
 
-    def _get_payment_terms_dict(self):
-        terms = self.env["account.payment.term"].search([("sap_groupnum", "!=", False)])
-        terms_dict = {term.sap_groupnum: term for term in terms}
-        return terms_dict
-
     @api.model
     def _uppercase_all_cardcodes(self, cr):
         """For some reason there is one record whose cardcode is lowercase but has an
