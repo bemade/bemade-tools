@@ -29,6 +29,7 @@
         "base",
         "contacts",
         "sale",
+        "stock",
         "stock_delivery",
         "mrp",
         "durpro_purchase",

@@ -115,6 +115,13 @@ class SapDatabase(models.Model):
             ).import_all(cr)
         return self._success_notification()
 
+    def action_import_orderpoints(self):
+        with self.get_cursor() as cr:
+            self.env["sap.product.importer"].with_company(
+                self.env.company
+            ).import_orderpoints(cr)
+        return self._success_notification()
+
     def get_cursor(self):
         self.ensure_one()
         if self.database_password:
@@ -167,6 +174,7 @@ class SapDatabase(models.Model):
             self.action_import_purchase_orders()
             self.action_import_sale_stock_pickings()
             self.action_import_purchase_stock_pickings()
+            self.action_import_orderpoints()
             self.action_import_product_pricelist()
             _logger.info("Successfully completed SAP record import.")
 
