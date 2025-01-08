@@ -26,23 +26,19 @@ class SapSaleOrderImporter(models.AbstractModel):
     _description = "SAP Sales Order Importer"
     _inherit = ["sap.sale.purchase.importer.mixin"]
 
-    _sources_dict = None
     _confirmed_state = "sale"
-    _sap_users_dict = None
 
-    @classmethod
-    def _get_user(cls, sap_slpcode):
-        if cls._sap_users_dict is None:
-            cls._sap_users_dict = {
-                user.sap_slpcode: user.id
-                for user in cls.env["res.users"].search(
-                    [
-                        ("sap_slpcode", "!=", False),
-                        ("active", "in", [False, True]),
-                    ]
-                )
-            }
-        return cls._sap_users_dict.get(sap_slpcode, False)
+    @api.model
+    def _get_sap_users_dict(self):
+        return {
+            user.sap_slpcode: user.id
+            for user in self.env["res.users"].search(
+                [
+                    ("sap_slpcode", "!=", False),
+                    ("active", "in", [False, True]),
+                ]
+            )
+        }
 
     def import_sales_orders(self, cr):
         self._uppercase_all_cardcodes(cr)
@@ -73,7 +69,94 @@ class SapSaleOrderImporter(models.AbstractModel):
             self.env["utm.source"].flush_model()
 
     @api.model
-    def _get_pricelist(self, sap_doccur):
+    def _get_sources_dict(self):
+        return {source.name: source.id for source in self.env["utm.source"].search([])}
+
+    @staticmethod
+    def _find_partner_by_type(order, partner, address_type):
+        # Try first to find a partner matching the address.
+        address = order["address2"] if address_type == "delivery" else order["address"]
+        if not address:
+            return partner
+        potential_partners = (
+            partner.commercial_partner_id | partner.commercial_partner_id.child_ids
+        ).filtered(lambda prt: prt.street and prt.street in address)
+        if len(potential_partners) == 1:
+            return potential_partners
+        elif len(potential_partners) > 1:
+            shipping_addresses = potential_partners.filtered(
+                lambda prt: prt.type == address_type
+            )
+            if shipping_addresses:
+                return shipping_addresses[0]
+            if partner in potential_partners:
+                return partner
+            if partner.commercial_partner_id in potential_partners:
+                return partner.commercial_partner_id
+        return partner
+
+    def _get_payment_terms_dict(self):
+        terms = self.env["account.payment.term"].search([("sap_groupnum", "!=", False)])
+        terms_dict = {term.sap_groupnum: term for term in terms}
+        return terms_dict
+
+    @api.model
+    def _uppercase_all_cardcodes(self, cr):
+        """For some reason there is one record whose cardcode is lowercase but has an
+        upper-case match in the ocrd table."""
+        cr.execute("UPDATE ordr SET cardcode = UPPER(cardcode)")
+        cr.execute("UPDATE oqut SET cardcode = UPPER(cardcode)")
+
+    def _import_orders_and_quotations(self, cr):
+        imported_docnums = tuple(self._get_imported_docnums())
+        args = []
+        where = ""
+        if imported_docnums:
+            where += "WHERE docnum not in %s"
+            args = [imported_docnums]
+        order_pager = PagingIterator(
+            cr,
+            fetch_query=f"select * from ordr {where}",
+            fetch_args=args,
+            count_query=f"select count(*) from ordr {where}",
+            count_args=args,
+            limit=500,
+            orderby="docentry",
+            logger=_logger,
+        )
+        where = """
+        where docentry not in (
+        select baseentry from rdr1 where basetype = 23
+        )
+        """
+        if imported_docnums:
+            where += " and docnum not in %s"
+            args = [imported_docnums]
+
+        cr.execute("SELECT * FROM oqut ")
+        quote_pager = PagingIterator(
+            cr,
+            fetch_query=f"select * from oqut {where}",
+            fetch_args=args,
+            count_query=f"select count(*) from oqut {where}",
+            count_args=args,
+            limit=500,
+            orderby="docentry",
+            logger=_logger,
+        )
+        _logger.info("Creating orders.")
+        self._create_orders(cr, order_pager, "rdr1", "sale.order", "sale.order.line")
+        _logger.info("Confirming closed orders.")
+        self._confirm_closed_orders(cr)
+        _logger.info("Confirming open orders.")
+        self._confirm_open_orders(cr)
+        _logger.info("Creating quotations.")
+        self._create_orders(cr, quote_pager, "qut1", "sale.order", "sale.order.line")
+        _logger.info("Canceling canceled orders and quotations.")
+        self._cancel_canceled_orders_quotations(cr)
+
+    @api.model
+    def init_pricelists(self):
         cad_pricelist = self.env["product.pricelist"].search(
             [
                 ("currency_id.name", "=", "CAD"),
@@ -106,108 +189,61 @@ class SapSaleOrderImporter(models.AbstractModel):
                     .id,
                 }
             )
-        if sap_doccur == "USD":
-            return usd_pricelist
-        else:
-            return cad_pricelist
 
     @api.model
-    def _get_source(self, order):
-        sources_dict = self.__class__._sources_dict
-        if sources_dict is None:
-            sources_dict = self.__class__._sources_dict = {
-                source.name: source.id for source in self.env["utm.source"].search([])
-            }
-        return sources_dict.get(order["u_fcsdk_source"], False)
-
-    @staticmethod
-    def _find_partner_by_type(order, partner, address_type):
-        # Try first to find a partner matching the address.
-        address = order["address2"] if address_type == "delivery" else order["address"]
-        if not address:
-            return partner
-        potential_partners = (
-            partner.commercial_partner_id | partner.commercial_partner_id.child_ids
-        ).filtered(lambda prt: prt.street and prt.street in address)
-        if len(potential_partners) == 1:
-            return potential_partners
-        elif len(potential_partners) > 1:
-            shipping_addresses = potential_partners.filtered(
-                lambda prt: prt.type == address_type
-            )
-            if shipping_addresses:
-                return shipping_addresses[0]
-            if partner in potential_partners:
-                return partner
-            if partner.commercial_partner_id in potential_partners:
-                return partner.commercial_partner_id
-        return partner
-
-    # @api.model
-    # def _get_payment_terms(self, sap_groupnum):
-    #     terms = self.env["account.payment.term"].search([("sap_groupnum", "!=", False)])
-    #     terms_dict = {term.sap_groupnum: term for term in terms}
-    #     return terms_dict[sap_groupnum]
-
-    @api.model
-    def _uppercase_all_cardcodes(self, cr):
-        """For some reason there is one record whose cardcode is lowercase but has an
-        upper-case match in the ocrd table."""
-        cr.execute("UPDATE ordr SET cardcode = UPPER(cardcode)")
-        cr.execute("UPDATE oqut SET cardcode = UPPER(cardcode)")
-
-    def _import_orders_and_quotations(self, cr):
-        order_pager = PagingIterator(
-            cr,
-            fetch_query="select * from ordr",
-            count_query="select count(*) " "from ordr",
-            limit=1000,
-            orderby="docentry",
-            logger=_logger,
-        )
-        where = """
-        where docentry not in (
-        select baseentry from rdr1 where basetype = 23
-        )
-        """
-        imported_docnums = tuple(self._get_imported_docnums())
-        args = []
-        if imported_docnums:
-            where += " and docnum not in %s"
-            args = [imported_docnums]
-
-        quote_pager = PagingIterator(
-            cr,
-            fetch_query=f"select * from oqut {where}",
-            fetch_args=args,
-            count_query=f"select count(*) from oqut {where}",
-            count_args=args,
-            limit=1000,
-            orderby="docentry",
-            logger=_logger,
-        )
-        self._create_orders(cr, order_pager, "rdr1", "sale.order", "sale.order.line")
-        self._confirm_closed_orders(cr)
-        self._confirm_open_orders(cr)
-        self._create_orders(cr, quote_pager, "qut1", "sale.order", "sale.order.line")
-        self._cancel_canceled_orders_quotations(cr)
-
     def _get_order_vals(self, sap_order_rows, sap_orders):
+
+        def _get_pricelists_dict():
+            cad_pricelist = self.env["product.pricelist"].search(
+                [
+                    ("currency_id.name", "=", "CAD"),
+                    ("company_id", "=", self.env.company.id),
+                    ("name", "=", "Default CAD Pricelist"),
+                ]
+            )
+            usd_pricelist = self.env["product.pricelist"].search(
+                [
+                    ("currency_id.name", "=", "USD"),
+                    ("company_id", "=", self.env.company.id),
+                    ("name", "=", "Default USD Pricelist"),
+                ]
+            )
+            pricelists_dict = {
+                "CAD": cad_pricelist,
+                "USD": usd_pricelist,
+            }
+            self.env["product.pricelist"].flush_model()
+            self.env.cr.commit()
+            return pricelists_dict
+
+        def _get_pricelist(pricelists, doccur):
+            if doccur == "USD":
+                return pricelists["USD"]
+            else:
+                return pricelists["CAD"]
+
+        pricelists = _get_pricelists_dict()
+        partners_dict = self._get_partners_dict()
+        contacts_dict = self._get_contacts_dict()
+        sap_users_dict = self._get_sap_users_dict()
+        sources_dict = self._get_sources_dict()
+
         order_rows_dict = {}
         for row in sap_order_rows:
             order_rows_dict.setdefault(row["docentry"], []).append(row)
         order_vals = []
+        products_dict = self._get_products_dict()
+        payment_terms_dict = self._get_payment_terms_dict()
         for order in sap_orders:
             # If there's a contact set, we use it instead of the company to be precise
-
-            partner = self._get_partner(order)
+            partner = self._get_partner(order, contacts_dict, partners_dict)
             if not partner:
                 raise Exception(
                     f"Failed to find partner for order {order['docnum']}\n"
                     f"cntctcode: {order['cntctcode']}\n"
                     f"cardcode: {order['cardcode']}\n"
                 )
-            pricelist = self._get_pricelist(order["doccur"])
+            pricelist = _get_pricelist(pricelists, order["doccur"])
             partner_shipping_id = self._find_partner_by_type(
                 order,
                 partner,
@@ -218,8 +254,9 @@ class SapSaleOrderImporter(models.AbstractModel):
                 partner,
                 "invoice",
             )
-            terms = self._get_payment_terms(order["groupnum"])
-            user = self._get_user(order["slpcode"])
+            terms = payment_terms_dict.get(order["groupnum"])
+            user = sap_users_dict.get(order["slpcode"], False)
+            source = sources_dict.get(order["u_fcsdk_source"], False)
             order_vals.append(
                 {
                     "sap_docnum": order["docnum"],
@@ -235,14 +272,14 @@ class SapSaleOrderImporter(models.AbstractModel):
                     "picking_policy": self._get_picking_policy(order),
                     "order_line": (
                         [
-                            Command.create(self._get_row_vals(row))
+                            Command.create(self._get_row_vals(row, products_dict))
                             for row in order_rows_dict[order["docentry"]]
                         ]
                         if order_rows_dict.get(order["docentry"])
                         else False
                     ),
-                    "source_id": self._get_source(order),
-                    "user_id": user and user.id,
+                    "source_id": source,
+                    "user_id": user,
                 }
             )
         return order_vals

@@ -33,6 +33,8 @@
         "mrp",
         "durpro_purchase",
         "delivery_carrier_partner_account",
+        "industry_fsm",
+        "base_automation",
     ],
     "data": [
         "security/ir.model.access.csv",
