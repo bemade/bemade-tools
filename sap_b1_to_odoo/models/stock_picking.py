@@ -81,12 +81,23 @@ class StockPickingImporter(models.AbstractModel):
         }
 
     @api.model
-    def _get_purchases_dict(self):
+    def _get_po_lines_dict(self, lines):
+        """Relate the baseentry to the purchase line id for a Goods Receipt PO line"""
+        arg = tuple(line["baseentry"] for line in lines if line["basetype"] == 22)
+        sql = SQL(
+            """
+        SELECT id, po.sap_docentry
+        FROM sale_order_line sol
+        INNER JOIN po on sol.purchase_order_id = po.id
+        WHERE sol.id in %s
+        """,
+            arg,
+        )
+        self.env.cr.execute(sql)
         return {
-            order.sap_docentry: order
-            for order in self.env["purchase.order"].search(
-                [("sap_docentry", "!=", False)]
-            )
+            line["sap_docentry"]: line["id"]
+            for line in self.env.cr.dictfetchall()
+            if line["sap_docentry"]
         }
 
     @api.model
@@ -148,10 +159,10 @@ class StockPickingImporter(models.AbstractModel):
                 ]
                 for future in futures:
                     future.result()
-                    processed_chunks += chunk_size
+                    processed_chunks += 1
                     _logger.info(
-                        f"Processed {processed_chunks} pickings in chunks of {chunk_size}."
-                        f" {total_chunks - processed_chunks} chunks to go."
+                        f"Processed {processed_chunks * chunk_size} pickings so far."
+                        f" {total_chunks - (processed_chunks)} chunks to go."
                     )
             # for chunk in chunks:
             #     self._import_sales_pickings_sub_single_process(
@@ -277,7 +288,7 @@ class StockPickingImporter(models.AbstractModel):
         sale = sales_dict.get(delivery["docentry"])
         vals.update(
             name=f"SAP/OUT/{delivery['docnum']}",
-            sale_id=sale.id,
+            group_id=sale.procurement_group_id.id,
             partner_id=sale.partner_id.id,
             origin=sale.name,
             picking_type_id=warehouse.out_type_id.id,
@@ -296,19 +307,27 @@ class StockPickingImporter(models.AbstractModel):
             products_dict,
             warehouse.in_type_id,
         )
+        if not vals:
+            return None
         purchase = purchase_dict.get(delivery["docentry"])
         vals.update(
             name=f"SAP/IN/{purchase.name}",
             purchase_id=purchase.id,
             partner_id=purchase.partner_id.id,
             origin=purchase.name,
-            sap_odpn_docentry=delivery["docentry"],
+            sap_opdn_docentry=delivery["docentry"],
         )
         return vals
 
     @api.model
     def _get_picking_vals(
-        self, delivery, lines, carriers_dict, products_dict, operation_type
+        self,
+        delivery,
+        lines,
+        carriers_dict,
+        products_dict,
+        operation_type,
+        purchases_dict=None,
     ):
         if not lines:
             return None
@@ -325,7 +344,9 @@ class StockPickingImporter(models.AbstractModel):
         picking_vals = {
             "sap_docnum": sap_docnum,
             "move_ids": [
-                Command.create(self._get_move_vals(line, products_dict, src, dest))
+                Command.create(
+                    self._get_move_vals(line, products_dict, src, dest, purchases_dict)
+                )
                 for line in lines
             ],
             "carrier_id": carrier,
@@ -336,7 +357,7 @@ class StockPickingImporter(models.AbstractModel):
         return picking_vals
 
     @api.model
-    def _get_move_vals(self, line, products_dict, src, dest):
+    def _get_move_vals(self, line, products_dict, src, dest, purchases_dict=None):
         product_qty = line["quantity"]
         qty_open = line["openqty"]
         product_uom_qty = product_qty + qty_open
@@ -356,6 +377,10 @@ class StockPickingImporter(models.AbstractModel):
         def _get_move_line_vals():
             if not product_qty:
                 return None
+            if purchases_dict:
+                purchase_line_id = purchases_dict.get(line["docentry"]).get(
+                    line["linenum"]
+                )
             return {
                 "product_id": product,
                 "quantity": product_qty,
@@ -380,32 +405,44 @@ class StockPickingImporter(models.AbstractModel):
 
     @api.model
     def import_purchase_pickings(self, cr):
-        imported_pickings = tuple(
-            pick["sap_docnum"]
-            for pick in self.env["stock.picking"].search_read(
-                [("sap_docnum", "!=", False)]
-            )
+        _logger.info(f"Checking for already imported purchase pickings.")
+        self.env.cr.execute(
+            "SELECT sap_docnum FROM stock_picking WHERE sap_docnum IS NOT NULL"
         )
+        imported_pickings = tuple(row[0] for row in self.env.cr.fetchall())
+        _logger.info(f"Found {len(imported_pickings)} imported pickings.")
         where = "WHERE canceled = 'N'"
         args = []
         if imported_pickings:
             where += " AND docnum not in %s"
             args = [imported_pickings]
 
+        chunk_size = 500
         delivery_pager = PagingIterator(
             cr,
             fetch_query=f"SELECT * FROM opdn {where}",
             fetch_args=args,
             count_query=f"SELECT count(*) FROM opdn {where}",
             count_args=args,
-            limit=500,
+            limit=chunk_size,
             orderby="docentry",
             logger=_logger,
         )
+        _logger.info(f"Purchase pager with {delivery_pager.count} entries ...")
         carriers_dict = self._get_carriers_dict()
         products_dict = self._get_products_dict()
         start_method = multiprocessing.get_start_method()
+        chunks = [
+            [chunk, self._get_purchase_delivery_lines(cr, chunk)]
+            for chunk in delivery_pager
+        ]
         multiprocessing.set_start_method("fork", force=True)
+        active_automations = self.env["base.automation"].search([("active", "=", True)])
+        active_automations.active = False
+        self.env["base.automation"].flush_model()
+        processed_chunks = 0
+        total_chunks = len(chunks)
+
         try:
             with ProcessPoolExecutor(max_workers=workers) as executor:
                 futures = [
@@ -414,43 +451,83 @@ class StockPickingImporter(models.AbstractModel):
                         self._cr.dbname,
                         self._uid,
                         dict(self._context),
-                        chunk,
+                        chunk[0],
                         carriers_dict,
                         products_dict,
-                        self._get_purchase_delivery_lines(cr, chunk),
+                        chunk[1],
                     )
-                    for chunk in delivery_pager
+                    for chunk in chunks
                 ]
                 for future in futures:
                     future.result()
+                    processed_chunks += 1
+                    _logger.info(
+                        f"Processed {processed_chunks * chunk_size} pickings so far."
+                        f" {total_chunks - (processed_chunks)} chunks to go."
+                    )
         finally:
             multiprocessing.set_start_method(start_method, force=True)
+            active_automations.active = True
 
     @staticmethod
     def _import_purchase_pickings_sub(
         dbname, uid, context, deliveries, carriers_dict, products_dict, delivery_lines
     ):
-        with registry(dbname).cursor() as cr:
-            env = api.Environment(cr, uid, context)
-            self = env["sap.stock.picking.importer"]
-            purchase_dict = self._get_purchases_dict()
-            warehouse = env["stock.warehouse"].search([])
-            picking_vals = []
-            lines_dict = {}
-            for line in delivery_lines:
-                lines_dict.setdefault(line["docentry"], []).append(line)
-            for delivery in deliveries:
-                new_vals = self._get_purchase_picking_vals(
-                    delivery,
-                    lines_dict.get(delivery["docentry"], []),
-                    carriers_dict,
-                    products_dict,
-                    purchase_dict,
-                    warehouse,
-                )
-                if new_vals:
-                    picking_vals.append(new_vals)
-            self.env["stock.picking"].create(picking_vals)
+        try:
+            pid = os.getpid()
+            _logger.info(
+                f"Subprocess {pid} is processing {len(deliveries)} deliveries."
+            )
+            with registry(dbname).cursor() as cr:
+                retry_limit = 3
+                retry_count = 0
+                while retry_count < retry_limit:
+                    try:
+                        env = api.Environment(cr, uid, context)
+                        self = env["sap.stock.picking.importer"]
+                        purchase_dict = self._get_purchases_dict()
+                        warehouse = env["stock.warehouse"].search([])
+                        picking_vals = []
+                        lines_dict = {}
+                        for line in delivery_lines:
+                            lines_dict.setdefault(line["docentry"], []).append(line)
+                        for delivery in deliveries:
+                            new_vals = self._get_purchase_picking_vals(
+                                delivery,
+                                lines_dict.get(delivery["docentry"], []),
+                                carriers_dict,
+                                products_dict,
+                                purchase_dict,
+                                warehouse,
+                            )
+                            if new_vals:
+                                picking_vals.append(new_vals)
+                        _logger.info(
+                            f"[PID {pid}] Creating {len(picking_vals)} picking records."
+                        )
+                        env["stock.picking"].create(picking_vals)
+                        _logger.info(f"[PID {pid}] Flushing models.")
+                        env["stock.picking"].flush_model()
+                        env["stock.move"].flush_model()
+                        env["stock.move.line"].flush_model()
+                        _logger.info(
+                            f"[PID {pid}] Picking records successfully created."
+                        )
+                    except psycopg2.errors.SerializationFailure as e:
+                        retry_count += 1
+                        _logger.warning(
+                            f"[PID {pid}] Serialization failure encountered. Retrying {retry_count}/{retry_limit}. Exception: {e}"
+                        )
+                        cr.rollback()
+                        if retry_count >= retry_limit:
+                            _logger.error(
+                                f"[PID {pid}] Exceeded maximum retry attempts for serialization failure."
+                            )
+                            raise
+                    break  # Exit retry loop on success
+        except Exception as e:
+            _logger.error("Subprocess threw an exception.", exc_info=e)
+            raise e
 
     @staticmethod
     def _get_sales_delivery_lines(cr, deliveries):
@@ -481,8 +558,8 @@ class StockPickingImporter(models.AbstractModel):
     @staticmethod
     def _get_purchase_delivery_lines(cr, deliveries):
         sql = """
-            SELECT * FROM DLN1 WHERE 
-                docentry IN (SELECT docentry FROM purchase_delivery_lines WHERE basetype in (20, 22))
+            SELECT * FROM pdn1 WHERE 
+                docentry IN (SELECT docentry FROM pdn1 WHERE basetype in (20, 22))
                 AND docentry IN %s
             ORDER BY docentry, linenum
             """

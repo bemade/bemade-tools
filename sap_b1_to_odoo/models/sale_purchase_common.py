@@ -205,12 +205,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         """Mark confirmed orders that are confirmed and closed in SAP. This does NOT
         create delivery orders as the confirmation is just flagged directly in the DB.
         """
-        sql = """
-        SELECT docnum from %s
-        WHERE confirmed = 'Y' and invntsttus = 'C' and canceled = 'N'
-        """
-        cr.execute(SQL(sql, SQL.identifier(sap_table)))
-        confirmed_orders = [order[0] for order in cr.fetchall()]
+        confirmed_orders = self._get_closed_orders_by_table(cr, sap_table)
         state = getattr(self, "_confirmed_state")
         if confirmed_orders:
             _logger.info(
@@ -232,6 +227,30 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                     ),
                 )
             )
+
+    @api.model
+    def _get_closed_orders_by_table(self, cr, sap_table):
+        """
+        Retrieve the list of closed orders for a specific SAP table.
+
+        This method queries the given SAP table to obtain a list of orders that have the
+        'confirmed', 'invntsttus', and 'canceled' fields satisfying specific conditions.
+        Only orders that are confirmed, closed, and not canceled will be included in the
+        returned list.
+
+        :param cr: The cursor for database operations.
+        :param sap_table (str): The name of the SAP table to query.
+
+        :returns: A list containing the document numbers of the closed orders
+            that meet the specified conditions.
+        """
+        sql = """
+        SELECT docnum from %s
+        WHERE confirmed = 'Y' and invntsttus = 'C' and canceled = 'N'
+        """
+        cr.execute(SQL(sql, SQL.identifier(sap_table)))
+        confirmed_orders = [order[0] for order in cr.fetchall()]
+        return confirmed_orders
 
     @api.model
     def _cancel_canceled_orders_and_quotations_by_table(

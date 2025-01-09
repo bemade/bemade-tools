@@ -1,7 +1,10 @@
-from odoo import models, fields, Command, api
+from odoo import models, fields, Command, api, registry
 import logging
 from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
 from odoo.tools.sql import SQL
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+import os
 
 _logger = logging.getLogger(__name__)
 
@@ -285,6 +288,7 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     def _confirm_closed_orders(self, cr):
         self._confirm_closed_orders_by_table(cr, "ordr", "sale_order")
+        self._add_procurement_groups_for_closed_orders(cr)
 
     def _cancel_canceled_orders_quotations(self, cr):
         self._cancel_canceled_orders_and_quotations_by_table(
@@ -296,3 +300,79 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     def _get_imported_docnums(self):
         return self._get_imported_docnums_from_table("sale_order")
+
+    def _add_procurement_groups_for_closed_orders(self, cr):
+        _logger.info(f"Adding procurement groups for closed orders.")
+        closed_orders = self._get_closed_orders_by_table(cr, "ordr")
+        chunk_size = 500
+        chunks = [
+            closed_orders[i : i + chunk_size] for i in range(0, len(closed_orders), 100)
+        ]
+
+        start_method = multiprocessing.get_start_method()
+        multiprocessing.set_start_method("fork", force=True)
+        chunks_processed = 0
+        total_chunks = len(chunks)
+        try:
+            with ProcessPoolExecutor(
+                max_workers=multiprocessing.cpu_count() - 1
+            ) as executor:
+                futures = [
+                    executor.submit(
+                        self._subprocess_procurement_groups,
+                        self.env.cr.dbname,
+                        self.env.uid,
+                        dict(self._context),
+                        chunk,
+                    )
+                    for chunk in chunks
+                ]
+                for future in futures:
+                    future.result()
+                    chunks_processed += 1
+                    _logger.info(
+                        f"Processed {chunks_processed}/{total_chunks} chunks.\n"
+                    )
+            sql = SQL(
+                """
+            UPDATE sale_order
+            SET procurement_group_id = matches.id
+            FROM (
+                SELECT sale_id, id 
+                FROM procurement_group 
+                WHERE sale_id is not null
+                ) AS matches
+            WHERE sale_order.id = matches.sale_id AND company_id = %s
+            """,
+                self.env.company.id,
+            )
+            self.env.cr.execute(sql)
+            self.env.invalidate_all()
+        finally:
+            multiprocessing.set_start_method(start_method, force=True)
+
+    @staticmethod
+    def _subprocess_procurement_groups(dbname, uid, context, sap_orders):
+        try:
+            with registry(dbname).cursor() as cr:
+                env = api.Environment(cr, uid, context)
+                orders = env["sale.order"].search(
+                    [
+                        ("sap_docnum", "in", sap_orders),
+                        ("procurement_group_id", "=", False),
+                    ]
+                )
+                procurement_vals = [
+                    {
+                        "name": order.name,
+                        "move_type": order.picking_policy,
+                        "sale_id": order.id,
+                        "partner_id": order.partner_id.id,
+                    }
+                    for order in orders
+                ]
+                procs = env["procurement.group"].create(procurement_vals)
+                _logger.info(f"Created { len(procs) } procurements.")
+        except Exception as e:
+            _logger.error(f"Subprocess {os.getpid()} failed: {e}.", exc_info=True)
+            raise e
