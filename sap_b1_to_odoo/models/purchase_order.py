@@ -16,6 +16,25 @@ class PurchaseOrder(models.Model):
     ]
 
 
+class PurchaseOrderLine(models.Model):
+    _inherit = "purchase.order.line"
+
+    sap_linenum = fields.Integer(index="btree")
+    sap_docentry = fields.Integer(
+        related="order_id.sap_docentry",
+        store=True,
+        index="btree",
+    )
+
+    _sql_constraints = [
+        (
+            "sap_docentry_linenum_unique",
+            "UNIQUE(sap_docentry, sap_linenum)",
+            "Sap docentry and linenum must be unique!",
+        )
+    ]
+
+
 class SapPurchaseOrderImporter(models.AbstractModel):
     _name = "sap.purchase.order.importer"
     _description = "SAP Purchase Order Importer"
