@@ -9,3 +9,4 @@ from . import carrier_account
 from . import product_pricelist
 from . import stock_picking
 from . import res_users
+from . import customer_product_code

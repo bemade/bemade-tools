@@ -105,8 +105,14 @@ class SapDatabase(models.Model):
         with self.get_cursor() as cr:
             self.env["sap.stock.picking.importer"].with_company(
                 self.env.company
-            ).import_puchase_pickings(cr)
+            ).import_purchase_pickings(cr)
         return self._success_notification()
+
+    def action_import_customer_product_codes(self):
+        with self.get_cursor() as cr:
+            self.env["sap.customer.product.code.importer"].with_company(
+                self.env.company
+            ).import_customer_product_codes(cr)
 
     def action_import_product_pricelist(self):
         with self.get_cursor() as cr:
@@ -176,6 +182,7 @@ class SapDatabase(models.Model):
             self.action_import_purchase_stock_pickings()
             self.action_import_orderpoints()
             self.action_import_product_pricelist()
+            self.action_import_customer_product_codes()
             _logger.info("Successfully completed SAP record import.")
 
     def action_delete_all(self):

@@ -36,6 +36,7 @@
         "delivery_carrier_partner_account",
         "industry_fsm",
         "base_automation",
+        "customer_product_code",
     ],
     "data": [
         "security/ir.model.access.csv",
