@@ -1,18 +1,20 @@
+# TODO: add a fix_quotes here for contact names
 import logging
 import multiprocessing
+import os
 from concurrent.futures import ProcessPoolExecutor
 from odoo.tools.sql import SQL
 
-from odoo import models, fields, api, registry
+from odoo import models, fields, api
+from odoo.modules.registry import Registry
 
 _logger = logging.getLogger(__name__)
-max_workers = 8
+max_workers = os.cpu_count() - 1
 
 
 def _create_partners_concurrent(dbname, uid, context, sap_partners, vals_func_name):
     _logger.info(f"Creating partners from {len(sap_partners)} SAP partners.")
-    _logger.info(f"Spawning a cursor for db name {dbname}")
-    with registry(dbname).cursor() as cr:
+    with Registry(dbname).cursor() as cr:
         env = api.Environment(cr, uid, context)
         vals_func = getattr(env["sap.res.partner.importer"], vals_func_name)
         partner_vals = vals_func(sap_partners)
@@ -25,6 +27,7 @@ class ResPartner(models.Model):
     sap_card_code = fields.Char(index="btree")
     sap_parent_card = fields.Char(index="btree")
     sap_cntct_code = fields.Integer(index="btree")
+    sap_atcentry = fields.Integer(index="btree")
 
     _sql_constraints = [
         (
@@ -63,8 +66,7 @@ class SapResPartnerImporter(models.AbstractModel):
         partner_ids += self._import_crd1_concurrent(cr)
         partner_ids += self._import_ocpr_concurrent(cr)
         self.env.invalidate_all()
-        partners = self.env["res.partner"].browse(partner_ids)
-        self._link_children_parents_concurrent()
+        self._link_children_parents()
 
     def _import_ocrd_concurrent(self, cr):
         return self._import_concurrent(
@@ -108,6 +110,7 @@ class SapResPartnerImporter(models.AbstractModel):
             partner_vals.append(
                 {
                     "sap_card_code": sap_partner["cardcode"],
+                    "sap_atcentry": sap_partner["atcentry"],
                     "name": sap_partner["cardname"],
                     "street": street,
                     "street2": street2,
@@ -148,6 +151,7 @@ class SapResPartnerImporter(models.AbstractModel):
                         "city": sap_partner["mailcity"] or "",
                         "country_id": country and country.id or False,
                         "state_id": state and state.id or False,
+                        "zip": sap_partner["zipcode"],
                         "sap_parent_card": sap_partner["cardcode"],
                         "is_company": False,
                         "phone": sap_partner["phone1"] or sap_partner["phone2"],
@@ -166,7 +170,7 @@ class SapResPartnerImporter(models.AbstractModel):
         partners = self._import_ocrd(cr)
         partners |= self._import_crd1(cr)
         partners |= self._import_ocpr(cr)
-        self._link_children_parents(partners)
+        self._link_children_parents()
 
     @api.model
     def _get_state(self, states_dict, code, country_code=None):
@@ -270,12 +274,14 @@ class SapResPartnerImporter(models.AbstractModel):
         sap_partners = cr.dictfetchall()
         return sap_partners
 
+    @api.model
     def _import_crd1(self, cr):
         sap_addresses = self._get_sap_partners_crd1(cr)
         _logger.info(f"Importing {len(sap_addresses)} addresses.")
         partner_vals = self._get_crd1_partner_vals(sap_addresses)
         return self.env["res.partner"].create(partner_vals)
 
+    @api.model
     def _get_sap_partners_crd1(self, cr):
         cr.execute(f"SELECT * FROM crd1")
         sap_addresses = cr.dictfetchall()
@@ -314,7 +320,7 @@ class SapResPartnerImporter(models.AbstractModel):
                 countries_dict,
                 states_dict,
             )
-            zip = sap_address["zipcode"]
+            zip_code = sap_address["zipcode"]
             partner_vals.append(
                 {
                     "name": name,
@@ -327,71 +333,39 @@ class SapResPartnerImporter(models.AbstractModel):
                     "type": "delivery",
                     "is_company": False,
                     "user_id": False,
+                    "zip": zip_code,
                 }
             )
         return partner_vals
 
     @api.model
-    def _link_children_parents_concurrent(self):
-        children = self.env["res.partner"].search(
-            [
-                ("sap_parent_card", "!=", False),
-                ("parent_id", "=", False),
-                ("active", "in", [False, True]),
-            ]
-        )
-        child_ids = [child.id for child in children]
-        chunk_size = min(500, len(children) // max_workers + 1)
-        _logger.info(
-            f"Linking {len(children)} child partners to their parents in a hierarchy..."
-        )
-        spawn_method = multiprocessing.get_start_method()
-        multiprocessing.set_start_method("fork", force=True)
-        chunks = [
-            child_ids[i : i + chunk_size] for i in range(0, len(children), chunk_size)
-        ]
-        try:
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(
-                        self._link_children_parents_concurrent_sub,
-                        self.env.cr.dbname,
-                        self.env.uid,
-                        dict(self.env.context),
-                        chunk,
-                    )
-                    for chunk in chunks
-                ]
-                for future in futures:
-                    future.result()
-        finally:
-            multiprocessing.set_start_method(spawn_method, force=True)
-
-    @staticmethod
-    def _link_children_parents_concurrent_sub(dbname, uid, context, child_ids):
-        _logger.info(
-            f"Subprocess: Linking {len(child_ids)} child partners to their parents..."
-        )
-        with registry(dbname).cursor() as cr:
-            env = api.Environment(cr, uid, context)
-            children = env["res.partner"].browse(child_ids)
-            parents = env["res.partner"].search(
-                [("sap_card_code", "in", [child.sap_parent_card for child in children])]
+    def _link_children_parents(self):
+        self.env.cr.execute(
+            """
+            -- First, let's create a CTE to match children with their parents based on SAP codes
+            WITH parent_matches AS (
+                SELECT 
+                    child.id as child_id,
+                    parent.id as parent_id
+                FROM 
+                    res_partner child
+                    LEFT JOIN res_partner parent ON child.sap_parent_card = parent.sap_card_code
+                WHERE 
+                    child.sap_parent_card IS NOT NULL
+                    AND parent.sap_card_code IS NOT NULL
+                    AND child.id != parent.id  -- Prevent self-referencing
             )
-            partner_code_map = {partner.sap_card_code: partner for partner in parents}
-            for child in children:
-                parent_id = partner_code_map.get(child.sap_parent_card)
-                if parent_id:
-                    child.parent_id = parent_id
 
-    @api.model
-    def _link_children_parents(self, partners):
-        partner_code_map = {partner.sap_card_code: partner for partner in partners}
-        _logger.info("Linking partners to their parents in a hierarchy...")
-        for partner in partners.filtered(
-            lambda partner: partner.sap_parent_card != False
-        ):
-            partner.parent_id = partner_code_map[partner.sap_parent_card]
+            -- Now update the parent_id field
+            UPDATE res_partner rp
+            SET parent_id = pm.parent_id
+            FROM parent_matches pm
+            WHERE 
+                rp.id = pm.child_id
+                AND (rp.parent_id IS NULL OR rp.parent_id != pm.parent_id);  -- Only update if different
+            """
+        )
+        self.env.cr.commit()
 
     def _import_ocpr(self, cr):
         """Import contacts"""
@@ -422,22 +396,11 @@ class SapResPartnerImporter(models.AbstractModel):
         countries_dict = self._get_countries_dict()
         states_dict = self._get_states_dict()
         for sap_contact in sap_contacts:
-            sap_country = sap_contact["residcntry"]
-            sap_state = sap_contact["residstate"]
-            country, state = self._extract_sap_state_country(
-                sap_country,
-                sap_state,
-                countries_dict,
-                states_dict,
-            )
             partner_vals.append(
                 {
                     "name": sap_contact["name"],
                     "sap_cntct_code": sap_contact["cntctcode"],
                     "sap_parent_card": sap_contact["cardcode"],
-                    "street": sap_contact["address"],
-                    "country_id": country and country.id or False,
-                    "state_id": state and state.id or False,
                     "is_company": False,
                     "email": sap_contact["e_maill"],
                     "phone": sap_contact["tel1"] or sap_contact["tel2"],
@@ -446,6 +409,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "function": sap_contact["position"] or sap_contact["title"],
                     "company_id": self.env.company.id,
                     "comment": sap_contact["notes1"] or sap_contact["notes2"] or "",
+                    "type": "contact",
                 }
             )
         return partner_vals

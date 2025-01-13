@@ -1,5 +1,6 @@
 from odoo import models, fields, api
 import logging
+from odoo.tools.sql import SQL
 
 _logger = logging.getLogger(__name__)
 
@@ -18,7 +19,16 @@ class ResUsersImporter(models.AbstractModel):
 
     @api.model
     def import_salespeople(self, cr):
-        cr.execute("SELECT * FROM oslp")
+        existing_users = self.env["res.users"].search([("active", "in", [True, False])])
+        _logger.info(f"Found {len(existing_users)} existing users.")
+        existing_names = tuple(user.name for user in existing_users)
+        sql = "SELECT * FROM oslp"
+        if existing_names:
+            sql += f" WHERE slpname not in %s"
+            sql = SQL(sql, existing_names)
+        else:
+            sql = SQL(sql)
+        cr.execute(sql)
         salespeople = cr.dictfetchall()
         _logger.info(f"Importing {len(salespeople)} salespeople...")
         vals = []

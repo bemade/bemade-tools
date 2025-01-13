@@ -27,7 +27,7 @@ class ProductPricelist(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         res = super().create(vals_list)
-        _logger.info(f"Created pricelists {res.ids} with names {res.mapped('name')}")
+        _logger.info(f"Created {len(res)} pricelists.")
         return res
 
 
@@ -90,16 +90,11 @@ class ProductPricelistImporter(models.AbstractModel):
         self._import_basic_pricelists(cr)
         sap_blanket_orders = self._get_all_sap_blanket_orders(cr)
         sap_blanket_lines_dict = self._get_sap_blanket_lines_dict(cr)
-        _logger.info(
-            f"{len(sap_blanket_orders)} pricelists found. Loading products and partners."
-        )
         products_dict = self._get_products_dict(cr)
         partners_dict = self._get_partners_dict(cr)
-        _logger.info(f"Generating pricelist values...")
         pricelist_vals = self._get_pricelist_vals(
             sap_blanket_orders, sap_blanket_lines_dict, products_dict, partners_dict
         )
-        _logger.info(f"Creating pricelists.")
         pricelists = self.env["product.pricelist"].create(pricelist_vals)
         _logger.info(
             f"{len(pricelists)} Product pricelists imported "

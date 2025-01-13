@@ -133,21 +133,23 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
 
     @api.model
     def import_all(self, cr):
+        if self.env["delivery.carrier"].search_count([]) != 1:
+            _logger.info(f"More than 1 carrier already found, skipping carrier import.")
+            return
         carriers, accounts = self.extract_all(cr)
-
         carrier_vals = []
-        product = self.env["product.product"].create(
-            {
-                "name": "Delivery",
-                "type": "service",
-                "service_policy": "delivered_manual",
-                "service_tracking": "no",
-                "default_code": "LIVRAISON",
-                "sale_ok": True,
-                "purchase_ok": True,
-                "company_id": self.env.company.id,
-            }
-        )
+        if not self.env["product.product"].search([("name", "=", "Delivery")]):
+            product = self.env["product.product"].create(
+                {
+                    "name": "Delivery",
+                    "type": "service",
+                    "service_tracking": "no",
+                    "default_code": "LIVRAISON",
+                    "sale_ok": True,
+                    "purchase_ok": True,
+                    "company_id": self.env.company.id,
+                }
+            )
         for name, trnspcodes in carriers.items():
             carrier_vals.append(
                 {
@@ -161,7 +163,7 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
                     "product_id": product.id,
                 }
             )
-        _logger.info(f"Creating delivery carriers: {carrier_vals}")
+        _logger.info(f"Creating {len(carrier_vals)} delivery carriers.")
         carriers = self.env["delivery.carrier"].create(carrier_vals)
         carriers_dict = {carrier.name: carrier for carrier in carriers}
         account_vals = []
