@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <record id="view_partner_tree_sap_inherit" model="ir.ui.view">
+        <field name="name">res.partner.tree.sap.inherit</field>
+        <field name="model">res.partner</field>
+        <field name="inherit_id" ref="base.view_partner_tree"/>
+        <field name="arch" type="xml">
+            <xpath expr="//list" position="inside">
+                <field name="sap_card_code" optional="hide"/>
+                <field name="sap_cntct_code" optional="hide"/>
+                <field name="sap_parent_card" optional="hide"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_partner_search_sap_inherit" model="ir.ui.view">
+        <field name="name">res.partner.search.sap.inherit</field>
+        <field name="model">res.partner</field>
+        <field name="inherit_id" ref="base.view_res_partner_filter"/>
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <field name="sap_card_code"/>
+                <field name="sap_cntct_code"/>
+                <field name="sap_parent_card"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_sale_order_tree_sap_inherit" model="ir.ui.view">
+        <field name="name">sale.order.tree.sap.inherit</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.sale_order_tree"/>
+        <field name="arch" type="xml">
+            <xpath expr="//list" position="inside">
+                <field name="sap_docentry" optional="hide"/>
+                <field name="sap_docnum" optional="hide"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_sale_order_search_sap_inherit" model="ir.ui.view">
+        <field name="name">sale.order.search.sap.inherit</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_sales_order_filter"/>
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <field name="sap_docentry"/>
+                <field name="sap_docnum"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_product_product_tree_sap_inherit" model="ir.ui.view">
+        <field name="name">product.product.tree.sap.inherit</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_tree_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//list" position="inside">
+                <field name="sap_item_code" optional="hide"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_product_product_search_sap_inherit" model="ir.ui.view">
+        <field name="name">product.product.search.sap.inherit</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_search_view"/>
+        <field name="arch" type="xml">
+            <field name="product_tag_ids" position="before">
+                <field name="sap_item_code"/>
+            </field>
+        </field>
+    </record>
+
+    <record id="view_purchase_order_tree_sap_inherit" model="ir.ui.view">
+        <field name="name">purchase.order.tree.sap.inherit</field>
+        <field name="model">purchase.order</field>
+        <field name="inherit_id" ref="purchase.purchase_order_tree"/>
+        <field name="arch" type="xml">
+            <xpath expr="//list" position="inside">
+                <field name="sap_docentry" optional="hide"/>
+                <field name="sap_docnum" optional="hide"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_purchase_order_search_sap_inherit" model="ir.ui.view">
+        <field name="name">purchase.order.search.sap.inherit</field>
+        <field name="model">purchase.order</field>
+        <field name="inherit_id" ref="purchase.view_purchase_order_filter"/>
+        <field name="arch" type="xml">
+            <field name="partner_id" position="before">
+                <field name="sap_docentry"/>
+                <field name="sap_docnum"/>
+            </field>
+        </field>
+    </record>
+</odoo>

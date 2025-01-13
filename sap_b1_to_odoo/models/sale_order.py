@@ -1,5 +1,3 @@
-import psycopg2.errors
-
 from odoo import models, fields, Command, api
 from odoo.modules.registry import Registry
 import logging
@@ -8,6 +6,8 @@ from odoo.tools.sql import SQL
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 import os
+
+workers = os.cpu_count() - 1
 
 _logger = logging.getLogger(__name__)
 
@@ -183,6 +183,8 @@ class SapSaleOrderImporter(models.AbstractModel):
         )
         _logger.info("Canceling canceled orders and quotations.")
         self._cancel_canceled_orders_quotations(cr)
+        _logger.info("Recomputing delivery status for all orders.")
+        self._recompute_delivery_status()
 
     @api.model
     def init_pricelists(self):
@@ -436,3 +438,28 @@ class SapSaleOrderImporter(models.AbstractModel):
         except Exception as e:
             _logger.error(f"Subprocess {os.getpid()} failed: {e}.", exc_info=True)
             raise e
+
+    @api.model
+    def _recompute_delivery_status(self):
+        self.env.cr.execute(
+            """
+            UPDATE sale_order
+            SET delivery_status = CASE
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM sale_order_line
+                    WHERE sale_order_line.order_id = sale_order.id
+                      AND sale_order_line.product_uom_qty != sale_order_line.qty_delivered
+                )
+                THEN 'full'
+                WHEN EXISTS (
+                    SELECT 1 FROM sale_order_line
+                    WHERE sale_order_line.order_id = sale_order.id
+                      AND sale_order_line.qty_delivered > 0
+                )
+                THEN 'partial'
+                ELSE 'pending'
+            END
+            WHERE sap_docentry IS NOT NULL
+        """
+        )
+        self.env.cr.commit()

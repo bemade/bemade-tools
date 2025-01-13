@@ -8,8 +8,8 @@ _logger = logging.getLogger(__name__)
 class PurchaseOrder(models.Model):
     _inherit = "purchase.order"
 
-    sap_docentry = fields.Integer(index="btree")
-    sap_docnum = fields.Integer(index="btree")
+    sap_docentry = fields.Integer(index="btree", string="SAP Document Entry")
+    sap_docnum = fields.Integer(index="btree", string="SAP Document Number")
     sap_atcentry = fields.Integer(index="btree")
 
     _sql_constraints = [
@@ -101,6 +101,7 @@ class SapPurchaseOrderImporter(models.AbstractModel):
             cr, rfq_pager, "pqt1", "purchase.order", "purchase.order.line"
         )
         self._cancel_canceled_orders_and_quotations(cr)
+        self._recompute_receipt_status()
 
     @api.model
     def _get_imported_docnums(self):
@@ -187,3 +188,27 @@ class SapPurchaseOrderImporter(models.AbstractModel):
             product_qty=vals["product_uom_qty"],
         )
         return vals
+
+    def _recompute_receipt_status(self):
+        self.env.cr.execute(
+            """
+            UPDATE purchase_order
+            SET receipt_status = CASE 
+                WHEN NOT EXISTS (
+                    SELECT 1 from purchase_order_line
+                    WHERE purchase_order_line.order_id = purchase_order.id
+                      AND purchase_order_line.product_uom_qty != purchase_order_line.qty_received
+                )
+                THEN 'full'
+                WHEN EXISTS (
+                    SELECT 1 FROM purchase_order_line
+                    WHERE purchase_order_line.order_id = purchase_order.id
+                      AND purchase_order_line.qty_received > 0
+                )
+                THEN 'partial'
+                ELSE 'pending'
+            END
+            WHERE sap_docentry IS NOT NULL
+            """
+        )
+        self.env.cr.commit()

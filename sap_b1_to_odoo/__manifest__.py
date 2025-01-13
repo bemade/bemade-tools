@@ -42,6 +42,7 @@
         "security/ir.model.access.csv",
         "data/menus_actions.xml",
         "views/sap_database_views.xml",
+        "views/sap_field_views.xml",
     ],
     "assets": {},
     "installable": True,
