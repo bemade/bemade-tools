@@ -1,6 +1,7 @@
 from odoo import fields, models, api, _
 from odoo.tools.sql import SQL
 import logging
+import psycopg2
 
 _logger = logging.getLogger(__name__)
 
@@ -42,14 +43,21 @@ class SapCustomerProductCodeImporter(models.AbstractModel):
     def _get_values(self, partners_dict, products_dict, sap_codes):
         vals = []
         for code in sap_codes:
-            product_id = products_dict.get(code["itemcode"])
-            partner_id = partners_dict.get(code["cardcode"])
-            vals.append(
-                {
-                    "product_id": product_id,
-                    "partner_id": partner_id,
-                    "company_id": self.env.company.id,
-                    "product_code": code["substitute"],
-                }
-            )
+            try:
+                product_id = products_dict.get(code["itemcode"])
+                partner_id = partners_dict.get(code["cardcode"])
+                vals.append(
+                    {
+                        "product_id": product_id,
+                        "partner_id": partner_id,
+                        "company_id": self.env.company.id,
+                        "product_code": code["substitute"],
+                    }
+                )
+            except psycopg2.errors.UniqueViolation:
+                _logger.warning(
+                    f"Skipping duplicate customer product code: {code.substitute}"
+                    f" for partner ID {code["cardcode"]}"
+                )
+                continue
         return vals

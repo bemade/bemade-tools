@@ -1,4 +1,7 @@
-from odoo import models, fields, Command, api, registry
+import psycopg2.errors
+
+from odoo import models, fields, Command, api
+from odoo.modules.registry import Registry
 import logging
 from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
 from odoo.tools.sql import SQL
@@ -14,12 +17,32 @@ class SalesOrder(models.Model):
 
     sap_docentry = fields.Integer(index="btree")
     sap_docnum = fields.Integer(index="btree")
+    sap_atcentry = fields.Integer(index="btree")
 
     _sql_constraints = [
         (
             "sap_docnum_unique",
             "UNIQUE (sap_docnum)",
             "Another sale order with this docnum already exists",
+        )
+    ]
+
+
+class SaleOrderLine(models.Model):
+    _inherit = "sale.order.line"
+    sap_docentry = fields.Integer(
+        index="btree",
+        related="order_id.sap_docentry",
+        store=True,
+    )
+    sap_linenum = fields.Integer(index="btree")
+    sap_table = fields.Char(index="btree")
+
+    _sql_constraints = [
+        (
+            "sap_linenum_docentry_table_unique",
+            "UNIQUE (sap_linenum, sap_docentry, sap_table)",
+            "Another sale order line with this linenum and docentry already exists for this SAP table.",
         )
     ]
 
@@ -107,6 +130,7 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     def _import_orders_and_quotations(self, cr):
         imported_docnums = tuple(self._get_imported_docnums())
+        _logger.info(f"Found {len(imported_docnums)} imported sales orders.")
         args = []
         where = ""
         if imported_docnums:
@@ -149,7 +173,14 @@ class SapSaleOrderImporter(models.AbstractModel):
         _logger.info("Confirming open orders.")
         self._confirm_open_orders(cr)
         _logger.info("Creating quotations.")
-        self._create_orders(cr, quote_pager, "qut1", "sale.order", "sale.order.line")
+        self._create_orders(
+            cr,
+            quote_pager,
+            "qut1",
+            "sale.order",
+            "sale.order.line",
+            multiproc=False,
+        )
         _logger.info("Canceling canceled orders and quotations.")
         self._cancel_canceled_orders_quotations(cr)
 
@@ -189,7 +220,7 @@ class SapSaleOrderImporter(models.AbstractModel):
             )
 
     @api.model
-    def _get_order_vals(self, sap_order_rows, sap_orders):
+    def _get_order_vals(self, sap_order_rows, sap_orders, sap_table):
 
         def _get_pricelists_dict():
             cad_pricelist = self.env["product.pricelist"].search(
@@ -255,40 +286,63 @@ class SapSaleOrderImporter(models.AbstractModel):
             terms = payment_terms_dict.get(order["groupnum"])
             user = sap_users_dict.get(order["slpcode"], False)
             source = sources_dict.get(order["u_fcsdk_source"], False)
-            order_vals.append(
-                {
-                    "sap_docnum": order["docnum"],
-                    "sap_docentry": order["docentry"],
-                    "partner_id": partner.id,
-                    "pricelist_id": pricelist.id,
-                    "partner_invoice_id": partner_invoice_id.id,
-                    "partner_shipping_id": partner_shipping_id.id,
-                    "payment_term_id": terms.id,
-                    "date_order": order["docdate"].replace(tzinfo=None),
-                    "commitment_date": order["docduedate"].replace(tzinfo=None),
-                    "client_order_ref": order["numatcard"] or "N/A",
-                    "picking_policy": self._get_picking_policy(order),
-                    "order_line": (
-                        [
-                            Command.create(self._get_row_vals(row, products_dict))
-                            for row in order_rows_dict[order["docentry"]]
-                        ]
-                        if order_rows_dict.get(order["docentry"])
-                        else False
-                    ),
-                    "source_id": source,
-                    "user_id": user,
-                }
-            )
+            vals = {
+                "sap_docnum": order["docnum"],
+                "sap_docentry": order["docentry"],
+                "sap_atcentry": order["atcentry"],
+                "partner_id": partner.id,
+                "pricelist_id": pricelist.id,
+                "partner_invoice_id": partner_invoice_id.id,
+                "partner_shipping_id": partner_shipping_id.id,
+                "payment_term_id": terms.id,
+                "date_order": order["docdate"].replace(tzinfo=None),
+                "commitment_date": order["docduedate"].replace(tzinfo=None),
+                "client_order_ref": order["numatcard"] or "N/A",
+                "picking_policy": self._get_picking_policy(order),
+                "order_line": (
+                    [
+                        Command.create(
+                            self._get_row_vals(row, products_dict, sap_table)
+                        )
+                        for row in order_rows_dict[order["docentry"]]
+                    ]
+                    if order_rows_dict.get(order["docentry"])
+                    else False
+                ),
+                "source_id": source,
+                "user_id": user,
+            }
+            if order["docstatus"] == "C":
+                vals["invoice_status"] = "invoiced"
+            order_vals.append(vals)
         return order_vals
 
     @api.model
     def _get_picking_policy(self, ordr):
         return "direct" if ordr["partsupply"] == "Y" else "direct"
 
+    @api.model
     def _confirm_closed_orders(self, cr):
         self._confirm_closed_orders_by_table(cr, "ordr", "sale_order")
-        self._add_procurement_groups_for_closed_orders(cr)
+        self._set_delivered_qty_for_closed_orders(cr)
+
+    @api.model
+    def _set_delivered_qty_for_closed_orders(self, cr):
+        closed_orders = self._get_closed_orders_by_table(cr, "ordr")
+        orders = self.env["sale.order"].search(
+            [
+                ("sap_docnum", "in", closed_orders),
+                ("order_line.qty_delivered_method", "!=", "manual"),
+            ]
+        )
+        if not orders:
+            return
+        _logger.info(f"Setting delivered qty for {len(orders)} orders.")
+        for order in orders:
+            for line in order.order_line:
+                line.qty_delivered_method = "manual"
+                line.qty_delivered = line.product_uom_qty
+        self.env.cr.commit()
 
     def _cancel_canceled_orders_quotations(self, cr):
         self._cancel_canceled_orders_and_quotations_by_table(
@@ -338,8 +392,8 @@ class SapSaleOrderImporter(models.AbstractModel):
             UPDATE sale_order
             SET procurement_group_id = matches.id
             FROM (
-                SELECT sale_id, id 
-                FROM procurement_group 
+                SELECT sale_id, id
+                FROM procurement_group
                 WHERE sale_id is not null
                 ) AS matches
             WHERE sale_order.id = matches.sale_id AND company_id = %s
@@ -347,14 +401,18 @@ class SapSaleOrderImporter(models.AbstractModel):
                 self.env.company.id,
             )
             self.env.cr.execute(sql)
+            self.env.cr.commit()
             self.env.invalidate_all()
+        except Exception as e:
+            _logger.error("Subprocess failed: ", exc_info=True)
+            raise e
         finally:
             multiprocessing.set_start_method(start_method, force=True)
 
     @staticmethod
     def _subprocess_procurement_groups(dbname, uid, context, sap_orders):
         try:
-            with registry(dbname).cursor() as cr:
+            with Registry(dbname).cursor() as cr:
                 env = api.Environment(cr, uid, context)
                 orders = env["sale.order"].search(
                     [
@@ -362,6 +420,8 @@ class SapSaleOrderImporter(models.AbstractModel):
                         ("procurement_group_id", "=", False),
                     ]
                 )
+                if not orders:
+                    return
                 procurement_vals = [
                     {
                         "name": order.name,

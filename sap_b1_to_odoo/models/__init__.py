@@ -10,3 +10,5 @@ from . import product_pricelist
 from . import stock_picking
 from . import res_users
 from . import customer_product_code
+from . import stock_move
+from . import ir_attachment
