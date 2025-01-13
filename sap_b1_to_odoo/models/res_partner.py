@@ -7,6 +7,7 @@ from odoo.tools.sql import SQL
 
 from odoo import models, fields, api
 from odoo.modules.registry import Registry
+from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 
 _logger = logging.getLogger(__name__)
 max_workers = os.cpu_count() - 1
@@ -398,7 +399,7 @@ class SapResPartnerImporter(models.AbstractModel):
         for sap_contact in sap_contacts:
             partner_vals.append(
                 {
-                    "name": sap_contact["name"],
+                    "name": fix_quotes(sap_contact["name"]),
                     "sap_cntct_code": sap_contact["cntctcode"],
                     "sap_parent_card": sap_contact["cardcode"],
                     "is_company": False,

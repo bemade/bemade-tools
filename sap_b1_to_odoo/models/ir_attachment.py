@@ -45,7 +45,7 @@ class SapIrAttachmentImporter(models.AbstractModel):
         :returns: None
         """
         self._import_attachments_for_model(cr, "res.partner", filestore_path)
-        self._import_attachments_for_model(cr, "product.product", filestore_path)
+        self._import_attachments_for_model(cr, "product.template", filestore_path)
         self._import_attachments_for_model(cr, "sale.order", filestore_path)
         self._import_attachments_for_model(cr, "purchase.order", filestore_path)
 

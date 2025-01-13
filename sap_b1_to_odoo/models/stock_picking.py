@@ -20,6 +20,7 @@ def _dummy_set_scheduled_date(self):
     for picking in self:
         picking.move_ids.write({"date": picking.scheduled_date})
 
+
 def _dummy_check_kits(self):
     pass
 
@@ -53,6 +54,7 @@ class StockPicking(models.Model):
             "SAP docnum must be unique for each document type.",
         ),
     ]
+
 
 class StockPickingImporter(models.AbstractModel):
     _name = "sap.stock.picking.importer"

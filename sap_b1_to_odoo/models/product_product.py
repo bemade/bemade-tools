@@ -1,17 +1,23 @@
 from odoo import models, fields, api
+from odoo.addons.mrp.models.stock_quant import StockQuant
 import logging
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from odoo.modules.registry import Registry
 from odoo.sql_db import SQL
+from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 
 workers = 8
 
 _logger = logging.getLogger(__name__)
 
 
-class Product(models.Model):
-    _inherit = "product.product"
+def _dummy_check_kits(self):
+    pass
+
+
+class ProductTemplate(models.Model):
+    _inherit = "product.template"
 
     sap_item_code = fields.Char(index="btree")
     sap_atcentry = fields.Integer()
@@ -248,7 +254,12 @@ class SapProductImporter(models.AbstractModel):
                     "location_id": location.id,
                 }
             )
-        self.env["stock.quant"].create(vals)
+        real_check_kits = StockQuant._check_kits
+        StockQuant._check_kits = _dummy_check_kits
+        try:
+            self.env["stock.quant"].create(vals)
+        finally:
+            StockQuant._check_kits = real_check_kits
 
     def _delete_all(self):
         self.env.cr.execute(
@@ -257,7 +268,3 @@ class SapProductImporter(models.AbstractModel):
         self.env.cr.execute(
             "DELETE from product_category WHERE sap_itms_grp_cod is not null"
         )
-
-
-def fix_quotes(string):
-    return string and string.strip('"').replace('""', '"')
