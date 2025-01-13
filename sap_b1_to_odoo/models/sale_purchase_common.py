@@ -1,5 +1,3 @@
-import psycopg2.errors
-
 from odoo import models, fields, api, Command
 from odoo.sql_db import SQL
 import logging

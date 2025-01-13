@@ -2,6 +2,10 @@ from odoo.tools.sql import SQL
 from datetime import datetime, date
 
 
+def fix_quotes(string):
+    return string and string.strip('"').replace('""', '"')
+
+
 class PagingIterator:
     def __init__(
         self,

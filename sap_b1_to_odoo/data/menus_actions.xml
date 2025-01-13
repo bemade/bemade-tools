@@ -14,9 +14,10 @@
             </p>
         </field>
     </record>
-    <menuitem id="menu_sap_b1_to_odoo" name="SAP B1 to Odoo" sequence="10"/>
+    <menuitem id="menu_sap_b1_to_odoo" name="SAP B1 to Odoo" sequence="10" groups="base.group_system"/>
     <menuitem id="menu_sap_b1_to_odoo_databases" name="Databases"
               parent="menu_sap_b1_to_odoo" sequence="10"
-              action="action_view_sap_databases"/>
+              action="action_view_sap_databases"
+              groups="base.group_system"/>
 
 </odoo>
