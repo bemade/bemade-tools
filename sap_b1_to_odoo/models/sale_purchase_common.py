@@ -1,12 +1,15 @@
+import psycopg2.errors
+
 from odoo import models, fields, api, Command
 from odoo.sql_db import SQL
 import logging
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
-from odoo import registry
+from odoo.modules.registry import Registry
+import os
 
 _logger = logging.getLogger(__name__)
-workers = 8
+workers = os.cpu_count() - 1
 
 
 class SapSalePurchaseImporterMixin(models.AbstractModel):
@@ -41,7 +44,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         return self.env["account.payment.term"].create(vals)
 
     @api.model
-    def _get_row_vals(self, row, products_dict):
+    def _get_row_vals(self, row, products_dict, sap_table):
         product = products_dict.get(row["itemcode"])
         # TODO: confirm tax_ids come in properly with fiscal positions
         # tax_ids = self._get_tax(row["vatprcnt"])
@@ -51,7 +54,9 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                 "product_uom_qty": row["quantity"] if row["quantity"] else 0.0,
                 "price_unit": row["price"],
                 "discount": row["discprcnt"],  # Likely problematic
-                # "tax_ids": None,
+                "sap_linenum": row["linenum"],
+                "sap_docentry": row["docentry"],
+                "sap_table": sap_table,
             }
         else:
             # Some PO lines in SAP have no product linked, so we make a note in Odoo
@@ -66,6 +71,9 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                 "product_uom_qty": 0.0,
                 "display_type": "line_note",
                 "name": f"{row['dscription']}{quantity}{price}{discount}",
+                "sap_linenum": row["linenum"],
+                "sap_docentry": row["docentry"],
+                "sap_table": sap_table,
             }
 
     @api.model
@@ -131,15 +139,16 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         docnums = [order[0] for order in cr.fetchall()]
         return docnums
 
-    def _create_orders(self, cr, pager, lines_table, header_model, lines_model):
+    def _create_orders(
+        self, cr, pager, lines_table, header_model, lines_model, multiproc=True
+    ):
         start_method = multiprocessing.get_start_method()
         multiprocessing.set_start_method("fork", force=True)
         chunks = [chunk for chunk in pager]
         try:
-            with ProcessPoolExecutor(max_workers=workers) as executor:
-                futures = [
-                    executor.submit(
-                        self._sub_create_orders,
+            if not multiproc:
+                for chunk in chunks:
+                    self._sub_create_orders(
                         self._name,
                         self.env.cr.dbname,
                         self.env.uid,
@@ -148,11 +157,27 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                         lines_model,
                         chunk,
                         self._get_lines(cr, lines_table, chunk),
+                        lines_table,
                     )
-                    for chunk in chunks
-                ]
-                for future in futures:
-                    future.result()
+            else:
+                with ProcessPoolExecutor(max_workers=workers) as executor:
+                    futures = [
+                        executor.submit(
+                            self._sub_create_orders,
+                            self._name,
+                            self.env.cr.dbname,
+                            self.env.uid,
+                            dict(self.env.context),
+                            header_model,
+                            lines_model,
+                            chunk,
+                            self._get_lines(cr, lines_table, chunk),
+                            lines_table,
+                        )
+                        for chunk in chunks
+                    ]
+                    for future in futures:
+                        future.result()
         except Exception as e:
             _logger.error("An exception occurred in a subprocess.", exc_info=True)
             raise
@@ -180,8 +205,9 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         lines_model,
         sap_orders,
         sap_order_rows,
+        sap_rows_table,
     ):
-        with registry(dbname).cursor() as cr:
+        with Registry(dbname).cursor() as cr:
             env = api.Environment(cr, uid, context)
             self = env[importer_model]
             _logger.info(
@@ -189,15 +215,19 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                 f"{len(sap_order_rows)} rows."
             )
             _logger.info("Getting order vals...")
-            order_vals = self._get_order_vals(sap_order_rows, sap_orders)
+            order_vals = self._get_order_vals(
+                sap_order_rows, sap_orders, sap_rows_table
+            )
             _logger.info("Creating objects...")
             env[header_model].create(order_vals)
             _logger.info("Flushing to the database...")
             env[header_model].flush_model()
             env[lines_model].flush_model()
+            cr.commit()
+        return 0
 
     @api.model
-    def _get_order_vals(self, sap_order_rows, sap_orders):
+    def _get_order_vals(self, sap_order_rows, sap_orders, sap_table):
         raise NotImplementedError
 
     @api.model
@@ -348,7 +378,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         dbname, uid, context, odoo_model, confirm_method, sap_orders
     ):
         # try:
-        with registry(dbname).cursor() as cr:
+        with Registry(dbname).cursor() as cr:
             env = api.Environment(cr, uid, context)
             self = env[odoo_model].search([("sap_docnum", "in", sap_orders)])
             recs = self.env[odoo_model].search(
@@ -361,6 +391,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             for rec in recs:
                 method = getattr(rec, confirm_method)
                 method()
+            cr.commit()
 
     # except Exception as e:
     #     _logger.error(

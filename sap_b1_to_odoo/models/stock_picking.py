@@ -4,10 +4,12 @@ import os
 from concurrent.futures import ProcessPoolExecutor
 import psycopg2
 
-from odoo import models, fields, api, Command, registry
+from odoo import models, fields, api, Command
 from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
 from odoo.addons.stock.models.stock_picking import Picking
+from odoo.addons.mrp.models.stock_quant import StockQuant
 from odoo.tools.sql import SQL
+from odoo.modules.registry import Registry
 
 _logger = logging.getLogger(__name__)
 
@@ -17,6 +19,9 @@ workers = 8
 def _dummy_set_scheduled_date(self):
     for picking in self:
         picking.move_ids.write({"date": picking.scheduled_date})
+
+def _dummy_check_kits(self):
+    pass
 
 
 class StockPicking(models.Model):
@@ -48,7 +53,6 @@ class StockPicking(models.Model):
             "SAP docnum must be unique for each document type.",
         ),
     ]
-
 
 class StockPickingImporter(models.AbstractModel):
     _name = "sap.stock.picking.importer"
@@ -136,6 +140,8 @@ class StockPickingImporter(models.AbstractModel):
         multiprocessing.set_start_method("fork", force=True)
         real_func = Picking._set_scheduled_date
         Picking._set_scheduled_date = _dummy_set_scheduled_date
+        real_check_kits = StockQuant._check_kits
+        StockQuant._check_kits = _dummy_check_kits
         active_automations = self.env["base.automation"].search([("active", "=", True)])
         active_automations.active = False
         self.env["base.automation"].flush_model()
@@ -174,6 +180,7 @@ class StockPickingImporter(models.AbstractModel):
         finally:
             multiprocessing.set_start_method(start_method, force=True)
             Picking._set_scheduled_date = real_func
+            StockQuant._check_kits = real_check_kits
             active_automations.active = True
 
     @api.model
@@ -221,7 +228,7 @@ class StockPickingImporter(models.AbstractModel):
             _logger.info(
                 f"Subprocess {pid} is processing {len(deliveries)} deliveries."
             )
-            with registry(dbname).cursor() as cr:
+            with Registry(dbname).cursor() as cr:
                 retry_limit = 3
                 retry_count = 0
                 while retry_count < retry_limit:
@@ -478,7 +485,7 @@ class StockPickingImporter(models.AbstractModel):
             _logger.info(
                 f"Subprocess {pid} is processing {len(deliveries)} deliveries."
             )
-            with registry(dbname).cursor() as cr:
+            with Registry(dbname).cursor() as cr:
                 retry_limit = 3
                 retry_count = 0
                 while retry_count < retry_limit:

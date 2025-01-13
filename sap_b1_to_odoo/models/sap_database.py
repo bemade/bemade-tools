@@ -1,5 +1,7 @@
 from odoo import models, fields, api, _
 from odoo.sql_db import db_connect
+from odoo.exceptions import ValidationError, UserError
+import os
 import logging
 
 _logger = logging.getLogger(__name__)
@@ -16,6 +18,23 @@ class SapDatabase(models.Model):
     database_password = fields.Char()
     database_port = fields.Integer(required=True)
     database_schema = fields.Char(required=True)
+    filestore_path = fields.Char()
+
+    @api.constrains("filestore_path")
+    def _constrain_filestore_path(self):
+        for record in self:
+            if record.filestore_path:
+                try:
+                    if not os.access(record.filestore_path, os.R_OK):
+                        raise ValidationError(
+                            _("The provided filestore path is not readable: %s")
+                            % record.filestore_path
+                        )
+                except Exception as e:
+                    raise ValidationError(
+                        _("Unable to access the filestore path: %s. Error: %s")
+                        % (record.filestore_path, str(e))
+                    )
 
     @api.depends("database_host", "database_name")
     def _compute_display_name(self):
@@ -94,20 +113,6 @@ class SapDatabase(models.Model):
             ).import_purchase_orders(cr)
         return self._success_notification()
 
-    def action_import_sale_stock_pickings(self):
-        with self.get_cursor() as cr:
-            self.env["sap.stock.picking.importer"].with_company(
-                self.env.company
-            ).import_sale_pickings(cr)
-        return self._success_notification()
-
-    def action_import_purchase_stock_pickings(self):
-        with self.get_cursor() as cr:
-            self.env["sap.stock.picking.importer"].with_company(
-                self.env.company
-            ).import_purchase_pickings(cr)
-        return self._success_notification()
-
     def action_import_customer_product_codes(self):
         with self.get_cursor() as cr:
             self.env["sap.customer.product.code.importer"].with_company(
@@ -127,6 +132,16 @@ class SapDatabase(models.Model):
                 self.env.company
             ).import_orderpoints(cr)
         return self._success_notification()
+
+    def action_import_attachments(self):
+        if not self.filestore_path:
+            raise UserError(
+                _("No filestore path specified. Cannot import attachments.")
+            )
+        with self.get_cursor() as cr:
+            self.env["sap.ir.attachment.importer"].with_company(
+                self.env.company
+            ).import_attachments(cr, self.filestore_path)
 
     def get_cursor(self):
         self.ensure_one()
@@ -166,24 +181,39 @@ class SapDatabase(models.Model):
             },
         }
 
+    def action_import_inventory(self):
+        with self.get_cursor() as cr:
+            self.env["sap.product.importer"].with_company(
+                self.env.company
+            ).import_inventory(cr)
+        return self._success_notification()
+
     def _import_all(self):
         self.ensure_one()
-        with self.get_cursor() as cr:
-            _logger.info("Beginning SAP record import.")
-            self.action_import_users()
-            self.action_import_partners()
-            self.action_import_carrier_accounts()
-            self.action_import_products()
-            self.action_import_boms()
-            self.action_import_payment_terms()
-            self.action_import_sales_orders()
-            self.action_import_purchase_orders()
-            self.action_import_sale_stock_pickings()
-            self.action_import_purchase_stock_pickings()
-            self.action_import_orderpoints()
-            self.action_import_product_pricelist()
-            self.action_import_customer_product_codes()
-            _logger.info("Successfully completed SAP record import.")
+        _logger.info("Beginning SAP record import.")
+        self.action_import_users()
+        self.env.cr.commit()
+        self.action_init_pricelists()
+        self.env.cr.commit()
+        self.action_import_partners()
+        self.env.cr.commit()
+        self.action_import_products()
+        self.env.cr.commit()
+        self.action_import_carrier_accounts()
+        self.env.cr.commit()
+        self.action_import_boms()
+        self.env.cr.commit()
+        self.action_import_product_pricelist()
+        self.env.cr.commit()
+        self.action_import_payment_terms()
+        self.env.cr.commit()
+        self.action_import_sales_orders()
+        self.env.cr.commit()
+        self.action_import_purchase_orders()
+        self.env.cr.commit()
+        self.action_import_inventory()
+        self.env.cr.commit()
+        _logger.info("Successfully completed SAP record import.")
 
     def action_delete_all(self):
         self._delete_all()

@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <odoo>
-    <record id="sap_database_view_tree" model="ir.ui.view">
-        <field name="name">sap.database.view.tree</field>
+    <record id="sap_database_view_list" model="ir.ui.view">
+        <field name="name">sap.database.view.list</field>
         <field name="model">sap.database</field>
         <field name="arch" type="xml">
-            <tree string="SAP Database" editable="bottom" multi_edit="True">
+            <list string="SAP Database" editable="bottom" multi_edit="True">
                 <field name="database_host"/>
                 <field name="database_port"/>
                 <field name="database_username"/>
@@ -12,12 +12,13 @@
                        password="True"/>
                 <field name="database_name"/>
                 <field name="database_schema"/>
+                <field name="filestore_path"/>
                 <button type="object" name="action_import_all" string="Import Records"
                         class="btn btn-primary"/>
                 <button type="object" name="action_delete_all"
                         string="Delete Records"
                         class="btn btn-primary"/>
-            </tree>
+            </list>
         </field>
     </record>
 </odoo>

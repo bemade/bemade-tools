@@ -10,6 +10,7 @@ class PurchaseOrder(models.Model):
 
     sap_docentry = fields.Integer(index="btree")
     sap_docnum = fields.Integer(index="btree")
+    sap_atcentry = fields.Integer(index="btree")
 
     _sql_constraints = [
         ("sap_docnum_unique", "UNIQUE(sap_docnum)", "Sap docnum must be unique!")
@@ -25,12 +26,15 @@ class PurchaseOrderLine(models.Model):
         store=True,
         index="btree",
     )
+    sap_table = fields.Char(
+        index="btree",
+    )
 
     _sql_constraints = [
         (
-            "sap_docentry_linenum_unique",
-            "UNIQUE(sap_docentry, sap_linenum)",
-            "Sap docentry and linenum must be unique!",
+            "sap_docentry_linenum_table_unique",
+            "UNIQUE(sap_docentry, sap_linenum, sap_table)",
+            "Sap docentry and linenum must be unique per sap table!",
         )
     ]
 
@@ -107,7 +111,7 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         return "ship_partial" if order["partsupply"] == "Y" else "ship_complete"
 
     @api.model
-    def _get_order_vals(self, sap_order_rows, sap_orders):
+    def _get_order_vals(self, sap_order_rows, sap_orders, sap_table):
         order_rows_dict = {}
         for row in sap_order_rows:
             order_rows_dict.setdefault(row["docentry"], []).append(row)
@@ -119,32 +123,50 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         for order in sap_orders:
             partner = self._get_partner(order, contacts_dict, partners_dict)
             terms = terms_dict.get(order["groupnum"], False)
-            order_vals.append(
-                {
-                    "sap_docnum": order["docnum"],
-                    "sap_docentry": order["docentry"],
-                    "partner_id": partner.id,
-                    # TODO: see if we need to do something with dest_address_id for drop ship
-                    "payment_term_id": terms.id,
-                    "date_order": order["docdate"].replace(tzinfo=None),
-                    "date_planned": order["docduedate"].replace(tzinfo=None),
-                    "notes": f"SAP Order {order['numatcard']}",
-                    "shipping_policy_request": self._get_picking_policy(order),
-                    "order_line": (
-                        [
-                            Command.create(self._get_row_vals(row, products_dict))
-                            for row in order_rows_dict[order["docentry"]]
-                        ]
-                        if order_rows_dict.get(order["docentry"])
-                        else False
-                    ),
-                }
-            )
+            vals = {
+                "sap_docnum": order["docnum"],
+                "sap_docentry": order["docentry"],
+                "sap_atcentry": order["atcentry"],
+                "partner_id": partner.id,
+                # TODO: see if we need to do something with dest_address_id for drop ship
+                "payment_term_id": terms and terms.id,
+                "date_order": order["docdate"].replace(tzinfo=None),
+                "date_planned": order["docduedate"].replace(tzinfo=None),
+                "notes": f"SAP Order {order['numatcard']}",
+                # "shipping_policy_request": self._get_picking_policy(order),
+                "order_line": (
+                    [
+                        Command.create(
+                            self._get_row_vals(row, products_dict, sap_table)
+                        )
+                        for row in order_rows_dict[order["docentry"]]
+                    ]
+                    if order_rows_dict.get(order["docentry"])
+                    else False
+                ),
+            }
+            if order["docstatus"] == "C":
+                vals["invoice_status"] = "invoiced"
+            order_vals.append(vals)
         return order_vals
 
     @api.model
     def _confirm_closed_orders(self, cr):
         self._confirm_closed_orders_by_table(cr, "opor", "purchase_order")
+        self._set_received_quantity_on_closed_orders(cr)
+
+    @api.model
+    def _set_received_quantity_on_closed_orders(self, cr):
+        closed_orders = self._get_closed_orders_by_table(cr, "opor")
+        orders = self.env["purchase.order"].search(
+            [
+                ("sap_docnum", "in", closed_orders),
+                ("order_line.qty_received_method", "!=", "manual"),
+            ]
+        )
+        for line in orders.order_line:
+            line.qty_received_method = "manual"
+            line.qty_received = line.product_uom_qty
 
     @api.model
     def _cancel_canceled_orders_and_quotations(self, cr):
@@ -159,7 +181,9 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         )
 
     @api.model
-    def _get_row_vals(self, row, products_dict):
-        vals = super()._get_row_vals(row, products_dict)
-        vals.update(product_qty=vals["product_uom_qty"])
+    def _get_row_vals(self, row, products_dict, sap_table):
+        vals = super()._get_row_vals(row, products_dict, sap_table)
+        vals.update(
+            product_qty=vals["product_uom_qty"],
+        )
         return vals

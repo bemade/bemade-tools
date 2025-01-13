@@ -2,7 +2,7 @@ from odoo import models, fields, api
 import logging
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
-from odoo import registry
+from odoo.modules.registry import Registry
 from odoo.sql_db import SQL
 
 workers = 8
@@ -14,6 +14,7 @@ class Product(models.Model):
     _inherit = "product.product"
 
     sap_item_code = fields.Char(index="btree")
+    sap_atcentry = fields.Integer()
     _sql_constraints = [
         (
             "sap_item_code_unique",
@@ -44,6 +45,8 @@ class SapProductImporter(models.AbstractModel):
     def import_products(self, cr):
         _logger.info("Importing products and categories...")
         category_ids = self._import_oitb(cr)
+        self.env["product.category"].flush_model()
+        self.env.cr.commit()
         self._import_oitm(cr, category_ids)
 
     @api.model
@@ -54,7 +57,7 @@ class SapProductImporter(models.AbstractModel):
     def _sub_import_oitm(dbname, uid, context, chunk, categories_map):
         _logger.info(f"Subprocess: Importing {len(chunk)} products.")
         try:
-            with registry(dbname).cursor() as cr:
+            with Registry(dbname).cursor() as cr:
                 env = api.Environment(cr, uid, context)
                 product_vals = []
                 for sap_product in chunk:
@@ -71,12 +74,14 @@ class SapProductImporter(models.AbstractModel):
                     )
                     vals = {
                         "sap_item_code": sap_product["itemcode"],
+                        "sap_atcentry": sap_product["atcentry"],
                         "default_code": fix_quotes(sap_product["itemname"]),
                         "name": fix_quotes(sap_product["frgnname"] or "N/A"),
                         "sale_ok": sap_product["sellitem"] == "Y",
                         "purchase_ok": sap_product["prchseitem"] == "Y",
                         "active": sap_product["validfor"] == "Y",
-                        "type": "product",
+                        "type": "consu",
+                        "is_storable": True,
                         "company_id": env.company.id,
                         "hs_code": sap_product["u_fcsdk_hst"] or None,
                         "country_of_origin": country_of_origin
@@ -87,6 +92,7 @@ class SapProductImporter(models.AbstractModel):
                         vals["categ_id"] = categ
                     product_vals.append(vals)
                 env["product.product"].create(product_vals)
+                cr.commit()
         except Exception as e:
             _logger.error("An exception occurred in a subprocess.", exc_info=True)
             raise
@@ -172,7 +178,9 @@ class SapProductImporter(models.AbstractModel):
                     "property_cost_method": "fifo",
                 }
             )
-        return self.env["product.category"].create(category_vals)
+        categs = self.env["product.category"].create(category_vals)
+        self.env.cr.commit()
+        return categs
 
     def import_orderpoints(self, cr):
         existing_orderpoints = tuple(
