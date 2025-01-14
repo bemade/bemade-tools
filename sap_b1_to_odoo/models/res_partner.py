@@ -322,6 +322,7 @@ class SapResPartnerImporter(models.AbstractModel):
                 states_dict,
             )
             zip_code = sap_address["zipcode"]
+            type = "delivery" if sap_address["adrestype"] == "S" else "invoice"
             partner_vals.append(
                 {
                     "name": name,
@@ -331,7 +332,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "country_id": country and country.id or False,
                     "state_id": state and state.id or False,
                     "sap_parent_card": parent_card,
-                    "type": "delivery",
+                    "type": type,
                     "is_company": False,
                     "user_id": False,
                     "zip": zip_code,
