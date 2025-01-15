@@ -94,7 +94,7 @@ class SapDatabase(models.Model):
 
     def action_import_payment_terms(self):
         with self.get_cursor() as cr:
-            self.env["sap.sale.purchase.importer.mixin"].with_company(
+            self.env["sap.res.partner.importer"].with_company(
                 self.env.company
             ).import_payment_terms(cr)
         return self._success_notification()

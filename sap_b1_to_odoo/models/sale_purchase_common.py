@@ -1,10 +1,11 @@
-from odoo import models, fields, api, Command
-from odoo.sql_db import SQL
 import logging
 import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
-from odoo.modules.registry import Registry
 import os
+from concurrent.futures import ProcessPoolExecutor
+
+from odoo import models, fields, api
+from odoo.modules.registry import Registry
+from odoo.sql_db import SQL
 
 _logger = logging.getLogger(__name__)
 workers = os.cpu_count() - 1
@@ -13,33 +14,6 @@ workers = os.cpu_count() - 1
 class SapSalePurchaseImporterMixin(models.AbstractModel):
     _name = "sap.sale.purchase.importer.mixin"
     _description = "SAP Sale and Purchase Order Importer Mixin"
-
-    def import_payment_terms(self, cr):
-        self._import_octg(cr)
-
-    def _import_octg(self, cr):
-        """Import payment terms."""
-        cr.execute("SELECT * from octg")
-        sap_terms = cr.dictfetchall()
-        vals = []
-        for term in sap_terms:
-            vals.append(
-                {
-                    "name": term["pymntgroup"],
-                    "sap_groupnum": term["groupnum"],
-                    "line_ids": [
-                        Command.create(
-                            {
-                                "value_amount": 100.0,
-                                "value": "percent",
-                                "nb_days": term["extradays"],
-                                "delay_type": "days_after",
-                            }
-                        )
-                    ],
-                }
-            )
-        return self.env["account.payment.term"].create(vals)
 
     @api.model
     def _get_row_vals(self, row, products_dict, sap_table):
@@ -310,10 +284,11 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         """Mark confirmed orders that are open and confirmed in SAP. This is done
         separately due to the long runtime of confirming orders through the ORM."""
         sql = """
-        SELECT docnum FROM %s
+        SELECT docnum, docdate, createdate  FROM %s
         WHERE canceled='N' and confirmed='Y' and invntsttus='O'
         """
         cr.execute(SQL(sql, SQL.identifier(sap_table)))
+        sap_orders = cr.fetchall()
         open_orders = [order[0] for order in cr.fetchall()]
         active_automations = self.env["base.automation"].search([("active", "=", True)])
         active_automations.active = False
@@ -327,7 +302,31 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                 confirm_method,
                 open_orders,
             )
+            self._set_order_dates(sap_orders, odoo_model)
         active_automations.active = True
+
+    def _set_order_dates(self, sap_orders, odoo_model):
+        self.env.cr.execute("DROP TABLE IF EXISTS sap_order_dates")
+        self.env.cr.execute(
+            "CREATE TEMP TABLE sap_order_dates (docnum TEXT, docdate DATE, createdate DATE)"
+        )
+        self.env.cr.execute(
+            SQL(
+                "INSERT INTO sap_order_dates VALUES %s",
+                tuple(tuple(sap_order) for sap_order in sap_orders),
+            )
+        )
+        self.env.cr.execute(
+            SQL(
+                """
+            UPDATE %s orders
+            SET create_date=temp.createdate, date_order=temp.docdate
+            FROM sap_order_dates temp
+            """
+            ),
+            self.env[odoo_model]._table,
+        )
+        self.env.cr.commit()
 
     # @api.model
     # def _confirm_open_orders_by_table(self, cr, sap_table, odoo_model, confirm_method):

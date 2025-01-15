@@ -5,7 +5,7 @@ import os
 from concurrent.futures import ProcessPoolExecutor
 from odoo.tools.sql import SQL
 
-from odoo import models, fields, api
+from odoo import models, fields, api, Command
 from odoo.modules.registry import Registry
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 
@@ -60,6 +60,37 @@ class SapResPartnerImporter(models.AbstractModel):
             )
         }
 
+    def import_payment_terms(self, cr):
+        self._import_octg(cr)
+
+    def _import_octg(self, cr):
+        """Import payment terms."""
+        cr.execute("SELECT * from octg")
+        sap_terms = cr.dictfetchall()
+        vals = []
+        for term in sap_terms:
+            vals.append(
+                {
+                    "name": term["pymntgroup"],
+                    "sap_groupnum": term["groupnum"],
+                    "line_ids": [
+                        Command.create(
+                            {
+                                "value_amount": 100.0,
+                                "value": "percent",
+                                "nb_days": term["extradays"],
+                                "delay_type": "days_after",
+                            }
+                        )
+                    ],
+                }
+            )
+        return self.env["account.payment.term"].create(vals)
+
+    def _get_payment_terms_dict(self):
+        terms = self.env["account.payment.term"].search([])
+        return {term.sap_groupnum: term.id for term in terms}
+
     @api.model
     def import_partners_concurrent(self, cr):
         _logger.info("Starting SAP partner import.")
@@ -90,12 +121,21 @@ class SapResPartnerImporter(models.AbstractModel):
             self._get_ocpr_partner_vals,
         )
 
+    def _get_payment_terms(self, terms_dict, sap_partner):
+        """Returns a tuple of (payment_term_id, supplier_payment_term_id) with only
+        one value set depending if cardtype matches a customer or vendor entry in SAP"""
+        if sap_partner["cardtype"] in ["C", "L"]:
+            return terms_dict.get(sap_partner["groupnum"]), False
+        else:
+            return False, terms_dict.get(sap_partner["groupnum"])
+
     @api.model
     def _get_ocrd_partner_vals(self, sap_partners):
         partner_vals = []
         countries_dict = self._get_countries_dict()
         states_dict = self._get_states_dict()
         users_dict = self._get_users_dict()
+        terms_dict = self._get_payment_terms_dict()
         for sap_partner in sap_partners:
             # Start with the parent company
             country = sap_partner["country"]
@@ -113,6 +153,10 @@ class SapResPartnerImporter(models.AbstractModel):
             )
             if not currency:
                 currency = self.env.ref("base.CAD")
+            property_payment_term_id, property_supplier_payment_term_id = (
+                self._get_payment_terms(terms_dict, sap_partner)
+            )
+
             partner_vals.append(
                 {
                     "sap_card_code": sap_partner["cardcode"],
@@ -132,6 +176,8 @@ class SapResPartnerImporter(models.AbstractModel):
                     "comment": sap_partner["notes"],
                     "user_id": user,
                     "property_purchase_currency_id": currency.id,
+                    "property_payment_term_id": property_payment_term_id,
+                    "property_supplier_payment_term_id": property_supplier_payment_term_id,
                 }
             )
 
