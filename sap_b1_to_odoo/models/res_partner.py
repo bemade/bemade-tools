@@ -108,6 +108,11 @@ class SapResPartnerImporter(models.AbstractModel):
                 sap_partner["block"],
             )
             user = users_dict.get(sap_partner["slpcode"], False)
+            currency = self.env["res.currency"].search(
+                ["name", "=", sap_partner["currency"]]
+            )
+            if not currency:
+                currency = self.env.ref("base.CAD")
             partner_vals.append(
                 {
                     "sap_card_code": sap_partner["cardcode"],
@@ -126,6 +131,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "company_id": self.env.company.id,
                     "comment": sap_partner["notes"],
                     "user_id": user,
+                    "property_purchase_currency_id": currency.id,
                 }
             )
 
@@ -292,6 +298,8 @@ class SapResPartnerImporter(models.AbstractModel):
         partner_vals = []
 
         def _extract_name_street_street2(address, street, address2, address3):
+            # TODO: fix to allow for block with Address, address 2, address 3, street, block as the order
+            #   At least for crd1... check with ocrd and ocpr
             """Addresses in SAP have 4 possible lines that would match with street1
             and street2 from Odoo. Intelligently concatenate depending on which
             lines are set or not set."""

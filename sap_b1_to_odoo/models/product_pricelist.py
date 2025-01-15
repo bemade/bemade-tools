@@ -103,7 +103,28 @@ class ProductPricelistImporter(models.AbstractModel):
         self._set_partner_default_pricelists(
             sap_blanket_orders, pricelists, partners_dict
         )
+        self._set_usd_pricelist_partners(cr)
 
+    @api.model
+    def _set_usd_pricelist_partners(self, cr):
+        cr.execute("SELECT cardcode FROM ocrd WHERE currency = 'USD'")
+        cardcodes = [item[0] for item in cr.fetchall()]
+        cad_pricelist = self.env["product.pricelist"].search(
+            [("name", "=", "Default CAD Pricelist")]
+        )
+        usd_pricelist = self.env["product.pricelist"].search(
+            [("name", "=", "Default USD Pricelist")]
+        )
+        odoo_partners = self.env["res.partner"].search(
+            [
+                ("sap_card_code", "in", cardcodes),
+                ("active", "in", [True, False]),
+                ("property_product_pricelist", "=", cad_pricelist.id),
+            ]
+        )
+        odoo_partners.write({"property_product_pricelist": usd_pricelist.id})
+
+    @api.model
     def _import_basic_pricelists(self, cr):
         """For simple pricelists in the OPLN table, we just import the name and the
         linenum so that we can later reference them. Each pricelist that isn't the base
