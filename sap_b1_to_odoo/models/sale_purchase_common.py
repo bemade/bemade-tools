@@ -258,10 +258,13 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
     def _cancel_canceled_orders_and_quotations_by_table(
         self, cr, sap_order_table, sap_quote_table, odoo_table
     ):
-        """Mark canceled orders as cancelled directly in the DB."""
+        """Mark canceled orders as cancelled directly in the DB.
+
+        Consider than an order is cancelled either if marked canceled or if it's been
+        confirmed and closed despite its inventory status being open."""
         sql = """
         SELECT docnum FROM %s
-        WHERE canceled = 'Y'
+        WHERE canceled = 'Y' OR (confirmed='Y' and docstatus='C' and invntsttus='O')
         UNION
         SELECT docnum FROM %s
         WHERE canceled = 'Y'
@@ -285,7 +288,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         separately due to the long runtime of confirming orders through the ORM."""
         sql = """
         SELECT docnum, docdate, createdate  FROM %s
-        WHERE canceled='N' and confirmed='Y' and invntsttus='O'
+        WHERE canceled='N' and confirmed='Y' and docstatus='O'
         """
         cr.execute(SQL(sql, SQL.identifier(sap_table)))
         sap_orders = cr.fetchall()
