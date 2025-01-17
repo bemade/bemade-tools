@@ -253,11 +253,18 @@ class SapSaleOrderImporter(models.AbstractModel):
             else:
                 return pricelists["CAD"]
 
+        def _get_carriers_dict():
+            return {
+                tpt.sap_trnspcode: tpt.delivery_carrier_id
+                for tpt in self.env["sap.transporter"].search([])
+            }
+
         pricelists = _get_pricelists_dict()
         partners_dict = self._get_partners_dict()
         contacts_dict = self._get_contacts_dict()
         sap_users_dict = self._get_sap_users_dict()
         sources_dict = self._get_sources_dict()
+        carriers_dict = _get_carriers_dict()
 
         order_rows_dict = {}
         for row in sap_order_rows:
@@ -288,6 +295,7 @@ class SapSaleOrderImporter(models.AbstractModel):
             terms = payment_terms_dict.get(order["groupnum"])
             user = sap_users_dict.get(order["slpcode"], False)
             source = sources_dict.get(order["u_fcsdk_source"], False)
+            carrier = carriers_dict.get(order["trnspcode"])
             vals = {
                 "sap_docnum": order["docnum"],
                 "sap_docentry": order["docentry"],
@@ -301,6 +309,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                 "commitment_date": order["docduedate"].replace(tzinfo=None),
                 "client_order_ref": order["numatcard"] or "N/A",
                 "picking_policy": self._get_picking_policy(order),
+                "carrier_id": carrier and carrier.id,
                 "order_line": (
                     [
                         Command.create(
