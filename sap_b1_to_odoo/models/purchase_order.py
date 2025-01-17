@@ -113,6 +113,12 @@ class SapPurchaseOrderImporter(models.AbstractModel):
 
     @api.model
     def _get_order_vals(self, sap_order_rows, sap_orders, sap_table):
+        def _get_carriers_dict():
+            return {
+                tpt.sap_trnspcode: tpt.delivery_carrier_id
+                for tpt in self.env["sap.transporter"].search([])
+            }
+
         order_rows_dict = {}
         for row in sap_order_rows:
             order_rows_dict.setdefault(row["docentry"], []).append(row)
@@ -121,20 +127,31 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         partners_dict = self._get_partners_dict()
         products_dict = self._get_products_dict()
         terms_dict = self._get_payment_terms_dict()
+        carriers_dict = _get_carriers_dict()
+        company_partner = self.env.company.partner_id
         for order in sap_orders:
             partner = self._get_partner(order, contacts_dict, partners_dict)
             terms = terms_dict.get(order["groupnum"], False)
+            carrier = carriers_dict.get(order["trnspcode"])
+            company_has_account = (
+                carrier
+                and carrier
+                in company_partner.carrier_account_ids.mapped("delivery_carrier_id")
+            )
+            billing_mode = "collect" if company_has_account else "ppc"
+
             vals = {
                 "sap_docnum": order["docnum"],
                 "sap_docentry": order["docentry"],
                 "sap_atcentry": order["atcentry"],
                 "partner_id": partner.id,
-                # TODO: see if we need to do something with dest_address_id for drop ship
                 "payment_term_id": terms and terms.id,
                 "date_order": order["docdate"].replace(tzinfo=None),
                 "date_planned": order["docduedate"].replace(tzinfo=None),
                 "notes": f"SAP Order {order['numatcard']}",
                 # "shipping_policy_request": self._get_picking_policy(order),
+                "carrier_id": carrier and carrier.id,
+                "delivery_billing_mode": billing_mode,
                 "order_line": (
                     [
                         Command.create(

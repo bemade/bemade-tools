@@ -42,7 +42,7 @@ class ProductPricelistImporter(models.AbstractModel):
     def _get_products_dict(self, cr):
         product_dict = ProductPricelistImporter._products_dict
         if product_dict is None:
-            sql = "SELECT distinct(itemcode) from AOA1"
+            sql = "SELECT distinct(itemcode) from OAT1"
             cr.execute(SQL(sql))
             itemcodes = [item[0] for item in cr.fetchall()]
             products = self.env["product.product"].search(
@@ -60,7 +60,7 @@ class ProductPricelistImporter(models.AbstractModel):
     def _get_partners_dict(self, cr):
         partners_dict = ProductPricelistImporter._partners_dict
         if partners_dict is None:
-            sql = "SELECT distinct (bpcode) from AOAT"
+            sql = "SELECT distinct (bpcode) from OOAT"
             cr.execute(SQL(sql))
             cardcodes = [item[0] for item in cr.fetchall()]
             partners = self.env["res.partner"].search(
@@ -100,10 +100,17 @@ class ProductPricelistImporter(models.AbstractModel):
             f"{len(pricelists)} Product pricelists imported "
             f"with {len(pricelists.mapped('item_ids'))} lines."
         )
+        _logger.info("Setting default partner pricelists.")
         self._set_partner_default_pricelists(
             sap_blanket_orders, pricelists, partners_dict
         )
         self._set_usd_pricelist_partners(cr)
+        _logger.info("Importing purchase blankets.")
+        purchase_blanket_vals = self._get_purchase_blanket_vals(
+            sap_blanket_orders, sap_blanket_lines_dict, products_dict, partners_dict
+        )
+        blankets = self.env["purchase.requisition"].create(purchase_blanket_vals)
+        _logger.info(f"Imported {len(blankets)} purchase blankets.")
 
     @api.model
     def _set_usd_pricelist_partners(self, cr):
@@ -119,8 +126,10 @@ class ProductPricelistImporter(models.AbstractModel):
             [
                 ("sap_card_code", "in", cardcodes),
                 ("active", "in", [True, False]),
-                ("property_product_pricelist", "=", cad_pricelist.id),
             ]
+        )
+        odoo_partners = odoo_partners.filtered(
+            lambda partner: partner.property_product_pricelist == cad_pricelist
         )
         odoo_partners.write({"property_product_pricelist": usd_pricelist.id})
 
@@ -189,18 +198,18 @@ class ProductPricelistImporter(models.AbstractModel):
 
     @api.model
     def _get_all_sap_blanket_orders(self, cr):
-        sql = "SELECT * from AOAT"
+        sql = "SELECT * from OOAT"
         cr.execute(SQL(sql))
         return cr.dictfetchall()
 
     @api.model
     def _get_sap_blanket_lines_dict(self, cr):
-        sql = "SELECT * FROM AOA1"
+        sql = "SELECT * FROM OAT1"
         cr.execute(SQL(sql))
         lines = cr.dictfetchall()
         lines_dict = {}
         for line in lines:
-            lines_dict.setdefault((line["agrno"], line["loginstanc"]), []).append(line)
+            lines_dict.setdefault(line["agrno"], []).append(line)
         return lines_dict
 
     @api.model
@@ -210,27 +219,19 @@ class ProductPricelistImporter(models.AbstractModel):
         vals = []
         for blanket in sap_blanket_orders:
             partner = partners_dict[blanket["bpcode"]]
+            # Don't set these up for suppliers
+            if partner.sap_partner_type == "S":
+                continue
             start = blanket["startdate"]
             end = blanket["enddate"]
-            start_end = "-".join(
-                [
-                    datetime.strftime(start, "%Y-%m-%d"),
-                    datetime.strftime(end, "%Y-%m-%d"),
-                ]
-            )
             start = start.astimezone(utc).replace(tzinfo=None)
             end = end.astimezone(utc).replace(tzinfo=None)
             active = datetime.now() <= end
-            name = (
-                (blanket["descript"] or partner.name)
-                + " "
-                + start_end
-                + f" rev. {blanket['loginstanc']}"
-            )
+            name = blanket["descript"] or partner.name
             currency_code = "USD" if blanket["bpcurr"] == "USD" else "CAD"
             currency = self.env["res.currency"].search([("name", "=", currency_code)])
             item_vals = self._extract_item_vals(
-                sap_blanket_lines_dict[(blanket["absid"], blanket["loginstanc"])],
+                sap_blanket_lines_dict[blanket["absid"]],
                 products_dict,
                 start,
                 end,
@@ -246,7 +247,6 @@ class ProductPricelistImporter(models.AbstractModel):
             vals.append(
                 {
                     "sap_abs_id": blanket["absid"],
-                    "sap_loginstanc": blanket["loginstanc"],
                     "name": partner.name + " - " + name,
                     "active": active,
                     "currency_id": currency.id,
@@ -254,15 +254,58 @@ class ProductPricelistImporter(models.AbstractModel):
                     "company_id": self.env.company.id,
                 }
             )
-        # Deactivate superceded lists. We do this after processing all the values since
-        # we need to be able to check for matching abs_id but higher loginstanc
-        vals_dict = {}
-        for val in vals:
-            vals_dict.setdefault(val["sap_abs_id"], []).append(val)
-        for abs_id, dict_vals in vals_dict.items():
-            dict_vals.sort(key=lambda val: val["sap_loginstanc"], reverse=True)
-            for val in dict_vals[1:]:
-                val.update({"active": False})
+        return vals
+
+    def _get_purchase_blanket_vals(
+        self, sap_blanket_orders, sap_blanket_lines_dict, products_dict, partners_dict
+    ):
+        def _get_status(blanket):
+            match blanket["status"]:
+                case "A" | "X" | "P":
+                    return "confirmed"
+                case "B" | "D" | "F":
+                    return "draft"
+                case "T":
+                    return "done"
+                case "C":
+                    return "cancel"
+
+        vals = []
+        for blanket in sap_blanket_orders:
+            partner = partners_dict.get(blanket["bpcode"])
+            # Only make these for suppliers
+            if partner.sap_partner_type != "S":
+                continue
+            start = blanket["startdate"]
+            end = blanket["enddate"]
+            start_end = "-".join(
+                [
+                    datetime.strftime(start, "%Y-%m-%d"),
+                    datetime.strftime(end, "%Y-%m-%d"),
+                ]
+            )
+            start = start.astimezone(utc).replace(tzinfo=None)
+            end = end.astimezone(utc).replace(tzinfo=None)
+            reference = blanket["descript"]
+            status = _get_status(blanket)
+            currency_code = "USD" if blanket["bpcurr"] == "USD" else "CAD"
+            currency = self.env["res.currency"].search([("name", "=", currency_code)])
+            item_vals = self._extract_blanket_item_vals(
+                sap_blanket_lines_dict[blanket["absid"]],
+                products_dict,
+            )
+            vals.append(
+                {
+                    "vendor_id": partner.id,
+                    "reference": reference,
+                    "date_start": start,
+                    "date_end": end,
+                    "state": status,
+                    "currency_id": currency.id,
+                    "line_ids": [Command.create(val) for val in item_vals],
+                    "requisition_type": "blanket_order",
+                }
+            )
         return vals
 
     @api.model
@@ -279,6 +322,21 @@ class ProductPricelistImporter(models.AbstractModel):
                     "company_id": self.env.company.id,
                     "date_start": start,
                     "date_end": end,
+                }
+            )
+        return vals
+
+    def _extract_blanket_item_vals(self, sap_blanket_lines, products_dict):
+        vals = []
+        for line in sap_blanket_lines:
+            product = products_dict[line["itemcode"]]
+            quantity = line["planqty"]
+            price = line["unitprice"]
+            vals.append(
+                {
+                    "product_id": product.id,
+                    "product_qty": quantity,
+                    "price_unit": price,
                 }
             )
         return vals

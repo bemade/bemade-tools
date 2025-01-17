@@ -138,7 +138,8 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
             return
         carriers, accounts = self.extract_all(cr)
         carrier_vals = []
-        if not self.env["product.product"].search([("name", "=", "Delivery")]):
+        product = self.env["product.product"].search([("name", "=", "Delivery")])
+        if not product:
             product = self.env["product.product"].create(
                 {
                     "name": "Delivery",
@@ -151,18 +152,18 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
                 }
             )
         for name, trnspcodes in carriers.items():
-            carrier_vals.append(
-                {
-                    "name": name,
-                    "active": True,
-                    "company_id": self.env.company.id,
-                    "sap_transporter_ids": [
-                        Command.create({"sap_trnspcode": trnspcode})
-                        for trnspcode in trnspcodes
-                    ],
-                    "product_id": product.id,
-                }
-            )
+            vals = {
+                "name": name,
+                "active": True,
+                "company_id": self.env.company.id,
+                "sap_transporter_ids": [
+                    Command.create({"sap_trnspcode": trnspcode})
+                    for trnspcode in trnspcodes
+                ],
+                "product_id": product.id,
+            }
+
+            carrier_vals.append(vals)
         _logger.info(f"Creating {len(carrier_vals)} delivery carriers.")
         carriers = self.env["delivery.carrier"].create(carrier_vals)
         carriers_dict = {carrier.name: carrier for carrier in carriers}
@@ -171,13 +172,19 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
             [("sap_card_code", "in", [account["cardcode"] for account in accounts])]
         )
         partners_dict = {partner.sap_card_code: partner for partner in partners}
+        company_partner = self.env.company.partner_id
         for account in accounts:
-            account_vals.append(
-                {
-                    "account_number": account["account_number"],
-                    "partner_id": partners_dict[account["cardcode"]].id,
-                    "delivery_carrier_id": carriers_dict[account["carrier_name"]].id,
-                }
+            partner = partners_dict.get(account["cardcode"])
+            partner_to_use = (
+                partner if partner.sap_partner_type != "S" else company_partner
             )
+            vals = {
+                "account_number": account["account_number"],
+                "partner_id": partner_to_use.id,
+                "delivery_carrier_id": carriers_dict[account["carrier_name"]].id,
+            }
+            if partner.sap_partner_type == "S":
+                vals.update(supplier_ids=[Command.link(partner.id)])
+            account_vals.append(vals)
 
         self.env["delivery.carrier.account"].create(account_vals)
