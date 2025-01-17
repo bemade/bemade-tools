@@ -37,6 +37,8 @@
         "delivery_carrier_partner_account",
         "base_automation",
         "customer_product_code",
+        "purchase_requisition",
+        "purchase_delivery_carrier",
     ],
     "data": [
         "security/ir.model.access.csv",

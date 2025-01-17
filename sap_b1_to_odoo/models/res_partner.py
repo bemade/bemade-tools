@@ -29,6 +29,7 @@ class ResPartner(models.Model):
     sap_parent_card = fields.Char(index="btree")
     sap_cntct_code = fields.Integer(index="btree")
     sap_atcentry = fields.Integer(index="btree")
+    sap_partner_type = fields.Char(index="btree")
 
     _sql_constraints = [
         (
@@ -149,7 +150,7 @@ class SapResPartnerImporter(models.AbstractModel):
             )
             user = users_dict.get(sap_partner["slpcode"], False)
             currency = self.env["res.currency"].search(
-                ["name", "=", sap_partner["currency"]]
+                [("name", "=", sap_partner["currency"])]
             )
             if not currency:
                 currency = self.env.ref("base.CAD")
@@ -169,6 +170,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "state_id": state and state.id or False,
                     "zip": sap_partner["zipcode"],
                     "sap_parent_card": sap_partner["fathercard"] or False,
+                    "sap_partner_type": sap_partner["cardtype"],
                     "phone": sap_partner["phone1"] or sap_partner["phone2"],
                     "email": sap_partner["e_mail"],
                     "is_company": True,
