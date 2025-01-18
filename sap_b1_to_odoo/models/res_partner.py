@@ -122,6 +122,7 @@ class SapResPartnerImporter(models.AbstractModel):
             self._get_ocpr_partner_vals,
         )
 
+    @api.model
     def _get_payment_terms(self, terms_dict, sap_partner):
         """Returns a tuple of (payment_term_id, supplier_payment_term_id) with only
         one value set depending if cardtype matches a customer or vendor entry in SAP"""
@@ -351,14 +352,14 @@ class SapResPartnerImporter(models.AbstractModel):
             """Addresses in SAP have 4 possible lines that would match with street1
             and street2 from Odoo. Intelligently concatenate depending on which
             lines are set or not set."""
-            addressParts = [
+            address_parts = [
                 part for part in [address, street, address2, address3, block] if part
             ]
-            if len(addressParts) > 3:
-                return addressParts[0], addressParts[1], ", ".join(addressParts[2:])
+            if len(address_parts) > 3:
+                return address_parts[0], address_parts[1], ", ".join(address_parts[2:])
             else:
-                addressParts += ["" for _ in range(3 - len(addressParts))]
-                return tuple(addressParts)
+                address_parts += ["" for _ in range(3 - len(address_parts))]
+                return tuple(address_parts)
 
         countries_dict = self._get_countries_dict()
         states_dict = self._get_states_dict()
@@ -379,7 +380,7 @@ class SapResPartnerImporter(models.AbstractModel):
                 states_dict,
             )
             zip_code = sap_address["zipcode"]
-            type = "delivery" if sap_address["adrestype"] == "S" else "invoice"
+            address_type = "delivery" if sap_address["adrestype"] == "S" else "invoice"
             partner_vals.append(
                 {
                     "name": fix_quotes(name),
@@ -389,7 +390,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "country_id": country and country.id or False,
                     "state_id": state and state.id or False,
                     "sap_parent_card": parent_card,
-                    "type": type,
+                    "type": address_type,
                     "is_company": False,
                     "user_id": False,
                     "zip": zip_code,
