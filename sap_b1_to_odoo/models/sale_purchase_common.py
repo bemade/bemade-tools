@@ -18,8 +18,6 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
     @api.model
     def _get_row_vals(self, row, products_dict, sap_table):
         product = products_dict.get(row["itemcode"])
-        # TODO: confirm tax_ids come in properly with fiscal positions
-        # tax_ids = self._get_tax(row["vatprcnt"])
         if product:
             return {
                 "product_id": product.id,
@@ -286,26 +284,26 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
     def _confirm_open_orders_by_table(self, cr, sap_table, odoo_model, confirm_method):
         """Mark confirmed orders that are open and confirmed in SAP. This is done
         separately due to the long runtime of confirming orders through the ORM."""
+        self.env["sale.order"].flush_model()
         sql = """
         SELECT docnum, docdate, createdate  FROM %s
         WHERE canceled='N' and confirmed='Y' and docstatus='O'
         """
         cr.execute(SQL(sql, SQL.identifier(sap_table)))
         sap_orders = cr.fetchall()
-        open_orders = [order[0] for order in cr.fetchall()]
+        open_orders = [order[0] for order in sap_orders]
         active_automations = self.env["base.automation"].search([("active", "=", True)])
         active_automations.active = False
         self.env["base.automation"].flush_model()
         if open_orders:
             self._sub_confirm_open_orders_by_table(
-                self.env.cr.dbname,
-                self.env.uid,
-                dict(self.env.context),
                 odoo_model,
                 confirm_method,
                 open_orders,
             )
             self._set_order_dates(sap_orders, odoo_model)
+            self.env.flush_all()
+            self.env.cr.commit()
         active_automations.active = True
 
     def _set_order_dates(self, sap_orders, odoo_model):
@@ -316,7 +314,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         self.env.cr.execute(
             SQL(
                 "INSERT INTO sap_order_dates VALUES %s",
-                tuple(tuple(sap_order) for sap_order in sap_orders),
+                tuple(tuple(sap_order[1:]) for sap_order in sap_orders),
             )
         )
         self.env.cr.execute(
@@ -331,74 +329,16 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         )
         self.env.cr.commit()
 
-    # @api.model
-    # def _confirm_open_orders_by_table(self, cr, sap_table, odoo_model, confirm_method):
-    #     """Mark confirmed orders that are open and confirmed in SAP. This is done
-    #     separately due to the long runtime of confirming orders through the ORM."""
-    #     sql = """
-    #     SELECT docnum FROM %s
-    #     WHERE canceled='N' and confirmed='Y' and invntsttus='O'
-    #     """
-    #     cr.execute(SQL(sql, SQL.identifier(sap_table)))
-    #     open_orders = [order[0] for order in cr.fetchall()]
-    #     if open_orders:
-    #         _logger.info(f"Confirming {len(open_orders)} open orders ...")
-    #         chunk_size = 50
-    #         chunks = [
-    #             open_orders[i : i + chunk_size]
-    #             for i in range(0, len(open_orders), chunk_size)
-    #         ]
-    #         start_method = multiprocessing.get_start_method()
-    #         multiprocessing.set_start_method("fork", force=True)
-    #         max_workers = min(workers, len(chunks)) or 1
-    #         try:
-    #             with ProcessPoolExecutor(max_workers=max_workers) as executor:
-    #                 futures = [
-    #                     executor.submit(
-    #                         self._sub_confirm_open_orders_by_table,
-    #                         self.env.cr.dbname,
-    #                         self.env.uid,
-    #                         dict(self.env.context),
-    #                         odoo_model,
-    #                         confirm_method,
-    #                         chunk,
-    #                     )
-    #                     for chunk in chunks
-    #                 ]
-    #                 for future in futures:
-    #                     future.result()
-    #         except Exception as e:
-    #             _logger.error("An exception occurred in a subprocess.", exc_info=True)
-    #             raise e
-    #         finally:
-    #             multiprocessing.set_start_method(start_method, force=True)
-    #
-    @staticmethod
-    def _sub_confirm_open_orders_by_table(
-        dbname, uid, context, odoo_model, confirm_method, sap_orders
-    ):
-        # try:
-        with Registry(dbname).cursor() as cr:
-            env = api.Environment(cr, uid, context)
-            self = env[odoo_model].search([("sap_docnum", "in", sap_orders)])
-            recs = self.env[odoo_model].search(
-                [
-                    ("sap_docnum", "in", sap_orders),
-                    ("state", "in", ["draft", "sent"]),
-                ],
-            )
-            _logger.info(f"Confirming {len(recs)} open orders ...")
-            for rec in recs:
-                method = getattr(rec, confirm_method)
-                method()
-            cr.commit()
-
-    # except Exception as e:
-    #     _logger.error(
-    #         "An exception occurred in _sub_confirm_open_orders_by_table.",
-    #         exc_info=True,
-    #     )
-    #     raise e
+    def _sub_confirm_open_orders_by_table(self, odoo_model, confirm_method, sap_orders):
+        recs = self.env[odoo_model].search(
+            [
+                ("sap_docnum", "in", sap_orders),
+                ("state", "in", ["draft", "sent"]),
+            ],
+        )
+        _logger.info(f"Confirming {len(recs)} open orders ...")
+        method = getattr(recs, confirm_method)
+        method()
 
 
 class PaymentTerms(models.Model):
