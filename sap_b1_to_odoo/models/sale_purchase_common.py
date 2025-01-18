@@ -6,6 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 from odoo import models, fields, api
 from odoo.modules.registry import Registry
 from odoo.sql_db import SQL
+from datetime import datetime
 
 _logger = logging.getLogger(__name__)
 workers = os.cpu_count() - 1
@@ -148,7 +149,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                     ]
                     for future in futures:
                         future.result()
-        except Exception as e:
+        except Exception:
             _logger.error("An exception occurred in a subprocess.", exc_info=True)
             raise
         finally:
@@ -311,11 +312,18 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         self.env.cr.execute(
             "CREATE TEMP TABLE sap_order_dates (docnum TEXT, docdate DATE, createdate DATE)"
         )
-        self.env.cr.execute(
-            SQL(
-                "INSERT INTO sap_order_dates VALUES %s",
-                tuple(tuple(sap_order[1:]) for sap_order in sap_orders),
+        sap_orders = [
+            str(
+                (
+                    order[0],
+                    datetime.strftime(order[1], "%Y-%m-%d"),
+                    datetime.strftime(order[2], "%Y-%m-%d"),
+                )
             )
+            for order in sap_orders
+        ]
+        self.env.cr.execute(
+            f"INSERT INTO sap_order_dates VALUES {', '.join(sap_orders)}"
         )
         self.env.cr.execute(
             SQL(
@@ -323,9 +331,9 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             UPDATE %s orders
             SET create_date=temp.createdate, date_order=temp.docdate
             FROM sap_order_dates temp
-            """
+            """,
+                SQL.identifier(self.env[odoo_model]._table),
             ),
-            self.env[odoo_model]._table,
         )
         self.env.cr.commit()
 

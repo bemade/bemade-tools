@@ -203,7 +203,7 @@ class SapSaleOrderImporter(models.AbstractModel):
             ]
         )
         if not cad_pricelist:
-            cad_pricelist = self.env["product.pricelist"].create(
+            self.env["product.pricelist"].create(
                 {
                     "name": "Default CAD Pricelist",
                     "currency_id": self.env["res.currency"]
@@ -212,7 +212,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                 }
             )
         if not usd_pricelist:
-            usd_pricelist = self.env["product.pricelist"].create(
+            self.env["product.pricelist"].create(
                 {
                     "name": "Default USD Pricelist",
                     "currency_id": self.env["res.currency"]
@@ -259,6 +259,21 @@ class SapSaleOrderImporter(models.AbstractModel):
                 for tpt in self.env["sap.transporter"].search([])
             }
 
+        def _get_tpt_info(partner, carrier):
+            partner_account = partner.carrier_account_ids.filtered(
+                lambda account: account.delivery_carrier_id == carrier
+            )
+            if partner_account:
+                return partner_account, "collect"
+            else:
+                sender = self.env.company.partner_id
+                sender_account = sender.carrier_account_ids.filtered(
+                    lambda account: account.delivery_carrier_id == carrier
+                )
+                if sender_account:
+                    return sender_account, "ppc"
+            return False, "ppc"
+
         pricelists = _get_pricelists_dict()
         partners_dict = self._get_partners_dict()
         contacts_dict = self._get_contacts_dict()
@@ -296,6 +311,7 @@ class SapSaleOrderImporter(models.AbstractModel):
             user = sap_users_dict.get(order["slpcode"], False)
             source = sources_dict.get(order["u_fcsdk_source"], False)
             carrier = carriers_dict.get(order["trnspcode"])
+            carrier_account, billing_mode = _get_tpt_info(partner, carrier)
             vals = {
                 "sap_docnum": order["docnum"],
                 "sap_docentry": order["docentry"],
@@ -310,6 +326,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                 "client_order_ref": order["numatcard"] or "N/A",
                 "picking_policy": self._get_picking_policy(order),
                 "carrier_id": carrier and carrier.id,
+                "delivery_billing_mode": billing_mode,
                 "order_line": (
                     [
                         Command.create(

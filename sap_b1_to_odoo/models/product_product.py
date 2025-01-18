@@ -99,7 +99,7 @@ class SapProductImporter(models.AbstractModel):
                     product_vals.append(vals)
                 env["product.product"].create(product_vals)
                 cr.commit()
-        except Exception as e:
+        except Exception:
             _logger.error("An exception occurred in a subprocess.", exc_info=True)
             raise
 
