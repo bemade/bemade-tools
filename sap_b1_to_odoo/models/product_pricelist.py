@@ -278,12 +278,6 @@ class ProductPricelistImporter(models.AbstractModel):
                 continue
             start = blanket["startdate"]
             end = blanket["enddate"]
-            start_end = "-".join(
-                [
-                    datetime.strftime(start, "%Y-%m-%d"),
-                    datetime.strftime(end, "%Y-%m-%d"),
-                ]
-            )
             start = start.astimezone(utc).replace(tzinfo=None)
             end = end.astimezone(utc).replace(tzinfo=None)
             reference = blanket["descript"]
@@ -326,6 +320,7 @@ class ProductPricelistImporter(models.AbstractModel):
             )
         return vals
 
+    @api.model
     def _extract_blanket_item_vals(self, sap_blanket_lines, products_dict):
         vals = []
         for line in sap_blanket_lines:

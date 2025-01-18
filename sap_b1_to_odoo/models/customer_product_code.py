@@ -1,4 +1,4 @@
-from odoo import fields, models, api, _
+from odoo import models
 from odoo.tools.sql import SQL
 import logging
 import psycopg2

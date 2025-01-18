@@ -1,19 +1,12 @@
 """ Import attachemnts from SAP B1 into Odoo objects """
 
-from num2words.lang_HE import chunk2word
-
 from odoo import models, fields, api
 from odoo.tools.sql import SQL
-from odoo.modules.registry import Registry
-from concurrent.futures import ProcessPoolExecutor
-import multiprocessing
 import os
 import logging
 import base64
-import psycopg2
 
 _logger = logging.getLogger(__name__)
-workers = os.cpu_count() - 1
 
 
 class IrAttachment(models.Model):
@@ -49,6 +42,7 @@ class SapIrAttachmentImporter(models.AbstractModel):
         self._import_attachments_for_model(cr, "sale.order", filestore_path)
         self._import_attachments_for_model(cr, "purchase.order", filestore_path)
 
+    @api.model
     def _import_attachments_for_model(self, cr, model_name, filestore_path):
         """
         Handles the import of attachments related to a specific model.
@@ -60,7 +54,7 @@ class SapIrAttachmentImporter(models.AbstractModel):
         """
         _logger.info(f"Importing attachments for {model_name}...")
         table_name = self.env[model_name]._table
-        absentries = self._get_absentries(cr, table_name)
+        absentries = self._get_absentries(table_name)
         if not absentries:
             return
         record_dict = self._get_record_dict(table_name)
@@ -72,6 +66,7 @@ class SapIrAttachmentImporter(models.AbstractModel):
             filestore_path,
         )
 
+    @api.model
     def _get_record_dict(self, tablename):
         """
         Retrieves a dictionary mapping `atcentry` to record `id` for a given table.
@@ -87,11 +82,11 @@ class SapIrAttachmentImporter(models.AbstractModel):
         )
         return {row[1]: row[0] for row in self.env.cr.fetchall()}
 
-    def _get_absentries(self, cr, tablename):
+    @api.model
+    def _get_absentries(self, tablename):
         """
         Retrieves a list of `atcentry` values that do not yet exist in attachments.
 
-        :param cr: Database cursor to execute SQL queries.
         :param tablename: Name of the table to query for `atcentry`.
         :returns: Tuple of `atcentry` values.
         """
@@ -109,6 +104,7 @@ class SapIrAttachmentImporter(models.AbstractModel):
         )
         return tuple(row[0] for row in self.env.cr.fetchall())
 
+    @api.model
     def _get_sap_attachments(self, cr, absentries):
         """
         Fetches SAP attachments corresponding to the provided `absentries`.
@@ -126,6 +122,7 @@ class SapIrAttachmentImporter(models.AbstractModel):
         attachments = cr.dictfetchall()
         return attachments
 
+    @api.model
     def _import_sap_attachments(
         self, sap_attachments, model_name, record_dict, filestore_path
     ):
@@ -146,82 +143,18 @@ class SapIrAttachmentImporter(models.AbstractModel):
             sap_attachments[i : i + chunk_size]
             for i in range(0, len(sap_attachments), chunk_size)
         ]
-        if False:  # len(sap_attachments) > 100:
-            start_method = multiprocessing.get_start_method()
-            multiprocessing.set_start_method("fork", force=True)
-            try:
-                with ProcessPoolExecutor(max_workers=workers) as executor:
-                    futures = [
-                        executor.submit(
-                            self._process_sap_attachments_concurrent,
-                            self.env.cr.dbname,
-                            self.env.uid,
-                            dict(self._context),
-                            chunk,
-                            model_name,
-                            record_dict,
-                            filestore_path,
-                        )
-                        for chunk in chunks
-                    ]
-                    for future in futures:
-                        future.result()
-            finally:
-                multiprocessing.set_start_method(start_method, force=True)
-        else:
-            for chunk in chunks:
-                self._process_sap_attachments(
-                    chunk,
-                    model_name,
-                    record_dict,
-                    filestore_path,
-                )
-                self.env.cr.commit()
-                processed_chunks += 1
-                _logger.info(
-                    f"Processed {processed_chunks * chunk_size} attachments, {max(len(sap_attachments) - processed_chunks * chunk_size, 0)} remaining."
-                )
-
-    @staticmethod
-    def _process_sap_attachments_concurrent(
-        dbname, uid, context, chunk, model_name, record_dict, filestore_path
-    ):
-        """
-        Processes chunks of SAP attachments concurrently in subprocesses.
-
-        :param dbname: Name of the Odoo database.
-        :param uid: User ID to create environment context.
-        :param context: Context dictionary passed to the subprocess.
-        :param chunk: List of SAP attachments broken into chunks.
-        :param model_name: Name of the Odoo model to link attachments to.
-        :param record_dict: Dictionary mapping SAP `atcentry` to Odoo `res_id`.
-        :param filestore_path: Path to the filestore where attachment files are located.
-        :returns: None
-        """
-        tries = 1
-        maxtries = 3
-        while tries < maxtries:
-            with Registry(dbname).cursor() as cr:
-                try:
-                    env = api.Environment(cr, uid, context)
-                    self = env["sap.ir.attachment.importer"]
-                    self._process_sap_attachments(
-                        chunk,
-                        model_name,
-                        record_dict,
-                        filestore_path,
-                    )
-                except psycopg2.errors.SerializationFailure:
-                    if tries < maxtries:
-                        tries += 1
-                        continue
-                    else:
-                        raise
-                except Exception as e:
-                    _logger.error(
-                        "An exception occurred in a subprocess.", exc_info=True
-                    )
-                    raise e
+        for chunk in chunks:
+            self._process_sap_attachments(
+                chunk,
+                model_name,
+                record_dict,
+                filestore_path,
+            )
+            self.env.cr.commit()
+            processed_chunks += 1
+            _logger.info(
+                f"Processed {processed_chunks * chunk_size} attachments, {max(len(sap_attachments) - processed_chunks * chunk_size, 0)} remaining."
+            )
 
     @api.model
     def _process_sap_attachments(

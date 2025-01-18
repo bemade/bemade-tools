@@ -58,7 +58,6 @@ class SapPurchaseOrderImporter(models.AbstractModel):
     @api.model
     def _import_orders_and_rfqs(self, cr):
         imported_docnums = tuple(self._get_imported_docnums())
-        args = []
         where = ""
         args = []
         if imported_docnums:
@@ -128,7 +127,6 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         products_dict = self._get_products_dict()
         terms_dict = self._get_payment_terms_dict()
         carriers_dict = _get_carriers_dict()
-        company_partner = self.env.company.partner_id
         for order in sap_orders:
             partner = self._get_partner(order, contacts_dict, partners_dict)
             terms = terms_dict.get(order["groupnum"], False)

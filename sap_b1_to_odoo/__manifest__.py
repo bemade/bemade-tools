@@ -47,7 +47,7 @@
         "views/sap_database_views.xml",
         "views/sap_field_views.xml",
     ],
-    "assets": {},
+    "external_dependencies": {"python": ["fuzzywuzzy", "python-Levenshtein"]},
     "installable": True,
     "auto_install": False,
 }
