@@ -133,13 +133,6 @@ class SapPurchaseOrderImporter(models.AbstractModel):
             partner = self._get_partner(order, contacts_dict, partners_dict)
             terms = terms_dict.get(order["groupnum"], False)
             carrier = carriers_dict.get(order["trnspcode"])
-            company_has_account = (
-                carrier
-                and carrier
-                in company_partner.carrier_account_ids.mapped("delivery_carrier_id")
-            )
-            billing_mode = "collect" if company_has_account else "ppc"
-
             vals = {
                 "sap_docnum": order["docnum"],
                 "sap_docentry": order["docentry"],
@@ -151,7 +144,6 @@ class SapPurchaseOrderImporter(models.AbstractModel):
                 "notes": f"SAP Order {order['numatcard']}",
                 # "shipping_policy_request": self._get_picking_policy(order),
                 "carrier_id": carrier and carrier.id,
-                "delivery_billing_mode": billing_mode,
                 "order_line": (
                     [
                         Command.create(

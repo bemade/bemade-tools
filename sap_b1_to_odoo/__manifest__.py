@@ -39,6 +39,7 @@
         "customer_product_code",
         "purchase_requisition",
         "purchase_delivery_carrier",
+        "picking_policy_per_customer",
     ],
     "data": [
         "security/ir.model.access.csv",

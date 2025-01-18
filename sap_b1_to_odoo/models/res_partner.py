@@ -157,12 +157,12 @@ class SapResPartnerImporter(models.AbstractModel):
             property_payment_term_id, property_supplier_payment_term_id = (
                 self._get_payment_terms(terms_dict, sap_partner)
             )
-
+            picking_policy = "one" if sap_partner["partdelivr"] == "Y" else "direct"
             partner_vals.append(
                 {
                     "sap_card_code": sap_partner["cardcode"],
                     "sap_atcentry": sap_partner["atcentry"],
-                    "name": sap_partner["cardname"],
+                    "name": fix_quotes(sap_partner["cardname"]),
                     "street": street,
                     "street2": street2,
                     "city": sap_partner["city"] or "",
@@ -180,6 +180,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "property_purchase_currency_id": currency.id,
                     "property_payment_term_id": property_payment_term_id,
                     "property_supplier_payment_term_id": property_supplier_payment_term_id,
+                    "picking_policy": picking_policy,
                 }
             )
 
@@ -225,6 +226,7 @@ class SapResPartnerImporter(models.AbstractModel):
         partners = self._import_ocrd(cr)
         partners |= self._import_crd1(cr)
         partners |= self._import_ocpr(cr)
+        self.env.cr.commit()
         self._link_children_parents()
 
     @api.model
@@ -345,14 +347,12 @@ class SapResPartnerImporter(models.AbstractModel):
     def _get_crd1_partner_vals(self, sap_addresses):
         partner_vals = []
 
-        def _extract_name_street_street2(address, street, address2, address3):
-            # TODO: fix to allow for block with Address, address 2, address 3, street, block as the order
-            #   At least for crd1... check with ocrd and ocpr
+        def _extract_name_street_street2(address, address2, address3, street, block):
             """Addresses in SAP have 4 possible lines that would match with street1
             and street2 from Odoo. Intelligently concatenate depending on which
             lines are set or not set."""
             addressParts = [
-                part for part in [address, street, address2, address3] if part
+                part for part in [address, street, address2, address3, block] if part
             ]
             if len(addressParts) > 3:
                 return addressParts[0], addressParts[1], ", ".join(addressParts[2:])
@@ -366,9 +366,10 @@ class SapResPartnerImporter(models.AbstractModel):
         for sap_address in sap_addresses:
             name, street, street2 = _extract_name_street_street2(
                 sap_address["address"],
-                sap_address["street"],
                 sap_address["address2"],
                 sap_address["address3"],
+                sap_address["street"],
+                sap_address["block"],
             )
             parent_card = sap_address["cardcode"]
             country, state = self._extract_sap_state_country(
@@ -381,7 +382,7 @@ class SapResPartnerImporter(models.AbstractModel):
             type = "delivery" if sap_address["adrestype"] == "S" else "invoice"
             partner_vals.append(
                 {
-                    "name": name,
+                    "name": fix_quotes(name),
                     "street": street,
                     "street2": street2,
                     "city": sap_address["city"],
@@ -398,6 +399,7 @@ class SapResPartnerImporter(models.AbstractModel):
 
     @api.model
     def _link_children_parents(self):
+        _logger.info("Linking children to parents.")
         self.env.cr.execute(
             """
             -- First, let's create a CTE to match children with their parents based on SAP codes
@@ -451,8 +453,6 @@ class SapResPartnerImporter(models.AbstractModel):
 
     def _get_ocpr_partner_vals(self, sap_contacts):
         partner_vals = []
-        countries_dict = self._get_countries_dict()
-        states_dict = self._get_states_dict()
         for sap_contact in sap_contacts:
             partner_vals.append(
                 {
