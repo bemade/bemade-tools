@@ -264,14 +264,14 @@ class SapSaleOrderImporter(models.AbstractModel):
                 lambda account: account.delivery_carrier_id == carrier
             )
             if partner_account:
-                return partner_account, "collect"
+                return partner_account[0], "collect"
             else:
                 sender = self.env.company.partner_id
                 sender_account = sender.carrier_account_ids.filtered(
                     lambda account: account.delivery_carrier_id == carrier
                 )
                 if sender_account:
-                    return sender_account, "ppc"
+                    return sender_account[0], "ppc"
             return False, "ppc"
 
         pricelists = _get_pricelists_dict()
@@ -327,6 +327,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                 "picking_policy": self._get_picking_policy(order),
                 "carrier_id": carrier and carrier.id,
                 "delivery_billing_mode": billing_mode,
+                "carrier_account_id": carrier_account and carrier_account.id,
                 "order_line": (
                     [
                         Command.create(

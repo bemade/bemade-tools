@@ -401,6 +401,7 @@ class SapResPartnerImporter(models.AbstractModel):
     @api.model
     def _link_children_parents(self):
         _logger.info("Linking children to parents.")
+        self.env.flush_all()
         self.env.cr.execute(
             """
             -- First, let's create a CTE to match children with their parents based on SAP codes
