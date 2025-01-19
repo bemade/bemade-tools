@@ -468,6 +468,7 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     @api.model
     def _recompute_delivery_status(self):
+        self.env.flush_all()
         self.env.cr.execute(
             """
             UPDATE sale_order

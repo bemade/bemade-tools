@@ -57,6 +57,7 @@ class SapProductImporter(models.AbstractModel):
 
     @api.model
     def import_inventory(self, cr):
+        self._import_inventory_valuation(cr)
         self._import_stock_quants(cr)
 
     @staticmethod
@@ -258,6 +259,33 @@ class SapProductImporter(models.AbstractModel):
             self.env["stock.quant"].create(vals)
         finally:
             StockQuant._check_kits = real_check_kits
+
+    def _import_inventory_valuation(self, cr):
+        self.env.flush_all()
+        cr.execute(
+            """
+            SELECT oitw.itemcode,oitw.avgprice,oitm.onhand
+            FROM oitw 
+            INNER JOIN oitm ON oitw.itemcode = oitm.itemcode and oitm.onhand > 0
+            """
+        )
+        valuations = cr.dictfetchall()
+        products = self.env["product.template"].search(
+            [("sap_item_code", "in", [val["itemcode"] for val in valuations])]
+        )
+        products_dict = {p.sap_item_code: p for p in products}
+        vals_list = []
+        for val in valuations:
+            product = products_dict[val["itemcode"]]
+            vals = {
+                "company_id": self.env.company.id,
+                "product_id": product.id,
+                "unit_cost": val["avgprice"],
+                "quantity": val["onhand"],
+            }
+            vals_list.append(vals)
+        self.env["stock.valuation.layer"].create(vals_list)
+        self.env.flush_all()
 
     def _delete_all(self):
         self.env.cr.execute(
