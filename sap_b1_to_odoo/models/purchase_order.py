@@ -1,4 +1,5 @@
 from odoo import models, fields, api, Command
+from odoo.tools.sql import SQL
 from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
 import logging
 
@@ -128,16 +129,20 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         terms_dict = self._get_payment_terms_dict()
         carriers_dict = _get_carriers_dict()
         for order in sap_orders:
-            partner = self._get_partner(order, contacts_dict, partners_dict)
+            partner = self._get_partner(
+                order, contacts_dict, partners_dict
+            ).commercial_partner_id
             terms = terms_dict.get(order["groupnum"], False)
             carrier = carriers_dict.get(order["trnspcode"])
+            order_date = order["docdate"].replace(tzinfo=None)
             vals = {
                 "sap_docnum": order["docnum"],
                 "sap_docentry": order["docentry"],
                 "sap_atcentry": order["atcentry"],
                 "partner_id": partner.id,
                 "payment_term_id": terms and terms.id,
-                "date_order": order["docdate"].replace(tzinfo=None),
+                "date_approve": order_date,
+                "date_order": order_date,
                 "date_planned": order["docduedate"].replace(tzinfo=None),
                 "notes": f"SAP Order {order['numatcard']}",
                 # "shipping_policy_request": self._get_picking_policy(order),
@@ -153,10 +158,31 @@ class SapPurchaseOrderImporter(models.AbstractModel):
                     else False
                 ),
             }
-            if order["docstatus"] == "C":
-                vals["invoice_status"] = "invoiced"
             order_vals.append(vals)
         return order_vals
+
+    def _mark_closed_orders_invoiced(self, cr):
+        cr.execute("SELECT docentry FROM opor WHERE docstatus='C'")
+        closed_orders = [order[0] for order in cr.fetchall()]
+        self.env.cr.execute(
+            SQL(
+                """
+        WITH orders AS (SELECT id FROM purchase_order WHERE sap_docentry IN %s)
+        UPDATE purchase_order_line SET qty_invoiced=qty_received
+        WHERE purchase_order_line.id IN (SELECT id FROM orders)
+        """,
+                tuple(closed_orders),
+            )
+        )
+        self.env.cr.execute(
+            SQL(
+                """
+        UPDATE purchase_order SET invoice_status = 'invoiced'
+        WHERE docentry IN %s
+        """,
+                tuple(closed_orders),
+            )
+        )
 
     @api.model
     def _confirm_closed_orders(self, cr):
@@ -166,15 +192,28 @@ class SapPurchaseOrderImporter(models.AbstractModel):
     @api.model
     def _set_received_quantity_on_closed_orders(self, cr):
         closed_orders = self._get_closed_orders_by_table(cr, "opor")
-        orders = self.env["purchase.order"].search(
-            [
-                ("sap_docnum", "in", closed_orders),
-                ("order_line.qty_received_method", "!=", "manual"),
-            ]
-        )
-        for line in orders.order_line:
-            line.qty_received_method = "manual"
-            line.qty_received = line.product_uom_qty
+        sql = """
+        WITH orders AS (SELECT id FROM purchase_order WHERE sap_docnum IN %s)
+        UPDATE purchase_order_line SET qty_received=product_uom_qty
+        WHERE purchase_order_line.order_id IN (SELECT id FROM orders)
+        """
+        self.env.cr.execute(SQL(sql, tuple(closed_orders)))
+
+        sql = """
+        UPDATE purchase_order SET receipt_status = 'full', invoice_status = 'invoiced'
+        WHERE sap_docnum IN %s
+        """
+        self.env.cr.execute(SQL(sql, tuple(closed_orders)))
+
+        # orders = self.env["purchase.order"].search(
+        #     [
+        #         ("sap_docnum", "in", closed_orders),
+        #         ("order_line.qty_received_method", "!=", "manual"),
+        #     ]
+        # )
+        # for line in orders.order_line:
+        #     line.qty_received_method = "manual"
+        #     line.qty_received = line.product_uom_qty
 
     @api.model
     def _cancel_canceled_orders_and_quotations(self, cr):

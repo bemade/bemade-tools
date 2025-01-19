@@ -133,6 +133,12 @@ class SapDatabase(models.Model):
             ).import_orderpoints(cr)
         return self._success_notification()
 
+    def action_import_invoices(self):
+        with self.get_cursor() as cr:
+            self.env["sap.invoice.importer"].with_company(
+                self.env.company
+            ).import_invoices(cr)
+
     def action_import_attachments(self):
         if not self.filestore_path:
             raise UserError(
