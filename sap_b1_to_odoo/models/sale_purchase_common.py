@@ -302,6 +302,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                 confirm_method,
                 open_orders,
             )
+            self.env.flush_all()
             self._set_order_dates(sap_orders, odoo_model)
             self.env.flush_all()
             self.env.cr.commit()

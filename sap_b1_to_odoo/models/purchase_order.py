@@ -236,6 +236,7 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         return vals
 
     def _recompute_receipt_status(self):
+        self.env.flush_all()
         self.env.cr.execute(
             """
             UPDATE purchase_order
