@@ -202,7 +202,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         raise NotImplementedError
 
     @api.model
-    def _confirm_closed_orders_by_table(self, cr, sap_table, odoo_table):
+    def _confirm_closed_orders_by_table(self, cr, sap_table, odoo_table, odoo_model):
         """Mark confirmed orders that are confirmed and closed in SAP. This does NOT
         create delivery orders as the confirmation is just flagged directly in the DB.
         """
@@ -302,29 +302,28 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                 confirm_method,
                 open_orders,
             )
-            self.env.flush_all()
-            self._set_order_dates(sap_orders, odoo_model)
-            self.env.flush_all()
             self.env.cr.commit()
         active_automations.active = True
 
-    def _set_order_dates(self, sap_orders, odoo_model):
+    def _set_order_dates(self, cr, odoo_table, sap_table):
+        cr.execute(
+            SQL("SELECT docnum, docdate, createdate FROM %s", SQL.identifier(sap_table))
+        )
+        sap_orders = cr.fetchall()
+        self._set_order_dates_sub(sap_orders, odoo_table)
+        self.env.cr.commit()
+
+    def _set_order_dates_sub(self, sap_orders, odoo_table):
         self.env.cr.execute("DROP TABLE IF EXISTS sap_order_dates")
         self.env.cr.execute(
-            "CREATE TEMP TABLE sap_order_dates (docnum TEXT, docdate DATE, createdate DATE)"
+            "CREATE TEMP TABLE sap_order_dates (docnum INT, docdate DATE, createdate DATE)"
         )
-        sap_orders = [
-            str(
-                (
-                    order[0],
-                    datetime.strftime(order[1], "%Y-%m-%d"),
-                    datetime.strftime(order[2], "%Y-%m-%d"),
-                )
-            )
-            for order in sap_orders
-        ]
+        values = [(order[0], order[1], order[2]) for order in sap_orders]
+        insert_query = b",".join(
+            self.env.cr.mogrify("(%s, %s, %s)", value) for value in values
+        ).decode("utf-8")
         self.env.cr.execute(
-            f"INSERT INTO sap_order_dates VALUES {', '.join(sap_orders)}"
+            f"INSERT INTO sap_order_dates (docnum, docdate, createdate) VALUES {insert_query}"
         )
         self.env.cr.execute(
             SQL(
@@ -332,8 +331,9 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             UPDATE %s orders
             SET create_date=temp.createdate, date_order=temp.docdate
             FROM sap_order_dates temp
+            WHERE orders.sap_docnum=temp.docnum
             """,
-                SQL.identifier(self.env[odoo_model]._table),
+                SQL.identifier(odoo_table),
             ),
         )
         self.env.cr.commit()

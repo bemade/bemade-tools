@@ -107,7 +107,11 @@ class ProductPricelistImporter(models.AbstractModel):
         self._set_usd_pricelist_partners(cr)
         _logger.info("Importing purchase blankets.")
         purchase_blanket_vals = self._get_purchase_blanket_vals(
-            sap_blanket_orders, sap_blanket_lines_dict, products_dict, partners_dict
+            cr,
+            sap_blanket_orders,
+            sap_blanket_lines_dict,
+            products_dict,
+            partners_dict,
         )
         blankets = self.env["purchase.requisition"].create(purchase_blanket_vals)
         _logger.info(f"Imported {len(blankets)} purchase blankets.")
@@ -271,7 +275,12 @@ class ProductPricelistImporter(models.AbstractModel):
         return vals
 
     def _get_purchase_blanket_vals(
-        self, sap_blanket_orders, sap_blanket_lines_dict, products_dict, partners_dict
+        self,
+        cr,
+        sap_blanket_orders,
+        sap_blanket_lines_dict,
+        products_dict,
+        partners_dict,
     ):
         def _get_status(blanket):
             match blanket["status"]:
@@ -285,6 +294,22 @@ class ProductPricelistImporter(models.AbstractModel):
                     return "cancel"
 
         vals = []
+        cr.execute("SELECT cardcode, dflagrmnt FROM ocrd WHERE dflagrmnt is not null")
+        agreements_to_cardcode = cr.fetchall()
+        partners = self.env["res.partner"].search(
+            [
+                ("sap_card_code", "in", [agr[0] for agr in agreements_to_cardcode]),
+                ("active", "in", [False, True]),
+            ]
+        )
+        cardcode_to_partner_ids_dict = {
+            partner.sap_card_code: partner.id for partner in partners
+        }
+        agreement_partners_dict = {}
+        for agmt in agreements_to_cardcode:
+            agreement_partners_dict.setdefault(agmt[1], []).append(
+                cardcode_to_partner_ids_dict[agmt[0]]
+            )
         for blanket in sap_blanket_orders:
             partner = partners_dict.get(blanket["bpcode"])
             # Only make these for suppliers
@@ -302,6 +327,7 @@ class ProductPricelistImporter(models.AbstractModel):
                 sap_blanket_lines_dict[blanket["absid"]],
                 products_dict,
             )
+            customer_ids = agreement_partners_dict.get(blanket["absid"], [])
             vals.append(
                 {
                     "vendor_id": partner.id,
@@ -312,6 +338,7 @@ class ProductPricelistImporter(models.AbstractModel):
                     "currency_id": currency.id,
                     "line_ids": [Command.create(val) for val in item_vals],
                     "requisition_type": "blanket_order",
+                    "customer_ids": [Command.set(customer_ids)] if customer_ids else [],
                 }
             )
         return vals

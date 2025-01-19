@@ -160,7 +160,11 @@ class SapResPartnerImporter(models.AbstractModel):
         )
         usd_purchase_partners.write({"property_account_payable_id": usd_payable})
         cad_purchase_partners = self.env["res.partner"].search(
-            [("property_purchase_currency_id", "!=", usd_currency)]
+            [
+                "|",
+                ("property_purchase_currency_id", "!=", usd_currency),
+                ("property_purchase_currency_id", "=", False),
+            ]
         )
         _logger.info(
             f"Updating {len(cad_purchase_partners)} CAD purchase partners with account {cad_payable}"
