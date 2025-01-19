@@ -11,3 +11,4 @@ from . import stock_picking
 from . import res_users
 from . import customer_product_code
 from . import ir_attachment
+from . import account_move

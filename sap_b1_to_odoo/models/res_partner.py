@@ -100,6 +100,72 @@ class SapResPartnerImporter(models.AbstractModel):
         partner_ids += self._import_ocpr_concurrent(cr)
         self.env.invalidate_all()
         self._link_children_parents()
+        self._set_payable_receivable_accounts()
+
+    @api.model
+    def _set_payable_receivable_accounts(self):
+        self.env.flush_all()
+        cad_receivable = (
+            self.env["account.account"]
+            .search(
+                [("account_type", "=", "asset_receivable"), ("name", "ilike", "%CDN")]
+            )
+            .id
+        )
+        cad_payable = (
+            self.env["account.account"]
+            .search(
+                [("account_type", "=", "liability_payable"), ("name", "ilike", "%CDN")]
+            )
+            .id
+        )
+        usd_receivable = (
+            self.env["account.account"]
+            .search(
+                [("account_type", "=", "asset_receivable"), ("name", "ilike", "%US")]
+            )
+            .id
+        )
+        usd_payable = (
+            self.env["account.account"]
+            .search(
+                [("account_type", "=", "liability_payable"), ("name", "ilike", "%US")]
+            )
+            .id
+        )
+        usd_currency = self.env["res.currency"].search([("name", "=", "USD")]).id
+        usd_pricelist_partners = self.env["res.partner"].search(
+            [("specific_property_product_pricelist.currency_id", "=", usd_currency)]
+        )
+        _logger.info(
+            f"Updating {len(usd_pricelist_partners)} USD pricelist partners with account {usd_receivable}"
+        )
+        usd_pricelist_partners.write({"property_account_receivable_id": usd_receivable})
+        cad_pricelist_partners = self.env["res.partner"].search(
+            [
+                "|",
+                ("specific_property_product_pricelist.currency_id", "!=", usd_currency),
+                ("specific_property_product_pricelist", "=", False),
+            ]
+        )
+        _logger.info(
+            f"Updating {len(cad_pricelist_partners)} CAD pricelist partners with account {cad_receivable}"
+        )
+        cad_pricelist_partners.write({"property_account_receivable_id": cad_receivable})
+        usd_purchase_partners = self.env["res.partner"].search(
+            [("property_purchase_currency_id", "=", usd_currency)]
+        )
+        _logger.info(
+            f"Updating {len(usd_purchase_partners)} USD purchase partners with account {usd_payable}"
+        )
+        usd_purchase_partners.write({"property_account_payable_id": usd_payable})
+        cad_purchase_partners = self.env["res.partner"].search(
+            [("property_purchase_currency_id", "!=", usd_currency)]
+        )
+        _logger.info(
+            f"Updating {len(cad_purchase_partners)} CAD purchase partners with account {cad_payable}"
+        )
+        cad_purchase_partners.write({"property_account_payable_id": cad_payable})
 
     def _import_ocrd_concurrent(self, cr):
         return self._import_concurrent(
