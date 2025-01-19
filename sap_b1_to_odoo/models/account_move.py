@@ -13,6 +13,7 @@ class AccountMove(models.Model):
     sap_docnum = fields.Integer(index="btree")
     sap_docentry = fields.Integer(index="btree")
     sap_table = fields.Char(index="btree")
+    sap_atcentry = fields.Integer(index="btree")
 
 
 class AccountMoveLine(models.Model):
@@ -114,6 +115,7 @@ class InvoiceImporter(models.AbstractModel):
                 "sap_docentry": order["docentry"],
                 "sap_docnum": order["docnum"],
                 "sap_table": "oinv",
+                "sap_atcentry": order["atcentry"],
                 "invoice_date": order["docdate"],
                 "invoice_date_due": order["docduedate"],
                 "partner_id": partners_dict[order["cardcode"]].id,
@@ -269,6 +271,7 @@ class VendorBillsImporter(models.AbstractModel):
                 "sap_docentry": order["docentry"],
                 "sap_docnum": order["docnum"],
                 "sap_table": "oinv",
+                "sap_atcentry": order["atcentry"],
                 "date": order["docdate"],
                 "invoice_date": order["docdate"],
                 "invoice_date_due": order["docduedate"],

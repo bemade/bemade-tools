@@ -41,6 +41,7 @@ class SapIrAttachmentImporter(models.AbstractModel):
         self._import_attachments_for_model(cr, "product.template", filestore_path)
         self._import_attachments_for_model(cr, "sale.order", filestore_path)
         self._import_attachments_for_model(cr, "purchase.order", filestore_path)
+        self._import_attachments_for_model(cr, "account.move", filestore_path)
 
     @api.model
     def _import_attachments_for_model(self, cr, model_name, filestore_path):
