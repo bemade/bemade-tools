@@ -191,7 +191,7 @@ class ProductPricelistImporter(models.AbstractModel):
             )
         }
         default_pricelists = self.env["product.pricelist"].search(
-            ["name", "ilike", "Default"]
+            [("name", "ilike", "Default")]
         )
         for blanket in sap_blanket_orders:
             partner = partners_dict[blanket["bpcode"]]
