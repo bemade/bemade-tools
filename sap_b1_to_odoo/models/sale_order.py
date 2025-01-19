@@ -183,6 +183,8 @@ class SapSaleOrderImporter(models.AbstractModel):
         )
         _logger.info("Canceling canceled orders and quotations.")
         self._cancel_canceled_orders_quotations(cr)
+        self._set_order_dates(cr, "sale_order", "ordr")
+        self._set_order_dates(cr, "sale_order", "oqut")
         _logger.info("Recomputing delivery status for all orders.")
         self._recompute_delivery_status()
 
@@ -352,7 +354,7 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     @api.model
     def _confirm_closed_orders(self, cr):
-        self._confirm_closed_orders_by_table(cr, "ordr", "sale_order")
+        self._confirm_closed_orders_by_table(cr, "ordr", "sale_order", "sale.order")
         self._set_delivered_qty_for_closed_orders(cr)
 
     @api.model

@@ -100,6 +100,8 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         self._create_orders(
             cr, rfq_pager, "pqt1", "purchase.order", "purchase.order.line"
         )
+        self._set_order_dates(cr, "purchase_order", "opor")
+        self._set_order_dates(cr, "purchase_order", "opqt")
         self._cancel_canceled_orders_and_quotations(cr)
         self._recompute_receipt_status()
 
@@ -186,7 +188,9 @@ class SapPurchaseOrderImporter(models.AbstractModel):
 
     @api.model
     def _confirm_closed_orders(self, cr):
-        self._confirm_closed_orders_by_table(cr, "opor", "purchase_order")
+        self._confirm_closed_orders_by_table(
+            cr, "opor", "purchase_order", "purchase.order"
+        )
         self._set_received_quantity_on_closed_orders(cr)
 
     @api.model
