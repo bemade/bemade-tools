@@ -190,11 +190,25 @@ class ProductPricelistImporter(models.AbstractModel):
                 .mapped("pricelist_id")
             )
         }
+        default_pricelists = self.env["product.pricelist"].search(
+            ["name", "ilike", "Default"]
+        )
         for blanket in sap_blanket_orders:
             partner = partners_dict[blanket["bpcode"]]
             pricelist = pricelists_dict.get(blanket["absid"])
-            if pricelist and partner:
+            if pricelist and pricelist.active and partner:
                 partner.property_product_pricelist = pricelist
+            elif (
+                pricelist
+                and not pricelist.active
+                and partner
+                and pricelist.currency_id != self.env.company.currency_id
+            ):
+                applicable_pricelists = default_pricelists.filtered(
+                    lambda pl: pl.currency_id == pricelist.currency_id
+                )
+                if applicable_pricelists:
+                    partner.property_product_pricelist = applicable_pricelists[0]
 
     @api.model
     def _get_all_sap_blanket_orders(self, cr):
