@@ -215,9 +215,7 @@ class SapProductImporter(models.AbstractModel):
         products = self.env["product.product"].search(
             [("sap_item_code", "!=", False), ("active", "in", [False, True])]
         )
-        _logger.info(
-            f"Importing min/max levels for products: {products.mapped("sap_item_code")}"
-        )
+        _logger.info(f"Importing min/max levels for {len(products)} products.")
         products_dict = {
             p.sap_item_code: p for p in products if p.sap_item_code in codes
         }
@@ -227,7 +225,7 @@ class SapProductImporter(models.AbstractModel):
                 {
                     "product_id": product.id,
                     "product_min_qty": lvl["minlevel"],
-                    "product_max_qty": lvl["maxlevel"],
+                    "product_max_qty": max(lvl["maxlevel"], lvl["minlevel"]),
                 }
             )
 

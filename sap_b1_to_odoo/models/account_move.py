@@ -1,3 +1,5 @@
+from docutils.nodes import bullet_list
+
 from odoo import models, fields, api, Command
 from odoo.tools.sql import SQL
 import logging
@@ -132,15 +134,185 @@ class InvoiceImporter(models.AbstractModel):
         vals = []
         for line in lines:
             order_line_id = order_lines_dict.get((line["docentry"], line["linenum"]))
+            quantity = line["quantity"]
+            unit_price = line["price"]
+            line_total = line["linetotal"]
+            if line_total and not quantity:
+                if unit_price:
+                    quantity = round(line_total / unit_price)
+                else:
+                    quantity = 1
             vals.append(
                 {
                     "sap_line_num": line["linenum"],
                     "sequence": line["linenum"],
                     "product_id": self._get_product(line["itemcode"]),  # always set
-                    "quantity": line["quantity"],
+                    "quantity": quantity,
                     "sale_line_ids": [Command.link(order_line_id)],
                     "price_unit": line["price"],
                     "account_id": self._get_account(line["acctcode"]),
+                }
+            )
+        return vals
+
+    @api.model
+    def _get_product(self, itemcode):
+        if not self.__class__._products_dict:
+            self.__class__._products_dict = {
+                product.sap_item_code: product.id
+                for product in self.env["product.product"].search(
+                    [("sap_item_code", "!=", False)]
+                )
+            }
+        return self.__class__._products_dict.get(itemcode)
+
+    @api.model
+    def _get_account(self, itemcode):
+        if not self.__class__._accounts_dict:
+            self.__class__._accounts_dict = {
+                account.code: account.id
+                for account in self.env["account.account"].search([])
+            }
+        return self.__class__._accounts_dict.get(itemcode)
+
+
+class VendorBillsImporter(models.AbstractModel):
+    _name = "sap.purchase.invoice.importer"
+    _description = "SAP Vendor Bill Importer"
+
+    _products_dict = None
+    _accounts_dict = None
+
+    def import_bills(self, cr):
+        already_imported = self.env["account.move"].search(
+            [("sap_docnum", "!=", False), ("sap_table", "=", "opch")]
+        )
+        currencies_dict = {cur.name: cur for cur in self.env["res.currency"].search([])}
+
+        def _get_currency_id(sap_currency_code):
+            return currencies_dict.get(sap_currency_code, currencies_dict["CAD"]).id
+
+        where = ""
+        args = []
+        if already_imported:
+            where = "WHERE docentry not in %s"
+            args = [tuple(already_imported.mapped("sap_docentry"))]
+        cr.execute(SQL(f"SELECT * FROM opch WHERE docstatus='O' {where}", *args))
+        open_bills = cr.dictfetchall()
+
+        cr.execute(
+            """
+        SELECT * FROM pch1 
+        WHERE pch1.docentry IN (SELECT docentry FROM opch WHERE docstatus='O')
+        """
+        )
+        open_lines = cr.dictfetchall()
+        partners_dict = {
+            partner["sap_card_code"]: partner
+            for partner in self.env["res.partner"].search(
+                [("sap_card_code", "!=", False)]
+            )
+        }
+        bill_lines_dict = {}
+        for line in open_lines:
+            bill_lines_dict.setdefault(line["docentry"], []).append(line)
+        # We are ignoring the paid_to_date field because only one bill seems to have
+        # a partial payment. This can easily be entered manually.
+
+        cr.execute(
+            """
+            SELECT 
+                PCH1.DocEntry AS InvoiceDocEntry,
+                PCH1.LineNum AS InvoiceLineNum,
+                POR1.DocEntry AS SalesOrderDocEntry,
+                POR1.LineNum AS SalesOrderLineNum
+            FROM 
+                PCH1
+            INNER JOIN 
+                PDN1 
+                ON PCH1.BaseEntry = PDN1.DocEntry 
+                AND PCH1.BaseLine = PDN1.LineNum 
+                AND PCH1.BaseType = 20
+            INNER JOIN 
+                POR1 
+                ON PDN1.BaseEntry = POR1.DocEntry 
+                AND PDN1.BaseLine = POR1.LineNum 
+                AND PDN1.BaseType = 22
+            """
+        )
+        bill_sale_rel_lines = cr.fetchall()
+        po_lines = self.env["purchase.order.line"].search_read(
+            [("sap_docentry", "!=", False)], ["id", "sap_docentry", "sap_linenum"]
+        )
+        po_lines_dict = {
+            (line["sap_docentry"], line["sap_linenum"]): line["id"] for line in po_lines
+        }
+        bill_line_to_po_id_dict = {
+            (row[0], row[1]): po_lines_dict.get((row[2], row[3]))
+            for row in bill_sale_rel_lines
+        }
+        bill_vals = []
+        _logger.info(f"Creating values for {len(open_bills)} bills...")
+        for order in open_bills:
+            lines = []
+            if order["docentry"] in bill_lines_dict:
+                lines = [
+                    Command.create(vals)
+                    for vals in self._get_line_vals(
+                        bill_lines_dict[order["docentry"]],
+                        bill_line_to_po_id_dict,
+                        order["docduedate"],
+                    )
+                ]
+
+            vals = {
+                "sap_docentry": order["docentry"],
+                "sap_docnum": order["docnum"],
+                "sap_table": "oinv",
+                "date": order["docdate"],
+                "invoice_date": order["docdate"],
+                "invoice_date_due": order["docduedate"],
+                "partner_id": partners_dict[order["cardcode"]].id,
+                "currency_id": _get_currency_id(order["doccur"]),
+                "line_ids": lines,
+                "move_type": "in_invoice",
+            }
+            bill_vals.append(vals)
+        _logger.info(f"Creating {len(bill_vals)} bills...")
+        bills = self.env["account.move"].create(bill_vals)
+        _logger.info(
+            f"Created {len(bills)} bills with {len(bills.mapped("line_ids"))}."
+        )
+        bills.action_post()
+
+    @api.model
+    def _get_line_vals(self, lines, order_lines_dict, due_date):
+        vals = []
+        default_account = (
+            self.env["account.journal"]
+            .search([("type", "=", "purchase")], limit=1)
+            .default_account_id.id
+        )
+        for line in lines:
+            order_line_id = order_lines_dict.get((line["docentry"], line["linenum"]))
+            quantity = line["quantity"]
+            unit_price = line["price"]
+            line_total = line["linetotal"]
+            if line_total and not quantity:
+                if unit_price:
+                    quantity = round(line_total / unit_price)
+                else:
+                    quantity = 1
+            vals.append(
+                {
+                    "sap_line_num": line["linenum"],
+                    "sequence": line["linenum"],
+                    "product_id": self._get_product(line["itemcode"]),  # always set
+                    "quantity": quantity,
+                    "purchase_line_id": order_line_id,
+                    "price_unit": line["price"],
+                    "account_id": self._get_account(line["acctcode"])
+                    or default_account,
                 }
             )
         return vals
