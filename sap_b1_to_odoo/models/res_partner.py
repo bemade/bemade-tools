@@ -4,7 +4,7 @@ import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
 from odoo.tools.sql import SQL
-
+from odoo.tools import email_normalize
 from odoo import models, fields, api, Command
 from odoo.modules.registry import Registry
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
@@ -229,6 +229,8 @@ class SapResPartnerImporter(models.AbstractModel):
                 self._get_payment_terms(terms_dict, sap_partner)
             )
             picking_policy = "one" if sap_partner["partdelivr"] == "Y" else "direct"
+            email = fix_quotes(sap_partner["e_mail"])
+            email = email_normalize(email)
             partner_vals.append(
                 {
                     "sap_card_code": sap_partner["cardcode"],
@@ -243,7 +245,7 @@ class SapResPartnerImporter(models.AbstractModel):
                     "sap_parent_card": sap_partner["fathercard"] or False,
                     "sap_partner_type": sap_partner["cardtype"],
                     "phone": sap_partner["phone1"] or sap_partner["phone2"],
-                    "email": sap_partner["e_mail"],
+                    "email": email,
                     "is_company": True,
                     "company_id": self.env.company.id,
                     "comment": sap_partner["notes"],
@@ -267,6 +269,8 @@ class SapResPartnerImporter(models.AbstractModel):
                 sap_partner["mailblock"],
             )
             user = users_dict.get(sap_partner["slpcode"], False)
+            email = fix_quotes(sap_partner["e_mail"])
+            email = email_normalize(email)
             if (street or street2) and country and state:
                 partner_vals.append(
                     {
@@ -282,7 +286,7 @@ class SapResPartnerImporter(models.AbstractModel):
                         "sap_parent_card": sap_partner["cardcode"],
                         "is_company": False,
                         "phone": sap_partner["phone1"] or sap_partner["phone2"],
-                        "email": sap_partner["e_mail"],
+                        "email": email,
                         "type": "delivery",
                         "company_id": self.env.company.id,
                         "comment": sap_partner["notes"],
@@ -333,7 +337,9 @@ class SapResPartnerImporter(models.AbstractModel):
             _logger.warning(f"Could not find country with code {country} in Odoo")
         odoo_state = self._get_state(states_dict, state, country)
         if not odoo_state and state:
-            _logger.warning(f"Could not find state with code {state} for country {country}")
+            _logger.warning(
+                f"Could not find state with code {state} for country {country}"
+            )
         return odoo_country, odoo_state
 
     @api.model
@@ -533,13 +539,15 @@ class SapResPartnerImporter(models.AbstractModel):
     def _get_ocpr_partner_vals(self, sap_contacts):
         partner_vals = []
         for sap_contact in sap_contacts:
+            email = fix_quotes(sap_contact["e_maill"])
+            email = email_normalize(email)
             partner_vals.append(
                 {
                     "name": fix_quotes(sap_contact["name"]),
                     "sap_cntct_code": sap_contact["cntctcode"],
                     "sap_parent_card": sap_contact["cardcode"],
                     "is_company": False,
-                    "email": sap_contact["e_maill"],
+                    "email": email,
                     "phone": sap_contact["tel1"] or sap_contact["tel2"],
                     "mobile": sap_contact["cellolar"],
                     "active": sap_contact["active"] == "Y",

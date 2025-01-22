@@ -20,6 +20,8 @@ class AccountMoveLine(models.Model):
     _inherit = "account.move.line"
 
     sap_line_num = fields.Integer(index="btree")
+    sap_aftlinenum = fields.Integer(index="btree")
+    sap_lineseq = fields.Integer(index="btree")
 
 
 class InvoiceImporter(models.AbstractModel):
@@ -50,9 +52,49 @@ class InvoiceImporter(models.AbstractModel):
             """
         SELECT * FROM inv1 
         WHERE inv1.docentry IN (SELECT docentry FROM oinv WHERE docstatus='O')
+        ORDER BY inv1.docentry, inv1.linenum
         """
         )
         open_lines = cr.dictfetchall()
+
+        # Fetch text lines from INV10
+        cr.execute(
+            """
+            SELECT 
+                docentry,
+                aftlinenum,
+                lineseq,
+                ordernum,
+                linetext
+            FROM inv10
+            WHERE inv10.docentry IN (SELECT docentry FROM oinv WHERE docstatus='O')
+            ORDER BY aftlinenum, lineseq
+            """
+        )
+        text_lines = cr.dictfetchall()
+        # Add text lines to open_lines
+        for line in text_lines:
+            # INV10 uses aftlinenum to specify which line to insert after
+            # and lineseq to order multiple text lines at the same position
+            line["sap_line_num"] = None  # Text lines don't have a line_num
+            line["sap_aftlinenum"] = line[
+                "aftlinenum"
+            ]  # Store which line to insert after
+            line["sap_lineseq"] = line["lineseq"]  # Store sequence within position
+            open_lines.append(line)
+
+        # Sort all lines by their position and sequence
+        open_lines.sort(
+            key=lambda x: (
+                (
+                    x.get("linenum")
+                    if x.get("linenum") is not None
+                    else x.get("aftlinenum")
+                ),
+                x.get("lineseq") or 0,
+            )
+        )
+
         partners_dict = {
             partner["sap_card_code"]: partner
             for partner in self.env["res.partner"].search(
@@ -62,8 +104,6 @@ class InvoiceImporter(models.AbstractModel):
         invoice_lines_dict = {}
         for line in open_lines:
             invoice_lines_dict.setdefault(line["docentry"], []).append(line)
-        # We are ignoring the paid_to_date field because only one invoice seems to have
-        # a partial payment. This can easily be entered manually.
 
         cr.execute(
             """
@@ -87,11 +127,18 @@ class InvoiceImporter(models.AbstractModel):
             """
         )
         invoice_sale_rel_lines = cr.fetchall()
+        # Only get product lines (where sap_line_num is set)
         so_lines = self.env["sale.order.line"].search_read(
-            [("sap_docentry", "!=", False)], ["id", "sap_docentry", "sap_linenum"]
+            [
+                ("sap_docentry", "!=", False),
+                ("sap_line_num", "!=", False),
+                ("sap_table", "=", "rdr1"),
+            ],
+            ["id", "sap_docentry", "sap_line_num"],
         )
         so_lines_dict = {
-            (line["sap_docentry"], line["sap_linenum"]): line["id"] for line in so_lines
+            (line["sap_docentry"], line["sap_line_num"]): line["id"]
+            for line in so_lines
         }
         invoice_line_to_so_id_dict = {
             (row[0], row[1]): so_lines_dict.get((row[2], row[3]))
@@ -134,8 +181,27 @@ class InvoiceImporter(models.AbstractModel):
     @api.model
     def _get_line_vals(self, lines, order_lines_dict, due_date):
         vals = []
-        for line in lines:
-            order_line_id = order_lines_dict.get((line["docentry"], line["linenum"]))
+        # First sort lines by their position and sequence
+        sorted_lines = sorted(
+            lines,
+            key=lambda x: (
+                (
+                    x.get("linenum")
+                    if x.get("linenum") is not None
+                    else x.get("aftlinenum")
+                ),
+                x.get("lineseq") or 0,
+            ),
+        )
+
+        for i, line in enumerate(sorted_lines, 1):
+            # Only try to link product lines (where linenum is set)
+            order_line_id = None
+            if line.get("linenum"):
+                order_line_id = order_lines_dict.get(
+                    (line["docentry"], line["linenum"])
+                )
+
             quantity = line["quantity"]
             unit_price = line["price"]
             line_total = line["linetotal"]
@@ -144,17 +210,36 @@ class InvoiceImporter(models.AbstractModel):
                     quantity = round(line_total / unit_price)
                 else:
                     quantity = 1
-            vals.append(
-                {
-                    "sap_line_num": line["linenum"],
-                    "sequence": line["linenum"],
-                    "product_id": self._get_product(line["itemcode"]),  # always set
-                    "quantity": quantity,
-                    "sale_line_ids": [Command.link(order_line_id)],
-                    "price_unit": line["price"],
-                    "account_id": self._get_account(line["acctcode"]),
-                }
-            )
+
+            line_vals = {
+                "sequence": i
+                * 100,  # Use incremental sequence based on sorted position
+                "quantity": quantity,
+                "price_unit": line["price"],
+            }
+
+            # Handle product lines vs text lines
+            if line.get("linenum"):  # Product line
+                line_vals.update(
+                    {
+                        "sap_line_num": line["linenum"],
+                        "product_id": self._get_product(line["itemcode"]),
+                        "account_id": self._get_account(line["acctcode"]),
+                    }
+                )
+                if order_line_id:
+                    line_vals["sale_line_ids"] = [Command.link(order_line_id)]
+            else:  # Text line
+                line_vals.update(
+                    {
+                        "display_type": "line_note",
+                        "name": line["linetext"],
+                        "sap_aftlinenum": line["aftlinenum"],
+                        "sap_lineseq": line["lineseq"],
+                    }
+                )
+
+            vals.append(line_vals)
         return vals
 
     @api.model
@@ -206,9 +291,43 @@ class VendorBillsImporter(models.AbstractModel):
             """
         SELECT * FROM pch1 
         WHERE pch1.docentry IN (SELECT docentry FROM opch WHERE docstatus='O')
+        ORDER BY pch1.docentry, pch1.linenum
         """
         )
         open_lines = cr.dictfetchall()
+
+        # Fetch text lines from PCH10
+        cr.execute(
+            """
+            SELECT * FROM pch10
+            WHERE pch10.docentry IN (SELECT docentry FROM opch WHERE docstatus='O')
+            ORDER BY aftlinenum, lineseq
+            """
+        )
+        text_lines = cr.dictfetchall()
+        # Add text lines to open_lines
+        for line in text_lines:
+            # PCH10 uses aftlinenum to specify which line to insert after
+            # and lineseq to order multiple text lines at the same position
+            line["sap_line_num"] = None  # Text lines don't have a line_num
+            line["sap_aftlinenum"] = line[
+                "aftlinenum"
+            ]  # Store which line to insert after
+            line["sap_lineseq"] = line["lineseq"]  # Store sequence within position
+            open_lines.append(line)
+
+        # Sort all lines by their position and sequence
+        open_lines.sort(
+            key=lambda x: (
+                (
+                    x.get("linenum")
+                    if x.get("linenum") is not None
+                    else x.get("aftlinenum")
+                ),
+                x.get("lineseq") or 0,
+            )
+        )
+
         partners_dict = {
             partner["sap_card_code"]: partner
             for partner in self.env["res.partner"].search(
@@ -226,32 +345,39 @@ class VendorBillsImporter(models.AbstractModel):
             SELECT 
                 PCH1.DocEntry AS InvoiceDocEntry,
                 PCH1.LineNum AS InvoiceLineNum,
-                POR1.DocEntry AS SalesOrderDocEntry,
-                POR1.LineNum AS SalesOrderLineNum
+                POR1.DocEntry AS PurchaseOrderDocEntry,
+                POR1.LineNum AS PurchaseOrderLineNum
             FROM 
                 PCH1
             INNER JOIN 
                 PDN1 
                 ON PCH1.BaseEntry = PDN1.DocEntry 
                 AND PCH1.BaseLine = PDN1.LineNum 
-                AND PCH1.BaseType = 20
+                AND PCH1.BaseType = 20 -- Goods Receipt POs have BaseType = 20
             INNER JOIN 
                 POR1 
                 ON PDN1.BaseEntry = POR1.DocEntry 
                 AND PDN1.BaseLine = POR1.LineNum 
-                AND PDN1.BaseType = 22
+                AND PDN1.BaseType = 22 -- Purchase Orders have BaseType = 22
             """
         )
-        bill_sale_rel_lines = cr.fetchall()
+        invoice_po_rel_lines = cr.fetchall()
+        # Only get product lines (where sap_line_num is set)
         po_lines = self.env["purchase.order.line"].search_read(
-            [("sap_docentry", "!=", False)], ["id", "sap_docentry", "sap_linenum"]
+            [
+                ("sap_docentry", "!=", False),
+                ("sap_line_num", "!=", False),
+                ("sap_table", "=", "por1"),
+            ],
+            ["id", "sap_docentry", "sap_line_num"],
         )
         po_lines_dict = {
-            (line["sap_docentry"], line["sap_linenum"]): line["id"] for line in po_lines
+            (line["sap_docentry"], line["sap_line_num"]): line["id"]
+            for line in po_lines
         }
-        bill_line_to_po_id_dict = {
+        invoice_line_to_po_id_dict = {
             (row[0], row[1]): po_lines_dict.get((row[2], row[3]))
-            for row in bill_sale_rel_lines
+            for row in invoice_po_rel_lines
         }
         bill_vals = []
         _logger.info(f"Creating values for {len(open_bills)} bills...")
@@ -262,7 +388,7 @@ class VendorBillsImporter(models.AbstractModel):
                     Command.create(vals)
                     for vals in self._get_line_vals(
                         bill_lines_dict[order["docentry"]],
-                        bill_line_to_po_id_dict,
+                        invoice_line_to_po_id_dict,
                         order["docduedate"],
                     )
                 ]
@@ -270,7 +396,7 @@ class VendorBillsImporter(models.AbstractModel):
             vals = {
                 "sap_docentry": order["docentry"],
                 "sap_docnum": order["docnum"],
-                "sap_table": "oinv",
+                "sap_table": "opch",
                 "sap_atcentry": order["atcentry"],
                 "date": order["docdate"],
                 "invoice_date": order["docdate"],
@@ -296,8 +422,27 @@ class VendorBillsImporter(models.AbstractModel):
             .search([("type", "=", "purchase")], limit=1)
             .default_account_id.id
         )
-        for line in lines:
-            order_line_id = order_lines_dict.get((line["docentry"], line["linenum"]))
+        # First sort lines by their position and sequence
+        sorted_lines = sorted(
+            lines,
+            key=lambda x: (
+                (
+                    x.get("linenum")
+                    if x.get("linenum") is not None
+                    else x.get("aftlinenum")
+                ),
+                x.get("lineseq") or 0,
+            ),
+        )
+
+        for i, line in enumerate(sorted_lines, 1):
+            # Only try to link product lines (where linenum is set)
+            order_line_id = None
+            if line.get("linenum"):
+                order_line_id = order_lines_dict.get(
+                    (line["docentry"], line["linenum"])
+                )
+
             quantity = line["quantity"]
             unit_price = line["price"]
             line_total = line["linetotal"]
@@ -306,18 +451,37 @@ class VendorBillsImporter(models.AbstractModel):
                     quantity = round(line_total / unit_price)
                 else:
                     quantity = 1
-            vals.append(
-                {
-                    "sap_line_num": line["linenum"],
-                    "sequence": line["linenum"],
-                    "product_id": self._get_product(line["itemcode"]),  # always set
-                    "quantity": quantity,
-                    "purchase_line_id": order_line_id,
-                    "price_unit": line["price"],
-                    "account_id": self._get_account(line["acctcode"])
-                    or default_account,
-                }
-            )
+
+            line_vals = {
+                "sequence": i
+                * 100,  # Use incremental sequence based on sorted position
+                "quantity": quantity,
+                "price_unit": line["price"],
+            }
+
+            # Handle product lines vs text lines
+            if line.get("linenum"):  # Product line
+                line_vals.update(
+                    {
+                        "sap_line_num": line["linenum"],
+                        "product_id": self._get_product(line["itemcode"]),
+                        "account_id": self._get_account(line["acctcode"])
+                        or default_account,
+                    }
+                )
+                if order_line_id:
+                    line_vals["purchase_line_id"] = order_line_id
+            else:  # Text line
+                line_vals.update(
+                    {
+                        "display_type": "line_note",
+                        "name": line["linetext"],
+                        "sap_aftlinenum": line["aftlinenum"],
+                        "sap_lineseq": line["lineseq"],
+                    }
+                )
+
+            vals.append(line_vals)
         return vals
 
     @api.model

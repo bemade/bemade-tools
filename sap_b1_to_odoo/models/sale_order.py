@@ -30,27 +30,37 @@ class SalesOrder(models.Model):
 
 class SaleOrderLine(models.Model):
     _inherit = "sale.order.line"
-    sap_docentry = fields.Integer(
-        index="btree",
-        related="order_id.sap_docentry",
-        store=True,
-    )
-    sap_linenum = fields.Integer(index="btree")
+    sap_line_num = fields.Integer(index="btree")
     sap_aftlinenum = fields.Integer(index="btree")
+    sap_lineseq = fields.Integer(index="btree")
+    sap_docentry = fields.Integer(
+        index="btree", related="order_id.sap_docentry", store=True
+    )
     sap_table = fields.Char(index="btree")
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            _logger.info(
+                "Creating sale order line with sap_line_num=%s, sap_aftlinenum=%s, sap_lineseq=%s",
+                vals.get("sap_line_num"),
+                vals.get("sap_aftlinenum"),
+                vals.get("sap_lineseq"),
+            )
+        return super().create(vals_list)
 
     _sql_constraints = [
         (
             "sap_line_type_check",
             """CHECK(
-                (sap_linenum IS NOT NULL AND sap_aftlinenum IS NULL) OR 
-                (sap_linenum IS NULL AND sap_aftlinenum IS NOT NULL)
+                (sap_line_num IS NOT NULL AND sap_aftlinenum IS NULL) OR 
+                (sap_line_num IS NULL AND sap_aftlinenum IS NOT NULL)
             )""",
-            "A line must have either a linenum (for product lines) or an aftlinenum (for text lines), but not both.",
+            "A line must have either a line_num (for product lines) or an aftlinenum (for text lines), but not both.",
         ),
         (
             "sap_line_docentry_table_unique",
-            "UNIQUE(sap_linenum, sap_aftlinenum, sap_docentry, sap_table)",
+            "UNIQUE(sap_line_num, sap_aftlinenum, sap_lineseq, sap_docentry, sap_table)",
             "Another line with this line number and docentry already exists for this SAP table.",
         ),
     ]

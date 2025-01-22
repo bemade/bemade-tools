@@ -21,8 +21,9 @@ class PurchaseOrder(models.Model):
 class PurchaseOrderLine(models.Model):
     _inherit = "purchase.order.line"
 
-    sap_linenum = fields.Integer(index="btree")
+    sap_line_num = fields.Integer(index="btree")
     sap_aftlinenum = fields.Integer(index="btree")
+    sap_lineseq = fields.Integer(index="btree")
     sap_docentry = fields.Integer(
         related="order_id.sap_docentry",
         store=True,
@@ -34,16 +35,16 @@ class PurchaseOrderLine(models.Model):
 
     _sql_constraints = [
         (
-            "sap_line_type_check",
-            """CHECK(
-                (sap_linenum IS NOT NULL AND sap_aftlinenum IS NULL) OR 
-                (sap_linenum IS NULL AND sap_aftlinenum IS NOT NULL)
+            "check_sap_line_num",
+            """CHECK (
+                (sap_line_num IS NOT NULL AND sap_aftlinenum IS NULL AND sap_lineseq IS NULL) OR 
+                (sap_line_num IS NULL AND sap_aftlinenum IS NOT NULL AND sap_lineseq IS NOT NULL)
             )""",
-            "A line must have either a linenum (for product lines) or an aftlinenum (for text lines), but not both.",
+            "A line must either have a SAP line number or an after line number and sequence, but not both.",
         ),
         (
             "sap_line_docentry_table_unique",
-            "UNIQUE(sap_linenum, sap_aftlinenum, sap_docentry, sap_table)",
+            "UNIQUE(sap_line_num, sap_aftlinenum, sap_lineseq, sap_docentry, sap_table)",
             "Another line with this line number and docentry already exists for this SAP table.",
         ),
     ]
