@@ -2,11 +2,46 @@
 
 from odoo import models, fields, api
 from odoo.tools.sql import SQL
+from odoo.tools import mute_logger
 import os
 import logging
 import base64
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
+from odoo.modules.registry import Registry
 
 _logger = logging.getLogger(__name__)
+max_workers = os.cpu_count() - 1
+
+
+def _process_attachments_concurrent(
+    dbname, uid, context, chunk, model_name, record_dict, filestore_path
+):
+    """Worker function to process attachments in a separate process."""
+    _logger.info(f"Processing {len(chunk)} attachments in subprocess")
+    with Registry(dbname).cursor() as cr:
+        with mute_logger("odoo.addons.mail.models.mail_thread"), mute_logger(
+            "extract_msg.msg_classes.message_base"
+        ), mute_logger("extract_msg.utils"), mute_logger("extract_msg.msg_classes.msg"):
+            env = api.Environment(cr, uid, context)
+            vals_list = []
+            for attachment in chunk:
+                file_path = os.path.join(
+                    filestore_path, f"{attachment['filename']}.{attachment['fileext']}"
+                )
+                with open(file_path, "rb") as file:
+                    file_data = file.read()
+                vals = {
+                    "name": f"{attachment['filename']}.{attachment['fileext']}",
+                    "res_model": model_name,
+                    "res_id": record_dict.get(attachment["absentry"]),
+                    "type": "binary",
+                    "sap_absentry": attachment["absentry"],
+                    "datas": base64.b64encode(file_data),
+                }
+                vals_list.append(vals)
+            env["ir.attachment"].create(vals_list).ids
+            env.cr.commit()
 
 
 class IrAttachment(models.Model):
@@ -54,18 +89,19 @@ class SapIrAttachmentImporter(models.AbstractModel):
         :returns: None
         """
         _logger.info(f"Importing attachments for {model_name}...")
-        table_name = self.env[model_name]._table
-        absentries = self._get_absentries(table_name)
-        if not absentries:
-            return
-        record_dict = self._get_record_dict(table_name)
-        sap_attachments = self._get_sap_attachments(cr, absentries)
-        self._import_sap_attachments(
-            sap_attachments,
-            model_name,
-            record_dict,
-            filestore_path,
-        )
+        with mute_logger("odoo.addons.mail.models.mail_thread"):
+            table_name = self.env[model_name]._table
+            absentries = self._get_absentries(table_name)
+            if not absentries:
+                return
+            record_dict = self._get_record_dict(table_name)
+            sap_attachments = self._get_sap_attachments(cr, absentries)
+            self._import_sap_attachments(
+                sap_attachments,
+                model_name,
+                record_dict,
+                filestore_path,
+            )
 
     @api.model
     def _get_record_dict(self, tablename):
@@ -128,7 +164,7 @@ class SapIrAttachmentImporter(models.AbstractModel):
         self, sap_attachments, model_name, record_dict, filestore_path
     ):
         """
-        Imports the SAP attachments by creating Odoo attachment records.
+        Imports the SAP attachments by creating Odoo attachment records using multiprocessing.
 
         :param sap_attachments: List of SAP attachments to import.
         :param model_name: Name of the Odoo model to link attachments to.
@@ -138,53 +174,43 @@ class SapIrAttachmentImporter(models.AbstractModel):
         """
         if len(sap_attachments) == 0:
             return self.env[model_name]
-        processed_chunks = 0
-        chunk_size = 500
+
+        # Split work into chunks
+        chunk_size = min(500, len(sap_attachments) // max_workers + 1)
         chunks = [
             sap_attachments[i : i + chunk_size]
             for i in range(0, len(sap_attachments), chunk_size)
         ]
-        for chunk in chunks:
-            self._process_sap_attachments(
-                chunk,
-                model_name,
-                record_dict,
-                filestore_path,
-            )
-            self.env.cr.commit()
-            processed_chunks += 1
-            _logger.info(
-                f"Processed {processed_chunks * chunk_size} attachments, {max(len(sap_attachments) - processed_chunks * chunk_size, 0)} remaining."
-            )
 
-    @api.model
-    def _process_sap_attachments(
-        self, sap_attachments, model_name, record_dict, filestore_path
-    ):
-        """
-        Processes SAP attachments and creates corresponding Odoo attachment records.
+        _logger.info(
+            f"Processing {len(sap_attachments)} attachments using {max_workers} processes"
+        )
 
-        :param sap_attachments: List of SAP attachments to process.
-        :param model_name: Name of the Odoo model to link attachments to.
-        :param record_dict: Dictionary mapping SAP `atcentry` to Odoo `res_id`.
-        :param filestore_path: Path to the filestore where attachment files are located.
-        :returns: None
-        """
-        vals_list = []
-        for attachment in sap_attachments:
-            file_path = os.path.join(
-                filestore_path, f"{attachment['filename']}.{attachment['fileext']}"
-            )
-            with open(file_path, "rb") as file:
-                file_data = file.read()
-            vals = {
-                "name": f"{attachment["filename"]}.{attachment["fileext"]}",
-                "res_model": model_name,
-                "res_id": record_dict.get(attachment["absentry"]),
-                "type": "binary",
-                "sap_absentry": attachment["absentry"],
-                "datas": base64.b64encode(file_data),
-            }
-            vals_list.append(vals)
-        self.env["ir.attachment"].create(vals_list)
-        self.env.cr.commit()
+        # Save and restore the start method to avoid conflicts
+        spawn_method = multiprocessing.get_start_method()
+        multiprocessing.set_start_method("fork", force=True)
+
+        try:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        _process_attachments_concurrent,
+                        self.env.cr.dbname,
+                        self.env.uid,
+                        dict(self.env.context),
+                        chunk,
+                        model_name,
+                        record_dict,
+                        filestore_path,
+                    )
+                    for chunk in chunks
+                ]
+
+                for i, future in enumerate(futures, 1):
+                    future.result()
+                    _logger.info(f"Processed chunk {i}/{len(chunks)}")
+                    self.env.cr.commit()
+
+            return self.env[model_name]
+        finally:
+            multiprocessing.set_start_method(spawn_method, force=True)
