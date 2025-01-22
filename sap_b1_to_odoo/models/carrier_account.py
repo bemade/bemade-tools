@@ -176,7 +176,9 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
         for account in accounts:
             partner = partners_dict.get(account["cardcode"])
             partner_to_use = (
-                partner if partner.sap_partner_type != "S" else company_partner
+                partner
+                if partner and partner.sap_partner_type != "S"
+                else company_partner
             )
             vals = {
                 "account_number": account["account_number"],
