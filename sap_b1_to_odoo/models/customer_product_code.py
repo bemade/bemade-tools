@@ -25,7 +25,7 @@ class SapCustomerProductCodeImporter(models.AbstractModel):
     def _get_products_dict(self, sap_codes):
         item_codes = tuple(code["itemcode"] for code in sap_codes)
         sql = SQL(
-            "SELECT id, sap_item_code FROM product_product WHERE sap_item_code in %s",
+            "SELECT id, sap_item_code FROM product_template WHERE sap_item_code in %s",
             item_codes,
         )
         self.env.cr.execute(sql)

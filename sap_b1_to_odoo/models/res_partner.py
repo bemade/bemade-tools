@@ -318,15 +318,22 @@ class SapResPartnerImporter(models.AbstractModel):
 
     @api.model
     def _get_states_dict(self):
-        return {
-            state.country_id.code: {state.code: state}
-            for state in self.env["res.country.state"].search([])
-        }
+        states = self.env["res.country.state"].search([])
+        result = {}
+        for state in states:
+            if state.country_id.code not in result:
+                result[state.country_id.code] = {}
+            result[state.country_id.code][state.code] = state
+        return result
 
     @api.model
     def _extract_sap_state_country(self, country, state, country_dict, states_dict):
         odoo_country = country_dict.get(country)
+        if not odoo_country:
+            _logger.warning(f"Could not find country with code {country} in Odoo")
         odoo_state = self._get_state(states_dict, state, country)
+        if not odoo_state and state:
+            _logger.warning(f"Could not find state with code {state} for country {country}")
         return odoo_country, odoo_state
 
     @api.model
