@@ -38,28 +38,6 @@ class SaleOrderLine(models.Model):
     )
     sap_table = fields.Char(index="btree")
 
-    @api.model_create_multi
-    def create(self, vals_list):
-        for vals in vals_list:
-            if vals.get("display_type") == "line_note":
-                _logger.info(
-                    f"Created note line with lineseq: {vals['sap_lineseq']}, aftlinenum: {vals['sap_aftlinenum']}, linenum: {vals['sap_line_num']}, "
-                    f"docentry: {vals['sap_docentry']}, table: {vals['sap_table']}."
-                )
-            elif vals.get("display_type") != "line_note":  # Product lines
-                _logger.info(
-                    "Product line values: sap_line_num=%s, sap_aftlinenum=%s, sap_lineseq=%s, "
-                    "sap_docentry=%s, sap_table=%s, product_id=%s",
-                    vals.get("sap_line_num"),
-                    vals.get("sap_aftlinenum"),
-                    vals.get("sap_lineseq"),
-                    vals.get("sap_docentry"),
-                    vals.get("sap_table"),
-                    vals.get("product_id"),
-                )
-        res = super().create(vals_list)
-        return res
-
     _sql_constraints = [
         (
             "sap_line_type_check",
