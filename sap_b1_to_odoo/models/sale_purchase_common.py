@@ -7,6 +7,7 @@ from odoo import models, fields, api
 from odoo.modules.registry import Registry
 from odoo.sql_db import SQL
 from datetime import datetime
+import pytz
 
 _logger = logging.getLogger(__name__)
 workers = os.cpu_count() - 1
@@ -18,13 +19,27 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
 
     @api.model
     def _get_row_vals(self, row, products_dict, sap_table):
+        # Handle text lines from RDR10/POR10
+        if "linetext" in row:  # This is a text line
+            return {
+                "display_type": "line_note",
+                "name": row["linetext"],
+                "product_id": False,
+                "product_uom_qty": 0.0,
+                "price_unit": 0.0,
+                "sap_aftlinenum": row.get("lineseq", 0),  # Use lineseq for text lines
+                "sap_docentry": row["docentry"],
+                "sap_table": sap_table,
+            }
+            
+        # Handle product lines (existing code)
         product = products_dict.get(row["itemcode"])
         if product:
             return {
                 "product_id": product.id,
                 "product_uom_qty": row["quantity"] if row["quantity"] else 0.0,
                 "price_unit": row["price"],
-                "discount": row["discprcnt"],  # Likely problematic
+                "discount": row["discprcnt"],
                 "sap_linenum": row["linenum"],
                 "sap_docentry": row["docentry"],
                 "sap_table": sap_table,
@@ -158,13 +173,54 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
     @staticmethod
     def _get_lines(cr, lines_table, sap_orders):
         docentries = [order["docentry"] for order in sap_orders]
+        # Get product lines
         query = SQL(
             "SELECT * FROM %s WHERE docentry in %s",
             SQL.identifier(lines_table),
             tuple(docentries),
         )
         cr.execute(query)
-        return cr.dictfetchall()
+        product_lines = cr.dictfetchall()
+        
+        # Get text lines from RDR10/POR10
+        text_table = lines_table.replace('1', '10')  # Convert RDR1->RDR10 or POR1->POR10
+        query = SQL(
+            "SELECT * FROM %s WHERE docentry in %s AND linetext is not null AND linetext != ''ORDER BY lineseq",
+            SQL.identifier(text_table),
+            tuple(docentries),
+        )
+        cr.execute(query)
+        text_lines = cr.dictfetchall()
+        
+        # Merge product and text lines, maintaining order
+        merged_lines = []
+        for docentry in docentries:
+            doc_product_lines = [l for l in product_lines if l["docentry"] == docentry]
+            doc_text_lines = [l for l in text_lines if l["docentry"] == docentry]
+            
+            # Sort product lines by linenum
+            doc_product_lines.sort(key=lambda x: x["linenum"])
+            
+            # Insert text lines after their specified line numbers
+            current_lines = []
+            next_text_idx = 0
+            
+            for prod_line in doc_product_lines:
+                current_lines.append(prod_line)
+                # Add any text lines that should come after this product line
+                while (next_text_idx < len(doc_text_lines) and 
+                       doc_text_lines[next_text_idx]["aftlinenum"] == prod_line["linenum"]):
+                    current_lines.append(doc_text_lines[next_text_idx])
+                    next_text_idx += 1
+            
+            # Add any remaining text lines that come after all product lines
+            while next_text_idx < len(doc_text_lines):
+                current_lines.append(doc_text_lines[next_text_idx])
+                next_text_idx += 1
+                
+            merged_lines.extend(current_lines)
+        
+        return merged_lines
 
     @staticmethod
     def _sub_create_orders(
@@ -318,7 +374,15 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         self.env.cr.execute(
             "CREATE TEMP TABLE sap_order_dates (docnum INT, docdate DATE, createdate DATE)"
         )
-        values = [(order[0], order[1], order[2]) for order in sap_orders]
+        # The dates from SAP are already in UTC midnight, we just need to extract the date part
+        values = [
+            (
+                order[0],
+                order[1].date() if order[1] else None,  # Extract just the date part
+                order[2].date() if order[2] else None   # Extract just the date part
+            ) 
+            for order in sap_orders
+        ]
         insert_query = b",".join(
             self.env.cr.mogrify("(%s, %s, %s)", value) for value in values
         ).decode("utf-8")
