@@ -41,20 +41,31 @@ class SaleOrderLine(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
-            _logger.info(
-                "Creating sale order line with sap_line_num=%s, sap_aftlinenum=%s, sap_lineseq=%s",
-                vals.get("sap_line_num"),
-                vals.get("sap_aftlinenum"),
-                vals.get("sap_lineseq"),
-            )
-        return super().create(vals_list)
+            if vals.get("display_type") == "line_note":
+                _logger.info(
+                    f"Created note line with lineseq: {vals['sap_lineseq']}, aftlinenum: {vals['sap_aftlinenum']}, linenum: {vals['sap_line_num']}, "
+                    f"docentry: {vals['sap_docentry']}, table: {vals['sap_table']}."
+                )
+            elif vals.get("display_type") != "line_note":  # Product lines
+                _logger.info(
+                    "Product line values: sap_line_num=%s, sap_aftlinenum=%s, sap_lineseq=%s, "
+                    "sap_docentry=%s, sap_table=%s, product_id=%s",
+                    vals.get("sap_line_num"),
+                    vals.get("sap_aftlinenum"),
+                    vals.get("sap_lineseq"),
+                    vals.get("sap_docentry"),
+                    vals.get("sap_table"),
+                    vals.get("product_id"),
+                )
+        res = super().create(vals_list)
+        return res
 
     _sql_constraints = [
         (
             "sap_line_type_check",
             """CHECK(
-                (sap_line_num IS NOT NULL AND sap_aftlinenum IS NULL) OR 
-                (sap_line_num IS NULL AND sap_aftlinenum IS NOT NULL)
+                (sap_line_num != 0 AND sap_lineseq = 0 AND sap_aftlinenum = 0) OR  -- Product lines have line_num
+                (sap_line_num = 0 AND sap_aftlinenum != 0 AND sap_lineseq != 0)     -- Text lines have aftlinenum and lineseq
             )""",
             "A line must have either a line_num (for product lines) or an aftlinenum (for text lines), but not both.",
         ),
@@ -186,20 +197,13 @@ class SapSaleOrderImporter(models.AbstractModel):
             logger=_logger,
         )
         _logger.info("Creating orders.")
-        self._create_orders(cr, order_pager, "rdr1", "sale.order", "sale.order.line")
+        self._create_orders(cr, order_pager, "rdr1", "sale.order")
         _logger.info("Confirming closed orders.")
         self._confirm_closed_orders(cr)
         _logger.info("Confirming open orders.")
         self._confirm_open_orders(cr)
         _logger.info("Creating quotations.")
-        self._create_orders(
-            cr,
-            quote_pager,
-            "qut1",
-            "sale.order",
-            "sale.order.line",
-            multiproc=False,
-        )
+        self._create_orders(cr, quote_pager, "qut1", "sale.order")
         _logger.info("Canceling canceled orders and quotations.")
         self._cancel_canceled_orders_quotations(cr)
         self._set_order_dates(cr, "sale_order", "ordr")
@@ -244,7 +248,6 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     @api.model
     def _get_order_vals(self, sap_order_rows, sap_orders, sap_table):
-
         def _get_pricelists_dict():
             cad_pricelist = self.env["product.pricelist"].search(
                 [
@@ -290,9 +293,11 @@ class SapSaleOrderImporter(models.AbstractModel):
         order_rows_dict = {}
         for row in sap_order_rows:
             order_rows_dict.setdefault(row["docentry"], []).append(row)
+
         order_vals = []
         products_dict = self._get_products_dict()
-        payment_terms_dict = self._get_payment_terms_dict()
+        terms_dict = self._get_payment_terms_dict()
+
         for order in sap_orders:
             # If there's a contact set, we use it instead of the company to be precise
             partner = self._get_partner(order, contacts_dict, partners_dict)
@@ -313,10 +318,15 @@ class SapSaleOrderImporter(models.AbstractModel):
                 partner,
                 "invoice",
             )
-            terms = payment_terms_dict.get(order["groupnum"])
+            terms = terms_dict.get(order["groupnum"])
             user = sap_users_dict.get(order["slpcode"], False)
             source = sources_dict.get(order["u_fcsdk_source"], False)
             carrier = carriers_dict.get(order["trnspcode"])
+            rows = order_rows_dict.get(order["docentry"])
+            row_vals = [
+                Command.create(self._get_row_vals(row, products_dict, sap_table))
+                for row in (rows or [])
+            ]
             vals = {
                 "sap_docnum": order["docnum"],
                 "sap_docentry": order["docentry"],
@@ -331,16 +341,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                 "client_order_ref": order["numatcard"] or "N/A",
                 "picking_policy": self._get_picking_policy(order),
                 "carrier_id": carrier and carrier.id,
-                "order_line": (
-                    [
-                        Command.create(
-                            self._get_row_vals(row, products_dict, sap_table)
-                        )
-                        for row in order_rows_dict[order["docentry"]]
-                    ]
-                    if order_rows_dict.get(order["docentry"])
-                    else False
-                ),
+                "order_line": row_vals,
                 "source_id": source,
                 "user_id": user,
             }
