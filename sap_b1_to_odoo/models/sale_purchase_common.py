@@ -21,46 +21,38 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
     def _get_row_vals(self, row, products_dict, sap_table):
         # Handle text lines from RDR10/POR10
         if "linetext" in row:  # This is a text line
-            return {
+            if row["lineseq"] is None or row["aftlinenum"] is None:
+                _logger.debug(f"Invalid line: {row}")
+            vals = {
                 "display_type": "line_note",
                 "name": row["linetext"],
-                "product_id": False,
+                "product_id": None,
                 "product_uom_qty": 0.0,
                 "price_unit": 0.0,
-                "sap_aftlinenum": row.get("lineseq", 0),  # Use lineseq for text lines
+                "sap_line_num": None,  # Text lines don't have a line_num
+                "sap_aftlinenum": row["aftlinenum"],  # Position to insert after
+                "sap_lineseq": row["lineseq"],  # Sequence within position
                 "sap_docentry": row["docentry"],
-                "sap_table": sap_table,
+                "sap_table": sap_table.replace("1", "10"),
+                "sequence": row["aftlinenum"] * 100 + row["lineseq"],
             }
-            
+            return vals
+
         # Handle product lines (existing code)
         product = products_dict.get(row["itemcode"])
-        if product:
-            return {
-                "product_id": product.id,
-                "product_uom_qty": row["quantity"] if row["quantity"] else 0.0,
-                "price_unit": row["price"],
-                "discount": row["discprcnt"],
-                "sap_linenum": row["linenum"],
-                "sap_docentry": row["docentry"],
-                "sap_table": sap_table,
-            }
-        else:
-            # Some PO lines in SAP have no product linked, so we make a note in Odoo
-            price = row["price"]
-            discount = row["discprcnt"]
-            quantity = row["quantity"] if row["quantity"] else 0.0
-            price = f" {price} $" if price else ""
-            discount = f" {discount}%" if discount else ""
-            quantity = f" {quantity} x"
-            return {
-                "product_id": False,
-                "product_uom_qty": 0.0,
-                "display_type": "line_note",
-                "name": f"{row['dscription']}{quantity}{price}{discount}",
-                "sap_linenum": row["linenum"],
-                "sap_docentry": row["docentry"],
-                "sap_table": sap_table,
-            }
+        vals = {
+            "product_id": product.id if product else False,
+            "product_uom_qty": row["quantity"] if row["quantity"] else 0.0,
+            "price_unit": row["price"],
+            "discount": row["discprcnt"],
+            "sap_line_num": row["linenum"],
+            "sap_aftlinenum": None,  # Product lines don't have aftlinenum
+            "sap_lineseq": None,  # Product lines don't have lineseq
+            "sap_docentry": row["docentry"],
+            "sap_table": sap_table,
+            "sequence": row["linenum"] * 100,
+        }
+        return vals
 
     @api.model
     def _get_products_dict(self):
@@ -181,45 +173,21 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         )
         cr.execute(query)
         product_lines = cr.dictfetchall()
-        
+
         # Get text lines from RDR10/POR10
-        text_table = lines_table.replace('1', '10')  # Convert RDR1->RDR10 or POR1->POR10
+        text_table = lines_table.replace(
+            "1", "10"
+        )  # Convert RDR1->RDR10 or POR1->POR10
         query = SQL(
-            "SELECT * FROM %s WHERE docentry in %s AND linetext is not null AND linetext != ''ORDER BY lineseq",
+            "SELECT * FROM %s WHERE docentry in %s ORDER BY aftlinenum, lineseq",
             SQL.identifier(text_table),
             tuple(docentries),
         )
         cr.execute(query)
         text_lines = cr.dictfetchall()
-        
+
         # Merge product and text lines, maintaining order
-        merged_lines = []
-        for docentry in docentries:
-            doc_product_lines = [l for l in product_lines if l["docentry"] == docentry]
-            doc_text_lines = [l for l in text_lines if l["docentry"] == docentry]
-            
-            # Sort product lines by linenum
-            doc_product_lines.sort(key=lambda x: x["linenum"])
-            
-            # Insert text lines after their specified line numbers
-            current_lines = []
-            next_text_idx = 0
-            
-            for prod_line in doc_product_lines:
-                current_lines.append(prod_line)
-                # Add any text lines that should come after this product line
-                while (next_text_idx < len(doc_text_lines) and 
-                       doc_text_lines[next_text_idx]["aftlinenum"] == prod_line["linenum"]):
-                    current_lines.append(doc_text_lines[next_text_idx])
-                    next_text_idx += 1
-            
-            # Add any remaining text lines that come after all product lines
-            while next_text_idx < len(doc_text_lines):
-                current_lines.append(doc_text_lines[next_text_idx])
-                next_text_idx += 1
-                
-            merged_lines.extend(current_lines)
-        
+        merged_lines = product_lines + text_lines
         return merged_lines
 
     @staticmethod
@@ -379,8 +347,8 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             (
                 order[0],
                 order[1].date() if order[1] else None,  # Extract just the date part
-                order[2].date() if order[2] else None   # Extract just the date part
-            ) 
+                order[2].date() if order[2] else None,  # Extract just the date part
+            )
             for order in sap_orders
         ]
         insert_query = b",".join(
