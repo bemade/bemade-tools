@@ -35,12 +35,12 @@ class PurchaseOrderLine(models.Model):
 
     _sql_constraints = [
         (
-            "check_sap_line_num",
-            """CHECK (
-                (sap_line_num IS NOT NULL AND sap_aftlinenum IS NULL AND sap_lineseq IS NULL) OR 
-                (sap_line_num IS NULL AND sap_aftlinenum IS NOT NULL AND sap_lineseq IS NOT NULL)
+            "sap_line_type_check",
+            """CHECK(
+                (sap_line_num != 0 AND sap_lineseq = 0 AND sap_aftlinenum = 0) OR  -- 0 replaces null since Odoo doesn't insert null into Integer fields
+                (sap_line_num = 0 AND sap_lineseq != 0 AND sap_aftlinenum !=0)
             )""",
-            "A line must either have a SAP line number or an after line number and sequence, but not both.",
+            "A line must have either a line_num (for product lines) or an aftlinenum (for text lines), but not both.",
         ),
         (
             "sap_line_docentry_table_unique",
@@ -102,14 +102,10 @@ class SapPurchaseOrderImporter(models.AbstractModel):
             orderby="docentry",
             logger=_logger,
         )
-        self._create_orders(
-            cr, order_pager, "por1", "purchase.order", "purchase.order.line"
-        )
+        self._create_orders(cr, order_pager, "por1", "purchase.order")
         self._confirm_closed_orders(cr)
         self._confirm_open_orders(cr)
-        self._create_orders(
-            cr, rfq_pager, "pqt1", "purchase.order", "purchase.order.line"
-        )
+        self._create_orders(cr, rfq_pager, "pqt1", "purchase.order")
         self._set_order_dates(cr, "purchase_order", "opor")
         self._set_order_dates(cr, "purchase_order", "opqt")
         self._cancel_canceled_orders_and_quotations(cr)
@@ -240,14 +236,6 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         self._confirm_open_orders_by_table(
             cr, "opor", "purchase.order", "button_confirm"
         )
-
-    @api.model
-    def _get_row_vals(self, row, products_dict, sap_table):
-        vals = super()._get_row_vals(row, products_dict, sap_table)
-        vals.update(
-            product_qty=vals["product_uom_qty"],
-        )
-        return vals
 
     def _recompute_receipt_status(self):
         self.env.flush_all()

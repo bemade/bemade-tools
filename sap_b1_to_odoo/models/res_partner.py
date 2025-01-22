@@ -333,8 +333,6 @@ class SapResPartnerImporter(models.AbstractModel):
     @api.model
     def _extract_sap_state_country(self, country, state, country_dict, states_dict):
         odoo_country = country_dict.get(country)
-        if not odoo_country:
-            _logger.warning(f"Could not find country with code {country} in Odoo")
         odoo_state = self._get_state(states_dict, state, country)
         if not odoo_state and state:
             _logger.warning(

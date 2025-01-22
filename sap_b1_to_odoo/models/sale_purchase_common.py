@@ -21,37 +21,47 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
     def _get_row_vals(self, row, products_dict, sap_table):
         # Handle text lines from RDR10/POR10
         if "linetext" in row:  # This is a text line
-            if row["lineseq"] is None or row["aftlinenum"] is None:
-                _logger.debug(f"Invalid line: {row}")
             vals = {
                 "display_type": "line_note",
-                "name": row["linetext"],
+                "name": row["linetext"] or " ",
                 "product_id": None,
                 "product_uom_qty": 0.0,
+                "product_qty": 0.0,
                 "price_unit": 0.0,
-                "sap_line_num": None,  # Text lines don't have a line_num
-                "sap_aftlinenum": row["aftlinenum"],  # Position to insert after
-                "sap_lineseq": row["lineseq"],  # Sequence within position
+                "sap_line_num": 0,  # Text lines don't have a line_num, use 0 as null
+                "sap_aftlinenum": (row["aftlinenum"] or 0)
+                + 2,  # Increment by 2 to avoid 0
+                "sap_lineseq": (row["lineseq"] or 0) + 2,  # Increment by 2 to avoid 0
                 "sap_docentry": row["docentry"],
-                "sap_table": sap_table.replace("1", "10"),
-                "sequence": row["aftlinenum"] * 100 + row["lineseq"],
+                "sap_table": sap_table.replace(
+                    "1", "10"
+                ),  # Use RDR10/POR10 for text lines
+                "sequence": (
+                    row["aftlinenum"] * 100 + row["lineseq"]
+                    if row["aftlinenum"] and row["lineseq"]
+                    else 0
+                ),
             }
             return vals
 
-        # Handle product lines (existing code)
+        # Handle product lines
         product = products_dict.get(row["itemcode"])
         vals = {
             "product_id": product.id if product else False,
             "product_uom_qty": row["quantity"] if row["quantity"] else 0.0,
+            "product_qty": row["quantity"] if row["quantity"] else 0.0,
             "price_unit": row["price"],
             "discount": row["discprcnt"],
-            "sap_line_num": row["linenum"],
-            "sap_aftlinenum": None,  # Product lines don't have aftlinenum
-            "sap_lineseq": None,  # Product lines don't have lineseq
+            "sap_line_num": (row["linenum"] or 0) + 2,  # Increment by 2 to avoid 0
+            "sap_aftlinenum": 0,  # Product lines don't have aftlinenum, use 0 as null
+            "sap_lineseq": 0,  # Product lines don't have lineseq, use 0 as null
             "sap_docentry": row["docentry"],
-            "sap_table": sap_table,
-            "sequence": row["linenum"] * 100,
+            "sap_table": sap_table,  # Use RDR1/POR1 for product lines
+            "sequence": row["linenum"] * 100 if row["linenum"] else 0,
         }
+        if not vals["product_id"]:
+            vals["name"] = row["dscription"] or ""
+            vals["product_uom"] = self.env.ref("uom.product_uom_unit").id
         return vals
 
     @api.model
@@ -117,26 +127,26 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         docnums = [order[0] for order in cr.fetchall()]
         return docnums
 
-    def _create_orders(
-        self, cr, pager, lines_table, header_model, lines_model, multiproc=True
-    ):
+    def _create_orders(self, cr, pager, lines_table, header_model, multiproc=True):
         start_method = multiprocessing.get_start_method()
         multiprocessing.set_start_method("fork", force=True)
         chunks = [chunk for chunk in pager]
+        total_chunks = len(chunks)
+        _logger.info(f"Starting import of {total_chunks} chunks...")
         try:
             if not multiproc:
-                for chunk in chunks:
+                for i, chunk in enumerate(chunks, 1):
                     self._sub_create_orders(
                         self._name,
                         self.env.cr.dbname,
                         self.env.uid,
                         dict(self.env.context),
                         header_model,
-                        lines_model,
                         chunk,
                         self._get_lines(cr, lines_table, chunk),
                         lines_table,
                     )
+                    _logger.info(f"Completed chunk {i}/{total_chunks}")
             else:
                 with ProcessPoolExecutor(max_workers=workers) as executor:
                     futures = [
@@ -147,27 +157,28 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                             self.env.uid,
                             dict(self.env.context),
                             header_model,
-                            lines_model,
                             chunk,
                             self._get_lines(cr, lines_table, chunk),
                             lines_table,
                         )
                         for chunk in chunks
                     ]
-                    for future in futures:
+                    for i, future in enumerate(futures, 1):
                         future.result()
+                        _logger.info(f"Completed chunk {i}/{total_chunks}")
         except Exception:
             _logger.error("An exception occurred in a subprocess.", exc_info=True)
             raise
         finally:
             multiprocessing.set_start_method(start_method, force=True)
+            _logger.info("Import completed.")
 
     @staticmethod
     def _get_lines(cr, lines_table, sap_orders):
         docentries = [order["docentry"] for order in sap_orders]
         # Get product lines
         query = SQL(
-            "SELECT * FROM %s WHERE docentry in %s",
+            "SELECT *, 'product' as line_type FROM %s WHERE docentry in %s ORDER BY docentry, linenum",
             SQL.identifier(lines_table),
             tuple(docentries),
         )
@@ -179,16 +190,22 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             "1", "10"
         )  # Convert RDR1->RDR10 or POR1->POR10
         query = SQL(
-            "SELECT * FROM %s WHERE docentry in %s ORDER BY aftlinenum, lineseq",
+            """
+            SELECT *, 'text' as line_type 
+            FROM %s 
+            WHERE docentry in %s 
+                AND linetext IS NOT NULL 
+                AND linetext <> '' 
+            ORDER BY aftlinenum, lineseq
+            """,
             SQL.identifier(text_table),
             tuple(docentries),
         )
         cr.execute(query)
         text_lines = cr.dictfetchall()
 
-        # Merge product and text lines, maintaining order
-        merged_lines = product_lines + text_lines
-        return merged_lines
+        # Merge and return all lines
+        return product_lines + text_lines
 
     @staticmethod
     def _sub_create_orders(
@@ -197,29 +214,24 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         uid,
         context,
         header_model,
-        lines_model,
         sap_orders,
-        sap_order_rows,
+        sap_rows,
         sap_rows_table,
     ):
-        with Registry(dbname).cursor() as cr:
-            env = api.Environment(cr, uid, context)
-            self = env[importer_model]
-            _logger.info(
-                f"Importing {len(sap_orders)} orders with "
-                f"{len(sap_order_rows)} rows."
-            )
-            _logger.info("Getting order vals...")
-            order_vals = self._get_order_vals(
-                sap_order_rows, sap_orders, sap_rows_table
-            )
-            _logger.info("Creating objects...")
-            env[header_model].create(order_vals)
-            _logger.info("Flushing to the database...")
-            env[header_model].flush_model()
-            env[lines_model].flush_model()
-            cr.commit()
-        return 0
+        try:
+            with Registry(dbname).cursor() as cr:
+                env = api.Environment(cr, uid, context)
+                importer = env[importer_model]
+                order_vals = importer._get_order_vals(
+                    sap_rows,
+                    sap_orders,
+                    sap_rows_table,
+                )
+                env[header_model].create(order_vals)
+                env.cr.commit()
+        except Exception:
+            _logger.error("An exception occurred in a subprocess.", exc_info=True)
+            raise
 
     @api.model
     def _get_order_vals(self, sap_order_rows, sap_orders, sap_table):
