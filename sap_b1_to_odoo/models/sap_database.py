@@ -141,7 +141,7 @@ class SapDatabase(models.Model):
 
     def action_import_bills(self):
         with self.get_cursor() as cr:
-            self.env["sap.purchase.invoice.importer"].with_company(
+            self.env["sap.vendor.bill.importer"].with_company(
                 self.env.company
             ).import_bills(cr)
 
