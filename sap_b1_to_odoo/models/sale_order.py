@@ -36,14 +36,23 @@ class SaleOrderLine(models.Model):
         store=True,
     )
     sap_linenum = fields.Integer(index="btree")
+    sap_aftlinenum = fields.Integer(index="btree")
     sap_table = fields.Char(index="btree")
 
     _sql_constraints = [
         (
-            "sap_linenum_docentry_table_unique",
-            "UNIQUE (sap_linenum, sap_docentry, sap_table)",
-            "Another sale order line with this linenum and docentry already exists for this SAP table.",
-        )
+            "sap_line_type_check",
+            """CHECK(
+                (sap_linenum IS NOT NULL AND sap_aftlinenum IS NULL) OR 
+                (sap_linenum IS NULL AND sap_aftlinenum IS NOT NULL)
+            )""",
+            "A line must have either a linenum (for product lines) or an aftlinenum (for text lines), but not both.",
+        ),
+        (
+            "sap_line_docentry_table_unique",
+            "UNIQUE(sap_linenum, sap_aftlinenum, sap_docentry, sap_table)",
+            "Another line with this line number and docentry already exists for this SAP table.",
+        ),
     ]
 
 
@@ -261,21 +270,6 @@ class SapSaleOrderImporter(models.AbstractModel):
                 for tpt in self.env["sap.transporter"].search([])
             }
 
-        def _get_tpt_info(partner, carrier):
-            partner_account = partner.carrier_account_ids.filtered(
-                lambda account: account.delivery_carrier_id == carrier
-            )
-            if partner_account:
-                return partner_account[0], "collect"
-            else:
-                sender = self.env.company.partner_id
-                sender_account = sender.carrier_account_ids.filtered(
-                    lambda account: account.delivery_carrier_id == carrier
-                )
-                if sender_account:
-                    return sender_account[0], "ppc"
-            return False, "ppc"
-
         pricelists = _get_pricelists_dict()
         partners_dict = self._get_partners_dict()
         contacts_dict = self._get_contacts_dict()
@@ -313,7 +307,6 @@ class SapSaleOrderImporter(models.AbstractModel):
             user = sap_users_dict.get(order["slpcode"], False)
             source = sources_dict.get(order["u_fcsdk_source"], False)
             carrier = carriers_dict.get(order["trnspcode"])
-            carrier_account, billing_mode = _get_tpt_info(partner, carrier)
             vals = {
                 "sap_docnum": order["docnum"],
                 "sap_docentry": order["docentry"],
@@ -328,8 +321,6 @@ class SapSaleOrderImporter(models.AbstractModel):
                 "client_order_ref": order["numatcard"] or "N/A",
                 "picking_policy": self._get_picking_policy(order),
                 "carrier_id": carrier and carrier.id,
-                "delivery_billing_mode": billing_mode,
-                "carrier_account_id": carrier_account and carrier_account.id,
                 "order_line": (
                     [
                         Command.create(
