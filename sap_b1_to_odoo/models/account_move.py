@@ -1,5 +1,3 @@
-from docutils.nodes import bullet_list
-
 from odoo import models, fields, api, Command
 from odoo.tools.sql import SQL
 import logging
