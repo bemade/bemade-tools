@@ -207,6 +207,7 @@ class SapResPartnerImporter(models.AbstractModel):
         countries_dict = self._get_countries_dict()
         states_dict = self._get_states_dict()
         users_dict = self._get_users_dict()
+        _logger.debug(f"Users dict: {users_dict}")
         terms_dict = self._get_payment_terms_dict()
         for sap_partner in sap_partners:
             # Start with the parent company
@@ -220,6 +221,7 @@ class SapResPartnerImporter(models.AbstractModel):
                 sap_partner["block"],
             )
             user = users_dict.get(sap_partner["slpcode"], False)
+            _logger.debug(f"User: {user} for slpcode {sap_partner['slpcode']}")
             currency = self.env["res.currency"].search(
                 [("name", "=", sap_partner["currency"])]
             )

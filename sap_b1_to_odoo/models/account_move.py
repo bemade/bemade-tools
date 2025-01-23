@@ -220,6 +220,9 @@ class AccountMoveCommon(models.AbstractModel):
         else:
             move_lines = []
 
+        users_dict = self._get_users_dict()
+        invoice_user_id = users_dict.get(order.get("slpcode"), False)
+
         return {
             "partner_id": partner.id,
             "invoice_date": order["docdate"],
@@ -230,6 +233,19 @@ class AccountMoveCommon(models.AbstractModel):
             "sap_table": sap_table,
             "ref": order["numatcard"],
             "line_ids": move_lines,
+            "invoice_user_id": invoice_user_id,
+        }
+
+    @api.model
+    def _get_users_dict(self):
+        return {
+            user.sap_slpcode: user.id
+            for user in self.env["res.users"].search(
+                [
+                    ("sap_slpcode", "!=", False),
+                    ("active", "in", [False, True]),
+                ]
+            )
         }
 
     @api.model

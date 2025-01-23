@@ -8,7 +8,7 @@ _logger = logging.getLogger(__name__)
 class Users(models.Model):
     _inherit = "res.users"
 
-    sap_slpcode = fields.Char(
+    sap_slpcode = fields.Integer(
         string="SAP SLP Code",
     )
 
