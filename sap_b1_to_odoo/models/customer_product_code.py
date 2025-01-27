@@ -13,7 +13,9 @@ class SapCustomerProductCodeImporter(models.AbstractModel):
     _description = "Sap Customer Product Code Importer"
 
     def import_customer_product_codes(self, cr):
-        cr.execute("SELECT * FROM OSCN")
+        cr.execute(
+            "SELECT * FROM OSCN WHERE substitute is not null AND substitute <> ''"
+        )
         sap_codes = cr.dictfetchall()
         _logger.info(f"Importing {len(sap_codes)} customer product codes...")
         product_dict = self._get_products_dict(sap_codes)
@@ -43,21 +45,14 @@ class SapCustomerProductCodeImporter(models.AbstractModel):
     def _get_values(self, partners_dict, products_dict, sap_codes):
         vals = []
         for code in sap_codes:
-            try:
-                product_id = products_dict.get(code["itemcode"])
-                partner_id = partners_dict.get(code["cardcode"])
-                vals.append(
-                    {
-                        "product_id": product_id,
-                        "partner_id": partner_id,
-                        "company_id": self.env.company.id,
-                        "product_code": code["substitute"],
-                    }
-                )
-            except psycopg2.errors.UniqueViolation:
-                _logger.warning(
-                    f"Skipping duplicate customer product code: {code.substitute}"
-                    f" for partner ID {code["cardcode"]}"
-                )
-                continue
+            product_id = products_dict.get(code["itemcode"])
+            partner_id = partners_dict.get(code["cardcode"])
+            vals.append(
+                {
+                    "product_id": product_id,
+                    "partner_id": partner_id,
+                    "company_id": self.env.company.id,
+                    "product_code": code["substitute"],
+                }
+            )
         return vals
