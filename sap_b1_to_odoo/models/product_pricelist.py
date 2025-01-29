@@ -2,6 +2,7 @@ from odoo import models, fields, api, Command
 from odoo.tools.sql import SQL
 import logging
 from datetime import datetime, timezone
+from odoo.addons.sap_b1_to_odoo.tools import fix_tz
 
 utc = timezone.utc
 
@@ -240,10 +241,8 @@ class ProductPricelistImporter(models.AbstractModel):
             # Don't set these up for suppliers
             if partner.sap_partner_type == "S":
                 continue
-            start = blanket["startdate"]
-            end = blanket["enddate"]
-            start = start.astimezone(utc).replace(tzinfo=None)
-            end = end.astimezone(utc).replace(tzinfo=None)
+            start = fix_tz(blanket["startdate"])
+            end = fix_tz(blanket["enddate"])
             active = datetime.now() <= end
             name = blanket["descript"] or partner.name
             currency_code = "USD" if blanket["bpcurr"] == "USD" else "CAD"
@@ -315,10 +314,8 @@ class ProductPricelistImporter(models.AbstractModel):
             # Only make these for suppliers
             if partner.sap_partner_type != "S":
                 continue
-            start = blanket["startdate"]
-            end = blanket["enddate"]
-            start = start.astimezone(utc).replace(tzinfo=None)
-            end = end.astimezone(utc).replace(tzinfo=None)
+            start = fix_tz(blanket["startdate"])
+            end = fix_tz(blanket["enddate"])
             reference = blanket["descript"]
             status = _get_status(blanket)
             currency_code = "USD" if blanket["bpcurr"] == "USD" else "CAD"
