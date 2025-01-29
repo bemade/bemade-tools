@@ -1,6 +1,6 @@
 from odoo import models, fields, api, Command
 from odoo.tools.sql import SQL
-from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
+from odoo.addons.sap_b1_to_odoo.tools import PagingIterator, fix_tz
 import logging
 
 _logger = logging.getLogger(__name__)
@@ -106,8 +106,8 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         self._confirm_closed_orders(cr)
         self._confirm_open_orders(cr)
         self._create_orders(cr, rfq_pager, "pqt1", "purchase.order")
-        self._set_order_dates(cr, "purchase_order", "opor")
-        self._set_order_dates(cr, "purchase_order", "opqt")
+        self._set_order_dates(cr, "purchase_order", "opor", "date_approve")
+        self._set_order_dates(cr, "purchase_order", "opqt", "date_approve")
         self._cancel_canceled_orders_and_quotations(cr)
         self._recompute_receipt_status()
 
@@ -142,7 +142,7 @@ class SapPurchaseOrderImporter(models.AbstractModel):
             ).commercial_partner_id
             terms = terms_dict.get(order["groupnum"], False)
             carrier = carriers_dict.get(order["trnspcode"])
-            order_date = order["docdate"].replace(tzinfo=None)
+            order_date = fix_tz(order["docdate"])
             vals = {
                 "sap_docnum": order["docnum"],
                 "sap_docentry": order["docentry"],
@@ -151,7 +151,7 @@ class SapPurchaseOrderImporter(models.AbstractModel):
                 "payment_term_id": terms and terms.id,
                 "date_approve": order_date,
                 "date_order": order_date,
-                "date_planned": order["docduedate"].replace(tzinfo=None),
+                "date_planned": fix_tz(order["docduedate"]),
                 "notes": f"SAP Order {order['numatcard']}",
                 # "shipping_policy_request": self._get_picking_policy(order),
                 "carrier_id": carrier and carrier.id,

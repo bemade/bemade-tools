@@ -6,8 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 from odoo import models, fields, api
 from odoo.modules.registry import Registry
 from odoo.sql_db import SQL
-from datetime import datetime
-import pytz
+from odoo.addons.sap_b1_to_odoo.tools import fix_tz
 
 _logger = logging.getLogger(__name__)
 workers = os.cpu_count() - 1
@@ -341,25 +340,24 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             self.env.cr.commit()
         active_automations.active = True
 
-    def _set_order_dates(self, cr, odoo_table, sap_table):
+    def _set_order_dates(self, cr, odoo_table, sap_table, date_field):
         cr.execute(
             SQL("SELECT docnum, docdate, createdate FROM %s", SQL.identifier(sap_table))
         )
         sap_orders = cr.fetchall()
-        self._set_order_dates_sub(sap_orders, odoo_table)
+        self._set_order_dates_sub(sap_orders, odoo_table, date_field)
         self.env.cr.commit()
 
-    def _set_order_dates_sub(self, sap_orders, odoo_table):
+    def _set_order_dates_sub(self, sap_orders, odoo_table, date_field):
         self.env.cr.execute("DROP TABLE IF EXISTS sap_order_dates")
         self.env.cr.execute(
-            "CREATE TEMP TABLE sap_order_dates (docnum INT, docdate DATE, createdate DATE)"
+            "CREATE TEMP TABLE sap_order_dates (docnum INT, docdate TIMESTAMP, createdate TIMESTAMP)"
         )
-        # The dates from SAP are already in UTC midnight, we just need to extract the date part
         values = [
             (
                 order[0],
-                order[1].date() if order[1] else None,  # Extract just the date part
-                order[2].date() if order[2] else None,  # Extract just the date part
+                fix_tz(order[1]) if order[1] else None,
+                fix_tz(order[2]) if order[2] else None,
             )
             for order in sap_orders
         ]
@@ -373,11 +371,12 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             SQL(
                 """
             UPDATE %s orders
-            SET create_date=temp.createdate, date_order=temp.docdate
+            SET create_date=temp.createdate, %s=temp.docdate
             FROM sap_order_dates temp
             WHERE orders.sap_docnum=temp.docnum
             """,
                 SQL.identifier(odoo_table),
+                SQL.identifier(date_field),
             ),
         )
         self.env.cr.commit()
