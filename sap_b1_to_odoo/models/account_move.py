@@ -1,6 +1,7 @@
 from odoo import models, fields, api, Command
 from odoo.tools.sql import SQL
 import logging
+from odoo.addons.sap_b1_to_odoo.tools import fix_tz
 
 _logger = logging.getLogger(__name__)
 
@@ -225,9 +226,9 @@ class AccountMoveCommon(models.AbstractModel):
 
         return {
             "partner_id": partner.id,
-            "invoice_date": order["docdate"],
-            "date": order["docdate"],
-            "invoice_date_due": order["docduedate"],
+            "invoice_date": fix_tz(order["docdate"]),
+            "date": fix_tz(order["docdate"]),
+            "invoice_date_due": fix_tz(order["docduedate"]),
             "sap_docentry": order["docentry"],
             "sap_docnum": order["docnum"],
             "sap_table": sap_table,

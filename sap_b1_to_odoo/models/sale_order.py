@@ -1,10 +1,10 @@
 from odoo import models, fields, Command, api
 from odoo.modules.registry import Registry
-import logging
-from odoo.addons.sap_b1_to_odoo.tools import PagingIterator
 from odoo.tools.sql import SQL
-import multiprocessing
+from odoo.addons.sap_b1_to_odoo.tools import PagingIterator, fix_tz
 from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
+import logging
 import os
 
 workers = os.cpu_count() - 1
@@ -184,8 +184,8 @@ class SapSaleOrderImporter(models.AbstractModel):
         self._create_orders(cr, quote_pager, "qut1", "sale.order")
         _logger.info("Canceling canceled orders and quotations.")
         self._cancel_canceled_orders_quotations(cr)
-        self._set_order_dates(cr, "sale_order", "ordr")
-        self._set_order_dates(cr, "sale_order", "oqut")
+        self._set_order_dates(cr, "sale_order", "ordr", "date_order")
+        self._set_order_dates(cr, "sale_order", "oqut", "date_order")
         _logger.info("Recomputing delivery status for all orders.")
         self._recompute_delivery_status()
 
@@ -314,8 +314,8 @@ class SapSaleOrderImporter(models.AbstractModel):
                 "partner_invoice_id": partner_invoice_id.id,
                 "partner_shipping_id": partner_shipping_id.id,
                 "payment_term_id": terms.id,
-                "date_order": order["docdate"].replace(tzinfo=None),
-                "commitment_date": order["docduedate"].replace(tzinfo=None),
+                "date_order": fix_tz(order["docdate"]),
+                "commitment_date": fix_tz(order["docduedate"]),
                 "client_order_ref": order["numatcard"] or "N/A",
                 "picking_policy": self._get_picking_policy(order),
                 "carrier_id": carrier and carrier.id,
