@@ -101,6 +101,29 @@ class SapResPartnerImporter(models.AbstractModel):
         self.env.invalidate_all()
         self._link_children_parents()
         self._set_payable_receivable_accounts()
+        self._set_partner_ranks()
+
+    def _set_partner_ranks(self):
+        # Set customer ranks for cardtype C and L
+        self.env.cr.execute(
+            """
+            UPDATE res_partner 
+            SET customer_rank = 1 
+            WHERE sap_partner_type IN ('C', 'L')
+            AND customer_rank = 0
+        """
+        )
+        # Set supplier ranks for other cardtypes (S, etc)
+        self.env.cr.execute(
+            """
+            UPDATE res_partner 
+            SET supplier_rank = 1 
+            WHERE sap_partner_type NOT IN ('C', 'L')
+            AND sap_partner_type IS NOT NULL
+            AND supplier_rank = 0
+        """
+        )
+        self.env.cr.commit()
 
     @api.model
     def _set_payable_receivable_accounts(self):
