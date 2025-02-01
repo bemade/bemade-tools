@@ -526,11 +526,11 @@ class SapResPartnerImporter(models.AbstractModel):
 
             -- Now update the parent_id field
             UPDATE res_partner rp
-            SET parent_id = pm.parent_id
+            SET parent_id = pm.parent_id, commercial_partner_id = pm.parent_id
             FROM parent_matches pm
             WHERE 
                 rp.id = pm.child_id
-                AND (rp.parent_id IS NULL OR rp.parent_id != pm.parent_id);  -- Only update if different
+                AND (rp.parent_id IS NULL OR rp.parent_id != pm.parent_id OR rp.commercial_partner_id != pm.parent_id);  -- Only update if different
             """
         )
         self.env.cr.commit()
