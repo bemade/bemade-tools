@@ -281,43 +281,6 @@ class SapResPartnerImporter(models.AbstractModel):
                     "picking_policy": picking_policy,
                 }
             )
-
-            # Then the shipping address
-            country = sap_partner["mailcountr"]
-            state = sap_partner["state2"]
-            users_dict = self._get_users_dict()
-            country, state = self._extract_sap_state_country(
-                country, state, countries_dict, states_dict
-            )
-            street, street2 = self._extract_sap_street_street2(
-                sap_partner["mailaddres"],
-                sap_partner["mailblock"],
-            )
-            user = users_dict.get(sap_partner["slpcode"], False)
-            email = fix_quotes(sap_partner["e_mail"])
-            email = email_normalize(email)
-            if (street or street2) and country and state:
-                partner_vals.append(
-                    {
-                        # No cardcode here, we are splitting out the shipping address
-                        # so it goes in the parent card field
-                        "name": "Réception / Receiving",
-                        "street": street,
-                        "street2": street2,
-                        "city": sap_partner["mailcity"] or "",
-                        "country_id": country and country.id or False,
-                        "state_id": state and state.id or False,
-                        "zip": sap_partner["zipcode"],
-                        "sap_parent_card": sap_partner["cardcode"],
-                        "is_company": False,
-                        "phone": sap_partner["phone1"] or sap_partner["phone2"],
-                        "email": email,
-                        "type": "delivery",
-                        "company_id": self.env.company.id,
-                        "comment": sap_partner["notes"],
-                        "user_id": user,
-                    }
-                )
         return partner_vals
 
     @api.model
@@ -357,7 +320,7 @@ class SapResPartnerImporter(models.AbstractModel):
 
     @api.model
     def _extract_sap_state_country(self, country, state, country_dict, states_dict):
-        odoo_country = country_dict.get(country)
+        odoo_country = country_dict.get(country) or country_dict.get("CA")
         odoo_state = self._get_state(states_dict, state, country)
         if not odoo_state and state:
             _logger.warning(
@@ -508,6 +471,9 @@ class SapResPartnerImporter(models.AbstractModel):
     def _link_children_parents(self):
         _logger.info("Linking children to parents.")
         self.env.flush_all()
+        parent_matches_str = """
+            """
+
         self.env.cr.execute(
             """
             -- First, let's create a CTE to match children with their parents based on SAP codes
@@ -523,7 +489,6 @@ class SapResPartnerImporter(models.AbstractModel):
                     AND parent.sap_card_code IS NOT NULL
                     AND child.id != parent.id  -- Prevent self-referencing
             )
-
             -- Now update the parent_id field
             UPDATE res_partner rp
             SET parent_id = pm.parent_id, commercial_partner_id = pm.parent_id
@@ -533,6 +498,29 @@ class SapResPartnerImporter(models.AbstractModel):
                 AND (rp.parent_id IS NULL OR rp.parent_id != pm.parent_id OR rp.commercial_partner_id != pm.parent_id);  -- Only update if different
             """
         )
+        # Fix address info
+        sql = """
+        WITH parent_matches AS (
+                SELECT
+                    child.id as child_id,
+                    parent.id as parent_id,
+                    parent.%(col)s as %(col)s
+                FROM
+                    res_partner child
+                    INNER JOIN res_partner parent ON child.parent_id = parent.id
+                WHERE
+                    parent.sap_card_code IS NOT NULL
+            )
+            UPDATE res_partner rp
+            SET %(col)s = pm.%(col)s
+            FROM parent_matches pm
+            WHERE (rp.type = 'contact' OR rp.type IS NULL)
+                AND rp.id = pm.child_id
+                AND rp.parent_id IS NOT NULL
+                AND rp.%(col)s IS NULL
+        """
+        for col in ["street", "street2", "city", "country_id", "state_id", "zip"]:
+            self.env.cr.execute(sql % {"col": col})
         self.env.cr.commit()
 
     def _import_ocpr(self, cr):
