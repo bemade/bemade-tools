@@ -6,6 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 import logging
 import os
+from fuzzywuzzy import process, fuzz
 
 workers = os.cpu_count() - 1
 
@@ -108,26 +109,35 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     @staticmethod
     def _find_partner_by_type(order, partner, address_type):
-        # Try first to find a partner matching the address.
+        def extract_address(partner):
+            """Function to process a partner to get its address"""
+            parts = ["street", "street2", "city", "state", "zip", "country"]
+            address = " ".join(
+                [
+                    getattr(partner, part).strip()
+                    for part in parts
+                    if getattr(partner, part, False)
+                ]
+            )
+            return address
+
         address = order["address2"] if address_type == "delivery" else order["address"]
-        if not address:
-            return partner
+        if address:
+            address = address.replace("\r\n", " ")
         potential_partners = (
             partner.commercial_partner_id | partner.commercial_partner_id.child_ids
-        ).filtered(lambda prt: prt.street and prt.street in address)
-        if len(potential_partners) == 1:
-            return potential_partners
-        elif len(potential_partners) > 1:
-            shipping_addresses = potential_partners.filtered(
-                lambda prt: prt.type == address_type
-            )
-            if shipping_addresses:
-                return shipping_addresses[0]
-            if partner in potential_partners:
-                return partner
-            if partner.commercial_partner_id in potential_partners:
-                return partner.commercial_partner_id
-        return partner
+        ).filtered(lambda prt: prt.type == address_type)
+
+        if len(potential_partners) > 1 and address:
+            partner_addresses = {
+                extract_address(prt): prt for prt in potential_partners
+            }
+            fuzzy_match = process.extractOne(address, partner_addresses.keys())[0]
+            return partner_addresses[fuzzy_match]
+        elif len(potential_partners) >= 1:
+            return potential_partners[0]
+        else:
+            return partner.commercial_partner_id
 
     @api.model
     def _uppercase_all_cardcodes(self, cr):
