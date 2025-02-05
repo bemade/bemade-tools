@@ -63,7 +63,7 @@ class SapPurchaseOrderImporter(models.AbstractModel):
 
     @api.model
     def _uppercase_all_cardcodes(self, cr):
-        cr.execute("UPDATE opqt SET cardcode = UPPER(cardcode)")
+        cr.execute("UPDATE oprq SET cardcode = UPPER(cardcode)")
         cr.execute("UPDATE opor SET cardcode = UPPER(cardcode)")
 
     @api.model
@@ -84,30 +84,9 @@ class SapPurchaseOrderImporter(models.AbstractModel):
             orderby="docentry",
             logger=_logger,
         )
-        where = """
-        WHERE docentry not in (
-        SELECT baseentry from por1
-        WHERE basetype=20
-        )
-        """
-        if imported_docnums:
-            where += "AND docnum not in %s"
-        rfq_pager = PagingIterator(
-            cr,
-            fetch_query=f"SELECT * from OPQT {where}",
-            fetch_args=args,
-            count_query=f"SELECT count(*) from OPQT {where}",
-            count_args=args,
-            limit=500,
-            orderby="docentry",
-            logger=_logger,
-        )
         self._create_orders(cr, order_pager, "por1", "purchase.order")
         self._confirm_closed_orders(cr)
         self._confirm_open_orders(cr)
-        self._create_orders(cr, rfq_pager, "pqt1", "purchase.order")
-        self._set_order_dates(cr, "purchase_order", "opor", "date_approve")
-        self._set_order_dates(cr, "purchase_order", "opqt", "date_approve")
         self._cancel_canceled_orders_and_quotations(cr)
         self._recompute_receipt_status()
 
@@ -215,20 +194,10 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         """
         self.env.cr.execute(SQL(sql, tuple(closed_orders)))
 
-        # orders = self.env["purchase.order"].search(
-        #     [
-        #         ("sap_docnum", "in", closed_orders),
-        #         ("order_line.qty_received_method", "!=", "manual"),
-        #     ]
-        # )
-        # for line in orders.order_line:
-        #     line.qty_received_method = "manual"
-        #     line.qty_received = line.product_uom_qty
-
     @api.model
     def _cancel_canceled_orders_and_quotations(self, cr):
         self._cancel_canceled_orders_and_quotations_by_table(
-            cr, "ordr", "oqut", "purchase_order"
+            cr, "ordr", None, "purchase_order"
         )
 
     @api.model
