@@ -270,7 +270,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         Retrieve the list of closed orders for a specific SAP table.
 
         This method queries the given SAP table to obtain a list of orders that have the
-        'confirmed', 'invntsttus', and 'canceled' fields satisfying specific conditions.
+        'docstatus', 'invntsttus', and 'canceled' fields satisfying specific conditions.
         Only orders that are confirmed, closed, and not canceled will be included in the
         returned list.
 
@@ -282,7 +282,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         """
         sql = """
         SELECT docnum from %s
-        WHERE confirmed = 'Y' and invntsttus = 'C' and canceled = 'N'
+        WHERE docstatus = 'C' and invntsttus = 'C' and canceled = 'N'
         """
         cr.execute(SQL(sql, SQL.identifier(sap_table)))
         confirmed_orders = [order[0] for order in cr.fetchall()]
@@ -294,11 +294,16 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
     ):
         """Mark canceled orders as cancelled directly in the DB.
 
-        Consider than an order is cancelled either if marked canceled or if it's been
-        confirmed and closed despite its inventory status being open."""
+        An order should be cancelled if:
+        1. It is explicitly marked as canceled (canceled='Y') OR
+        2. It is not confirmed (confirmed='N') AND either:
+           - It is closed (docstatus='C') OR
+           - It has closed inventory (invntsttus='C')
+        """
         sql = """
         SELECT docnum FROM %s
-        WHERE canceled = 'Y' OR (confirmed='Y' and docstatus='C' and invntsttus='O')
+        WHERE canceled = 'Y' 
+        OR (confirmed='N' AND (docstatus='C' OR invntsttus='C'))
         """
         args = [SQL.identifier(sap_order_table)]
         if sap_quote_table:
@@ -322,11 +327,23 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
     @api.model
     def _confirm_open_orders_by_table(self, cr, sap_table, odoo_model, confirm_method):
         """Mark confirmed orders that are open and confirmed in SAP. This is done
-        separately due to the long runtime of confirming orders through the ORM."""
+        separately due to the long runtime of confirming orders through the ORM.
+
+        An order should be confirmed if:
+        1. It is not canceled (canceled='N')
+        2. It is confirmed in SAP (confirmed='Y')
+        3. Either:
+           - It is open (docstatus='O') with open inventory (invntsttus='O') OR
+           - It is closed (docstatus='C')
+        """
         self.env["sale.order"].flush_model()
         sql = """
-        SELECT docnum, docdate, createdate  FROM %s
-        WHERE canceled='N' and confirmed='Y' and docstatus='O'
+        SELECT docnum, docdate, createdate FROM %s
+        WHERE canceled='N' AND confirmed='Y' 
+        AND (
+            (docstatus='O' AND invntsttus='O')
+            OR docstatus='C'
+        )
         """
         cr.execute(SQL(sql, SQL.identifier(sap_table)))
         sap_orders = cr.fetchall()
