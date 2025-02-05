@@ -106,6 +106,13 @@ class SapDatabase(models.Model):
             ).import_sales_orders(cr)
         return self._success_notification()
 
+    def action_import_quotations(self):
+        with self.get_cursor() as cr:
+            self.env["sap.sale.quotation.importer"].with_company(
+                self.env.company
+            ).import_quotations(cr)
+        return self._success_notification()
+
     def action_import_purchase_orders(self):
         with self.get_cursor() as cr:
             self.env["sap.purchase.order.importer"].with_company(
