@@ -5,11 +5,9 @@
         <field name="model">res.partner</field>
         <field name="inherit_id" ref="base.view_partner_tree"/>
         <field name="arch" type="xml">
-            <xpath expr="//list" position="inside">
-                <field name="sap_card_code" optional="hide"/>
-                <field name="sap_cntct_code" optional="hide"/>
-                <field name="sap_parent_card" optional="hide"/>
-            </xpath>
+            <field name="complete_name" position="before">
+                <field name="sap_card_code" optional="show"/>
+            </field>
         </field>
     </record>
 
@@ -18,11 +16,9 @@
         <field name="model">res.partner</field>
         <field name="inherit_id" ref="base.view_res_partner_filter"/>
         <field name="arch" type="xml">
-            <xpath expr="//search" position="inside">
-                <field name="sap_card_code"/>
-                <field name="sap_cntct_code"/>
-                <field name="sap_parent_card"/>
-            </xpath>
+            <field name="name" position="after">
+                <field name="sap_card_code" optional="show"/>
+            </field>
         </field>
     </record>
 
@@ -31,10 +27,9 @@
         <field name="model">sale.order</field>
         <field name="inherit_id" ref="sale.sale_order_tree"/>
         <field name="arch" type="xml">
-            <xpath expr="//list" position="inside">
-                <field name="sap_docentry" optional="hide"/>
-                <field name="sap_docnum" optional="hide"/>
-            </xpath>
+            <field name="name" position="after">
+                <field name="sap_docnum" optional="show"/>
+            </field>
         </field>
     </record>
 
@@ -43,10 +38,9 @@
         <field name="model">sale.order</field>
         <field name="inherit_id" ref="sale.view_sales_order_filter"/>
         <field name="arch" type="xml">
-            <xpath expr="//search" position="inside">
-                <field name="sap_docentry"/>
-                <field name="sap_docnum"/>
-            </xpath>
+            <field name="name" position="after">
+                <field name="sap_docnum" optional="show"/>
+            </field>
         </field>
     </record>
 
@@ -55,9 +49,9 @@
         <field name="model">sale.order</field>
         <field name="inherit_id" ref="sale.view_order_form"/>
         <field name="arch" type="xml">
-            <xpath expr="//field[@name='partner_id']" position="after">
+            <field name="partner_id" position="after">
                 <field name="sap_docnum" readonly="1" invisible="not sap_docnum"/>
-            </xpath>
+            </field>
         </field>
     </record>
 
@@ -66,9 +60,9 @@
         <field name="model">product.template</field>
         <field name="inherit_id" ref="product.product_template_tree_view"/>
         <field name="arch" type="xml">
-            <xpath expr="//list" position="inside">
-                <field name="sap_item_code" optional="hide"/>
-            </xpath>
+            <field name="default_code" position="after">
+                <field name="sap_item_code" optional="show"/>
+            </field>
         </field>
     </record>
 
@@ -83,15 +77,24 @@
         </field>
     </record>
 
-    <record id="view_purchase_order_tree_sap_inherit" model="ir.ui.view">
-        <field name="name">purchase.order.tree.sap.inherit</field>
+    <record id="view_purchase_order_view_list_sap_inherit" model="ir.ui.view">
+        <field name="name">purchase.order.view.list.sap.inherit</field>
         <field name="model">purchase.order</field>
-        <field name="inherit_id" ref="purchase.purchase_order_tree"/>
+        <field name="inherit_id" ref="purchase.purchase_order_view_tree"/>
         <field name="arch" type="xml">
-            <xpath expr="//list" position="inside">
-                <field name="sap_docentry" optional="hide"/>
-                <field name="sap_docnum" optional="hide"/>
-            </xpath>
+            <field name="name" position="after">
+                <field name="sap_docnum" optional="show"/>
+            </field>
+        </field>
+    </record>
+    <record id="view_purchase_order_kpis_tree_sap_inherit" model="ir.ui.view">
+        <field name="name">purchase.order.kpis.tree.sap.inherit</field>
+        <field name="model">purchase.order</field>
+        <field name="inherit_id" ref="purchase.purchase_order_kpis_tree"/>
+        <field name="arch" type="xml">
+            <field name="name" position="after">
+                <field name="sap_docnum" optional="show"/>
+            </field>
         </field>
     </record>
 
@@ -101,7 +104,6 @@
         <field name="inherit_id" ref="purchase.view_purchase_order_filter"/>
         <field name="arch" type="xml">
             <field name="partner_id" position="before">
-                <field name="sap_docentry"/>
                 <field name="sap_docnum"/>
             </field>
         </field>
@@ -124,10 +126,8 @@
         <field name="inherit_id" ref="account.view_move_form"/>
         <field name="arch" type="xml">
             <xpath expr="//group[@id='header_right_group']" position="inside">
-                <label for="sap_docnum" string="SAP Document" style="font-weight:bold;" 
-                       invisible="not sap_docnum"/>
-                <field name="sap_docnum" nolabel="1" readonly="1" 
-                       invisible="not sap_docnum"/>
+                <label for="sap_docnum" string="SAP Document" style="font-weight:bold;" invisible="not sap_docnum"/>
+                <field name="sap_docnum" nolabel="1" readonly="1" invisible="not sap_docnum"/>
             </xpath>
         </field>
     </record>
