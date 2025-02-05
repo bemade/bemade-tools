@@ -59,9 +59,19 @@ class SaleOrderLine(models.Model):
 class SapSaleOrderImporter(models.AbstractModel):
     _name = "sap.sale.order.importer"
     _description = "SAP Sales Order Importer"
-    _inherit = ["sap.sale.purchase.importer.mixin"]
+    _inherit = "sap.sale.purchase.importer.mixin"
 
+    # Configuration
+    _sap_header_table = "ordr"
+    _sap_lines_table = "rdr1"
+    _sap_text_lines_table = "rdr10"
+    _odoo_model = "sale.order"
+    _odoo_table = "sale_order"
+    _confirm_method = "action_confirm"
     _confirmed_state = "sale"
+    _date_field = "date_order"
+    _quantity_field = "qty_delivered"
+    _quantity_method_field = "qty_delivered_method"
 
     @api.model
     def _get_sap_users_dict(self):
@@ -78,7 +88,7 @@ class SapSaleOrderImporter(models.AbstractModel):
     def import_sales_orders(self, cr):
         self._uppercase_all_cardcodes(cr)
         self._import_utm_sources(cr)
-        self._import_orders_and_quotations(cr)
+        self._import_all(cr)
 
     @api.model
     def _import_utm_sources(self, cr):
@@ -146,7 +156,8 @@ class SapSaleOrderImporter(models.AbstractModel):
         cr.execute("UPDATE ordr SET cardcode = UPPER(cardcode)")
         cr.execute("UPDATE oqut SET cardcode = UPPER(cardcode)")
 
-    def _import_orders_and_quotations(self, cr):
+    def _import_all(self, cr):
+        # First import orders
         imported_docnums = tuple(self._get_imported_docnums())
         _logger.info(f"Found {len(imported_docnums)} imported sales orders.")
         args = []
@@ -156,48 +167,29 @@ class SapSaleOrderImporter(models.AbstractModel):
             args = [imported_docnums]
         order_pager = PagingIterator(
             cr,
-            fetch_query=f"select * from ordr {where}",
+            fetch_query=f"select * from {self._sap_header_table} {where}",
             fetch_args=args,
-            count_query=f"select count(*) from ordr {where}",
-            count_args=args,
-            limit=500,
-            orderby="docentry",
-            logger=_logger,
-        )
-        where = """
-        where docentry not in (
-        select baseentry from rdr1 where basetype = 23
-        )
-        """
-        if imported_docnums:
-            where += " and docnum not in %s"
-            args = [imported_docnums]
-
-        cr.execute("SELECT * FROM oqut ")
-        quote_pager = PagingIterator(
-            cr,
-            fetch_query=f"select * from oqut {where}",
-            fetch_args=args,
-            count_query=f"select count(*) from oqut {where}",
+            count_query=f"select count(*) from {self._sap_header_table} {where}",
             count_args=args,
             limit=500,
             orderby="docentry",
             logger=_logger,
         )
         _logger.info("Creating orders.")
-        self._create_orders(cr, order_pager, "rdr1", "sale.order")
+        self._create_orders(cr, order_pager)
         _logger.info("Confirming closed orders.")
         self._confirm_closed_orders(cr)
+        self._set_delivered_received_qty_for_closed_orders(cr)
         _logger.info("Confirming open orders.")
         self._confirm_open_orders(cr)
-        _logger.info("Creating quotations.")
-        self._create_orders(cr, quote_pager, "qut1", "sale.order")
-        _logger.info("Canceling canceled orders and quotations.")
-        self._cancel_canceled_orders_quotations(cr)
-        self._set_order_dates(cr, "sale_order", "ordr", "date_order")
-        self._set_order_dates(cr, "sale_order", "oqut", "date_order")
+
+        _logger.info("Canceling canceled orders.")
+        self._cancel_canceled_orders(cr)
+        self._set_order_dates(cr)
         _logger.info("Recomputing delivery status for all orders.")
         self._recompute_delivery_status()
+        self.env[self._odoo_model].flush_model()
+        self.env.cr.commit()
 
     @api.model
     def init_pricelists(self):
@@ -342,43 +334,9 @@ class SapSaleOrderImporter(models.AbstractModel):
     def _get_picking_policy(self, ordr):
         return "direct" if ordr["partsupply"] == "Y" else "direct"
 
-    @api.model
-    def _confirm_closed_orders(self, cr):
-        self._confirm_closed_orders_by_table(cr, "ordr", "sale_order", "sale.order")
-        self._set_delivered_qty_for_closed_orders(cr)
-
-    @api.model
-    def _set_delivered_qty_for_closed_orders(self, cr):
-        closed_orders = self._get_closed_orders_by_table(cr, "ordr")
-        orders = self.env["sale.order"].search(
-            [
-                ("sap_docnum", "in", closed_orders),
-                ("order_line.qty_delivered_method", "!=", "manual"),
-            ]
-        )
-        if not orders:
-            return
-        _logger.info(f"Setting delivered qty for {len(orders)} orders.")
-        for order in orders:
-            for line in order.order_line:
-                line.qty_delivered_method = "manual"
-                line.qty_delivered = line.product_uom_qty
-        self.env.cr.commit()
-
-    def _cancel_canceled_orders_quotations(self, cr):
-        self._cancel_canceled_orders_and_quotations_by_table(
-            cr, "ordr", "oqut", "sale_order"
-        )
-
-    def _confirm_open_orders(self, cr):
-        self._confirm_open_orders_by_table(cr, "ordr", "sale.order", "action_confirm")
-
-    def _get_imported_docnums(self):
-        return self._get_imported_docnums_from_table("sale_order")
-
     def _add_procurement_groups_for_closed_orders(self, cr):
         _logger.info(f"Adding procurement groups for closed orders.")
-        closed_orders = self._get_closed_orders_by_table(cr, "ordr")
+        closed_orders = self._get_closed_orders(cr)
         chunk_size = 500
         chunks = [
             closed_orders[i : i + chunk_size] for i in range(0, len(closed_orders), 100)

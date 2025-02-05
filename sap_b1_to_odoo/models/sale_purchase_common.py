@@ -16,7 +16,66 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
     _name = "sap.sale.purchase.importer.mixin"
     _description = "SAP Sale and Purchase Order Importer Mixin"
 
+    # Configuration attributes to be defined by subclasses
+    _sap_header_table = None  # e.g., 'ORDR', 'OPOR'
+    _sap_lines_table = None  # e.g., 'RDR1', 'POR1'
+    _sap_text_lines_table = None  # e.g., 'RDR10', 'POR10'
+    _odoo_model = None  # e.g., 'sale.order', 'purchase.order'
+    _odoo_table = None  # e.g., 'sale_order', 'purchase_order'
+    _confirm_method = None  # e.g., 'action_confirm', 'button_confirm'
+    _confirmed_state = None  # e.g., 'sale', 'purchase'
+    _date_field = None  # e.g., 'date_order', 'date_approve'
+    _quantity_field = (
+        None  # e.g., 'qty_delivered' for sales, 'qty_received' for purchase
+    )
+    _quantity_method_field = None  # e.g., 'qty_delivered_method' for sales
+
     @api.model
+    def _check_configuration(self):
+        """Ensure all required configuration attributes are set"""
+        required_attrs = [
+            "_sap_header_table",
+            "_sap_lines_table",
+            "_sap_text_lines_table",
+            "_odoo_model",
+            "_odoo_table",
+            "_confirm_method",
+            "_confirmed_state",
+            "_date_field",
+            "_quantity_field",
+            "_quantity_method_field",
+        ]
+        for attr in required_attrs:
+            if not getattr(self, attr):
+                raise ValueError(f"Missing required configuration attribute: {attr}")
+
+    @api.model
+    def _set_delivered_received_qty_for_closed_orders(self, cr):
+        """Generic method to set delivered/received quantities for closed orders.
+        This method works for both sale and purchase orders and sets the quantity delivered
+        or received equal to the ordered quantity.
+        """
+        closed_orders = self._get_closed_orders(cr)
+        if not closed_orders:
+            return
+
+        _logger.info(f"Setting {self._quantity_field} for {len(closed_orders)} orders")
+
+        # Get the model to work with
+        OrderModel = self.env[self._odoo_model]
+        orders = OrderModel.search([("sap_docnum", "in", closed_orders)])
+
+        for order in orders:
+            for line in order.order_line:
+                line.write(
+                    {
+                        self._quantity_field: line.product_uom_qty,
+                        self._quantity_method_field: "manual",
+                    }
+                )
+
+        self.env.cr.commit()
+
     def _get_row_vals(self, row, products_dict, sap_table):
         # Handle text lines from RDR10/POR10
         if "linetext" in row:  # This is a text line
@@ -114,7 +173,9 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             )
         }
 
-    def _get_imported_docnums_from_table(self, table):
+    def _get_imported_docnums(self):
+        """Get already imported document numbers from Odoo"""
+        table = self._odoo_table
         sql = SQL(
             """
         SELECT distinct(sap_docnum) from %s WHERE sap_docnum is not null
@@ -126,7 +187,9 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         docnums = [order[0] for order in cr.fetchall()]
         return docnums
 
-    def _create_orders(self, cr, pager, lines_table, header_model, multiproc=True):
+    def _create_orders(self, cr, pager, multiproc=True):
+        """Create orders from SAP data"""
+        self._check_configuration()
         start_method = multiprocessing.get_start_method()
         multiprocessing.set_start_method("fork", force=True)
         chunks = [chunk for chunk in pager]
@@ -140,10 +203,10 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                         self.env.cr.dbname,
                         self.env.uid,
                         dict(self.env.context),
-                        header_model,
+                        self._odoo_model,
                         chunk,
-                        self._get_lines(cr, lines_table, chunk),
-                        lines_table,
+                        self._get_lines(cr, chunk),
+                        self._sap_lines_table,
                     )
                     _logger.info(f"Completed chunk {i}/{total_chunks}")
             else:
@@ -155,10 +218,10 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                             self.env.cr.dbname,
                             self.env.uid,
                             dict(self.env.context),
-                            header_model,
+                            self._odoo_model,
                             chunk,
-                            self._get_lines(cr, lines_table, chunk),
-                            lines_table,
+                            self._get_lines(cr, chunk),
+                            self._sap_lines_table,
                         )
                         for chunk in chunks
                     ]
@@ -172,22 +235,19 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             multiprocessing.set_start_method(start_method, force=True)
             _logger.info("Import completed.")
 
-    @staticmethod
-    def _get_lines(cr, lines_table, sap_orders):
+    def _get_lines(self, cr, sap_orders):
         docentries = [order["docentry"] for order in sap_orders]
         # Get product lines
         query = SQL(
             "SELECT *, 'product' as line_type FROM %s WHERE docentry in %s ORDER BY docentry, linenum",
-            SQL.identifier(lines_table),
+            SQL.identifier(self._sap_lines_table),
             tuple(docentries),
         )
         cr.execute(query)
         product_lines = cr.dictfetchall()
 
         # Get text lines from RDR10/POR10
-        text_table = lines_table.replace(
-            "1", "10"
-        )  # Convert RDR1->RDR10 or POR1->POR10
+        text_table = self._sap_text_lines_table
         query = SQL(
             """
             SELECT *, 'text' as line_type 
@@ -237,11 +297,11 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         raise NotImplementedError
 
     @api.model
-    def _confirm_closed_orders_by_table(self, cr, sap_table, odoo_table, odoo_model):
+    def _confirm_closed_orders(self, cr):
         """Mark confirmed orders that are confirmed and closed in SAP. This does NOT
         create delivery orders as the confirmation is just flagged directly in the DB.
         """
-        confirmed_orders = self._get_closed_orders_by_table(cr, sap_table)
+        confirmed_orders = self._get_closed_orders(cr)
         state = getattr(self, "_confirmed_state")
         if confirmed_orders:
             _logger.info(
@@ -256,7 +316,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             self.env.cr.execute(
                 SQL(
                     sql,
-                    SQL.identifier(odoo_table),
+                    SQL.identifier(self._odoo_table),
                     state,
                     tuple(
                         confirmed_orders,
@@ -265,7 +325,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             )
 
     @api.model
-    def _get_closed_orders_by_table(self, cr, sap_table):
+    def _get_closed_orders(self, cr):
         """
         Retrieve the list of closed orders for a specific SAP table.
 
@@ -284,14 +344,12 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         SELECT docnum from %s
         WHERE docstatus = 'C' and invntsttus = 'C' and canceled = 'N'
         """
-        cr.execute(SQL(sql, SQL.identifier(sap_table)))
+        cr.execute(SQL(sql, SQL.identifier(self._sap_header_table)))
         confirmed_orders = [order[0] for order in cr.fetchall()]
         return confirmed_orders
 
     @api.model
-    def _cancel_canceled_orders_and_quotations_by_table(
-        self, cr, sap_order_table, sap_quote_table, odoo_table
-    ):
+    def _cancel_canceled_orders(self, cr):
         """Mark canceled orders as cancelled directly in the DB.
 
         An order should be cancelled if:
@@ -305,14 +363,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         WHERE canceled = 'Y' 
         OR (confirmed='N' AND (docstatus='C' OR invntsttus='C'))
         """
-        args = [SQL.identifier(sap_order_table)]
-        if sap_quote_table:
-            sql += """
-            UNION
-            SELECT docnum FROM %s
-            WHERE canceled = 'Y'
-            """
-            args.append(SQL.identifier(sap_quote_table))
+        args = [SQL.identifier(self._sap_header_table)]
         cr.execute(SQL(sql, *args))
         canceled_orders = [order[0] for order in cr.fetchall()]
         if canceled_orders:
@@ -321,11 +372,11 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
                 UPDATE %s set state='cancel' WHERE sap_docnum in %s
                 """
             self.env.cr.execute(
-                SQL(sql, SQL.identifier(odoo_table), tuple(canceled_orders))
+                SQL(sql, SQL.identifier(self._odoo_table), tuple(canceled_orders))
             )
 
     @api.model
-    def _confirm_open_orders_by_table(self, cr, sap_table, odoo_model, confirm_method):
+    def _confirm_open_orders(self, cr):
         """Mark confirmed orders that are open and confirmed in SAP. This is done
         separately due to the long runtime of confirming orders through the ORM.
 
@@ -336,7 +387,6 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
            - It is open (docstatus='O') with open inventory (invntsttus='O') OR
            - It is closed (docstatus='C')
         """
-        self.env["sale.order"].flush_model()
         sql = """
         SELECT docnum, docdate, createdate FROM %s
         WHERE canceled='N' AND confirmed='Y' 
@@ -345,27 +395,28 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             OR docstatus='C'
         )
         """
-        cr.execute(SQL(sql, SQL.identifier(sap_table)))
+        cr.execute(SQL(sql, SQL.identifier(self._sap_header_table)))
         sap_orders = cr.fetchall()
         open_orders = [order[0] for order in sap_orders]
         active_automations = self.env["base.automation"].search([("active", "=", True)])
         active_automations.active = False
         self.env["base.automation"].flush_model()
         if open_orders:
-            self._sub_confirm_open_orders_by_table(
-                odoo_model,
-                confirm_method,
+            self._sub_confirm_open_orders(
                 open_orders,
             )
             self.env.cr.commit()
         active_automations.active = True
 
-    def _set_order_dates(self, cr, odoo_table, sap_table, date_field):
+    def _set_order_dates(self, cr):
         cr.execute(
-            SQL("SELECT docnum, docdate, createdate FROM %s", SQL.identifier(sap_table))
+            SQL(
+                "SELECT docnum, docdate, createdate FROM %s",
+                SQL.identifier(self._sap_header_table),
+            )
         )
         sap_orders = cr.fetchall()
-        self._set_order_dates_sub(sap_orders, odoo_table, date_field)
+        self._set_order_dates_sub(sap_orders, self._odoo_table, self._date_field)
         self.env.cr.commit()
 
     def _set_order_dates_sub(self, sap_orders, odoo_table, date_field):
@@ -401,15 +452,15 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         )
         self.env.cr.commit()
 
-    def _sub_confirm_open_orders_by_table(self, odoo_model, confirm_method, sap_orders):
-        recs = self.env[odoo_model].search(
+    def _sub_confirm_open_orders(self, sap_orders):
+        recs = self.env[self._odoo_model].search(
             [
                 ("sap_docnum", "in", sap_orders),
                 ("state", "in", ["draft", "sent"]),
             ],
         )
         _logger.info(f"Confirming {len(recs)} open orders ...")
-        method = getattr(recs, confirm_method)
+        method = getattr(recs, self._confirm_method)
         method()
 
 
