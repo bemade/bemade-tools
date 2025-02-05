@@ -323,9 +323,20 @@ class SapResPartnerImporter(models.AbstractModel):
         odoo_country = country_dict.get(country) or country_dict.get("CA")
         odoo_state = self._get_state(states_dict, state, country)
         if not odoo_state and state:
-            _logger.warning(
-                f"Could not find state with code {state} for country {country}"
+            matching_states = self.env["res.country.state"].search(
+                [("code", "=", state)]
             )
+            if len(matching_states) == 1:
+                odoo_state = matching_states[0]
+                odoo_country = odoo_state.country_id
+            elif len(matching_states) > 1:
+                _logger.warning(
+                    f"Found multiple states with code {state} for country {country}."
+                )
+            else:
+                _logger.warning(
+                    f"Could not find state with code {state} for country {country}"
+                )
         return odoo_country, odoo_state
 
     @api.model
@@ -493,18 +504,22 @@ class SapResPartnerImporter(models.AbstractModel):
             UPDATE res_partner rp
             SET parent_id = pm.parent_id, commercial_partner_id = pm.parent_id
             FROM parent_matches pm
-            WHERE 
-                rp.id = pm.child_id
+            WHERE rp.id = pm.child_id
                 AND (rp.parent_id IS NULL OR rp.parent_id != pm.parent_id OR rp.commercial_partner_id != pm.parent_id);  -- Only update if different
             """
         )
-        # Fix address info
+        # Fill in a partner's address if there isn't already information in the fields
         sql = """
         WITH parent_matches AS (
                 SELECT
                     child.id as child_id,
                     parent.id as parent_id,
-                    parent.%(col)s as %(col)s
+                    parent.street as street,
+                    parent.street2 as street2,
+                    parent.city as city,
+                    parent.country_id as country_id,
+                    parent.state_id as state_id,
+                    parent.zip as zip
                 FROM
                     res_partner child
                     INNER JOIN res_partner parent ON child.parent_id = parent.id
@@ -514,10 +529,15 @@ class SapResPartnerImporter(models.AbstractModel):
             UPDATE res_partner rp
             SET %(col)s = pm.%(col)s
             FROM parent_matches pm
-            WHERE (rp.type = 'contact' OR rp.type IS NULL)
-                AND rp.id = pm.child_id
+            WHERE rp.id = pm.child_id
                 AND rp.parent_id IS NOT NULL
-                AND rp.%(col)s IS NULL
+                AND (rp.%(col)s IS NULL OR rp.%(col)s = '')
+                AND (rp.street IS NULL OR rp.street = pm.street)
+                AND (rp.street2 IS NULL OR rp.street2 = pm.street2)
+                AND (rp.city IS NULL OR rp.city = pm.city)
+                AND (rp.country_id IS NULL OR rp.country_id = pm.country_id)
+                AND (rp.state_id IS NULL OR rp.state_id = pm.state_id)
+                AND (rp.zip IS NULL OR rp.zip = pm.zip)
         """
         for col in ["street", "street2", "city", "country_id", "state_id", "zip"]:
             self.env.cr.execute(sql % {"col": col})

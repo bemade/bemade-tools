@@ -197,11 +197,12 @@ class SapPurchaseOrderImporter(models.AbstractModel):
     @api.model
     def _cancel_canceled_orders_and_quotations(self, cr):
         self._cancel_canceled_orders_and_quotations_by_table(
-            cr, "ordr", None, "purchase_order"
+            cr, "opor", None, "purchase_order"
         )
 
     @api.model
     def _confirm_open_orders(self, cr):
+        """Confirm orders that are confirmed in SAP and have open inventory status."""
         self._confirm_open_orders_by_table(
             cr, "opor", "purchase.order", "button_confirm"
         )
