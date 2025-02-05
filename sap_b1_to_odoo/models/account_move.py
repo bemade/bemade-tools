@@ -340,7 +340,7 @@ class InvoiceImporter(models.AbstractModel):
     @api.model
     def _get_import_config(self):
         return {
-            "header_table": "OINV",
+            "header_table": "oinv",
             "line_table": "inv1",
             "move_type": "out_invoice",
         }
@@ -348,9 +348,9 @@ class InvoiceImporter(models.AbstractModel):
     @api.model
     def _get_order_line_link_config(self):
         return {
-            "invoice_line_table": "INV1",
-            "order_line_table": "RDR1",
-            "picking_table": "DLN1",
+            "invoice_line_table": "inv1",
+            "order_line_table": "rdr1",
+            "picking_table": "dln1",
             "picking_basetype": 15,  # Deliveries have BaseType = 15
             "order_basetype": 17,  # Sales Orders have BaseType = 17
             "order_line_model": "sale.order.line",
@@ -382,7 +382,7 @@ class VendorBillsImporter(models.AbstractModel):
     def _get_order_line_link_config(self):
         return {
             "invoice_line_table": "PCH1",
-            "order_line_table": "POR1",
+            "order_line_table": "por1",
             "picking_table": "PDN1",
             "picking_basetype": 20,  # Goods Receipt POs have BaseType = 20
             "order_basetype": 22,  # Purchase Orders have BaseType = 22

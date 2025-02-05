@@ -54,7 +54,18 @@ class SapPurchaseOrderImporter(models.AbstractModel):
     _name = "sap.purchase.order.importer"
     _description = "SAP Purchase Order Importer"
     _inherit = "sap.sale.purchase.importer.mixin"
+
+    # Configuration
+    _sap_header_table = "opor"
+    _sap_lines_table = "por1"
+    _sap_text_lines_table = "por10"
+    _odoo_model = "purchase.order"
+    _odoo_table = "purchase_order"
+    _confirm_method = "button_confirm"
     _confirmed_state = "purchase"
+    _date_field = "date_approve"
+    _quantity_field = "qty_received"
+    _quantity_method_field = "qty_received_method"
 
     @api.model
     def import_purchase_orders(self, cr):
@@ -76,23 +87,23 @@ class SapPurchaseOrderImporter(models.AbstractModel):
             args = [imported_docnums]
         order_pager = PagingIterator(
             cr,
-            fetch_query=f"SELECT * from OPOR {where}",
+            fetch_query=f"SELECT * from {self._sap_header_table} {where}",
             fetch_args=args,
-            count_query=f"SELECT count(*) from OPOR {where}",
+            count_query=f"SELECT count(*) from {self._sap_header_table} {where}",
             count_args=args,
             limit=500,
             orderby="docentry",
             logger=_logger,
         )
-        self._create_orders(cr, order_pager, "por1", "purchase.order")
+        self._create_orders(cr, order_pager)
         self._confirm_closed_orders(cr)
+        self._set_delivered_received_qty_for_closed_orders(cr)
         self._confirm_open_orders(cr)
-        self._cancel_canceled_orders_and_quotations(cr)
+        self._cancel_canceled_orders(cr)
         self._recompute_receipt_status()
-
-    @api.model
-    def _get_imported_docnums(self):
-        return self._get_imported_docnums_from_table("purchase_order")
+        self._set_order_dates(cr)
+        self.env[self._odoo_model].flush_model()
+        self.env.cr.commit()
 
     @api.model
     def _get_picking_policy(self, order):
@@ -169,42 +180,6 @@ class SapPurchaseOrderImporter(models.AbstractModel):
         """,
                 tuple(closed_orders),
             )
-        )
-
-    @api.model
-    def _confirm_closed_orders(self, cr):
-        self._confirm_closed_orders_by_table(
-            cr, "opor", "purchase_order", "purchase.order"
-        )
-        self._set_received_quantity_on_closed_orders(cr)
-
-    @api.model
-    def _set_received_quantity_on_closed_orders(self, cr):
-        closed_orders = self._get_closed_orders_by_table(cr, "opor")
-        sql = """
-        WITH orders AS (SELECT id FROM purchase_order WHERE sap_docnum IN %s)
-        UPDATE purchase_order_line SET qty_received=product_uom_qty
-        WHERE purchase_order_line.order_id IN (SELECT id FROM orders)
-        """
-        self.env.cr.execute(SQL(sql, tuple(closed_orders)))
-
-        sql = """
-        UPDATE purchase_order SET receipt_status = 'full', invoice_status = 'invoiced'
-        WHERE sap_docnum IN %s
-        """
-        self.env.cr.execute(SQL(sql, tuple(closed_orders)))
-
-    @api.model
-    def _cancel_canceled_orders_and_quotations(self, cr):
-        self._cancel_canceled_orders_and_quotations_by_table(
-            cr, "opor", None, "purchase_order"
-        )
-
-    @api.model
-    def _confirm_open_orders(self, cr):
-        """Confirm orders that are confirmed in SAP and have open inventory status."""
-        self._confirm_open_orders_by_table(
-            cr, "opor", "purchase.order", "button_confirm"
         )
 
     def _recompute_receipt_status(self):
