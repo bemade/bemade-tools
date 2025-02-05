@@ -299,13 +299,16 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         sql = """
         SELECT docnum FROM %s
         WHERE canceled = 'Y' OR (confirmed='Y' and docstatus='C' and invntsttus='O')
-        UNION
-        SELECT docnum FROM %s
-        WHERE canceled = 'Y'
         """
-        cr.execute(
-            SQL(sql, SQL.identifier(sap_order_table), SQL.identifier(sap_quote_table))
-        )
+        args = [SQL.identifier(sap_order_table)]
+        if sap_quote_table:
+            sql += """
+            UNION
+            SELECT docnum FROM %s
+            WHERE canceled = 'Y'
+            """
+            args.append(SQL.identifier(sap_quote_table))
+        cr.execute(SQL(sql, *args))
         canceled_orders = [order[0] for order in cr.fetchall()]
         if canceled_orders:
             _logger.info(f"Cancelling {len(canceled_orders)} cancelled orders ...")
