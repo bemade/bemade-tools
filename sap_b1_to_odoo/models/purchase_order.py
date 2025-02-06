@@ -66,6 +66,7 @@ class SapPurchaseOrderImporter(models.AbstractModel):
     _date_field = "date_approve"
     _quantity_field = "qty_received"
     _quantity_method_field = "qty_received_method"
+    _order_line_field = "purchase_line_id"
 
     @api.model
     def import_purchase_orders(self, cr):
@@ -95,12 +96,21 @@ class SapPurchaseOrderImporter(models.AbstractModel):
             orderby="docentry",
             logger=_logger,
         )
+        _logger.info("Creating purchase orders.")
         self._create_orders(cr, order_pager)
+        _logger.info("Confirming closed orders (no picking).")
         self._confirm_closed_orders(cr)
-        self._set_delivered_received_qty_for_closed_orders(cr)
-        self._confirm_open_orders(cr)
+        _logger.info("Cancelling canceled orders.")
         self._cancel_canceled_orders(cr)
+        _logger.info("Recomputing receipt status for all orders.")
         self._recompute_receipt_status()
+        _logger.info("Setting delivered quantities for closed orders.")
+        self._set_delivered_received_qty_for_closed_orders(cr)
+        _logger.info("Confirming open orders.")
+        self._confirm_open_orders(cr)
+        _logger.info("Processing pickings that are partially shipped in SAP.")
+        self._validate_pickings_with_sap_quantities(cr)
+        _logger.info("Setting order dates.")
         self._set_order_dates(cr)
         self.env[self._odoo_model].flush_model()
         self.env.cr.commit()
