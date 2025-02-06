@@ -29,6 +29,9 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         None  # e.g., 'qty_delivered' for sales, 'qty_received' for purchase
     )
     _quantity_method_field = None  # e.g., 'qty_delivered_method' for sales
+    _order_line_field = (
+        None  # e.g., 'sale_line_id' for sales, 'purchase_line_id' for purchase
+    )
 
     @api.model
     def _check_configuration(self):
@@ -44,6 +47,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             "_date_field",
             "_quantity_field",
             "_quantity_method_field",
+            "_order_line_field",
         ]
         for attr in required_attrs:
             if not getattr(self, attr):
@@ -462,6 +466,97 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         _logger.info(f"Confirming {len(recs)} open orders ...")
         method = getattr(recs, self._confirm_method)
         method()
+
+    @api.model
+    def _validate_pickings_with_sap_quantities(self, cr):
+        """Validate stock pickings for open orders based on SAP received/delivered quantities.
+
+        This method:
+        1. Finds all open orders in SAP where openqty <> quantity
+        2. Gets the corresponding stock pickings in Odoo
+        3. Sets the move line quantities to match the received/delivered quantity in SAP
+        4. Validates the pickings, which will generate backorders for remaining quantities
+        """
+        # Get all open orders with different open vs ordered quantities
+        sql = """
+        SELECT o.docnum, l.itemcode, l.linenum, 
+               (l.quantity - l.openqty) as quantity
+        FROM %s o
+        JOIN %s l ON l.docentry = o.docentry
+        WHERE o.docstatus = 'O'
+          AND o.canceled = 'N'
+          AND o.confirmed = 'Y'
+        ORDER BY o.docnum, l.linenum
+        """
+        cr.execute(
+            SQL(
+                sql,
+                SQL.identifier(self._sap_header_table),
+                SQL.identifier(self._sap_lines_table),
+            )
+        )
+        sap_lines = cr.dictfetchall()
+
+        if not sap_lines:
+            return
+
+        # Group lines by order
+        order_lines = {}
+        for line in sap_lines:
+            if line["docnum"] not in order_lines:
+                order_lines[line["docnum"]] = []
+            order_lines[line["docnum"]].append(line)
+
+        # Get corresponding Odoo orders
+        orders = self.env[self._odoo_model].search(
+            [
+                ("sap_docnum", "in", list(order_lines.keys())),
+                ("state", "=", self._confirmed_state),
+            ]
+        )
+
+        # Process each order's pickings
+        for order in orders:
+            # Get the pickings that are still in draft or waiting state
+            pickings = order.picking_ids.filtered(
+                lambda p: p.state in ["waiting", "confirmed", "assigned"]
+            )
+            if not pickings:
+                continue
+
+            sap_lines = order_lines[order.sap_docnum]
+            for picking in pickings:
+                # Process each move line
+                for move in picking.move_ids:
+                    order_line = move[self._order_line_field]
+                    if not order_line:
+                        move.quantity = 0
+                        continue
+
+                    # Find corresponding SAP line
+                    sap_line = next(
+                        (
+                            l
+                            for l in sap_lines
+                            if l["linenum"] + 2 == order_line.sap_line_num
+                        ),
+                        None,
+                    )
+                    if not sap_line:
+                        raise ValidationError(
+                            f"No SAP line found for order line {order_line}"
+                            f"in picking {picking}. Product {order_line.product_id.name}."
+                        )
+
+                    move.quantity = sap_line["quantity"]
+
+                # Force assign and validate picking if any moves have quantities set
+                if any(move.quantity > 0 for move in picking.move_ids):
+                    picking.with_context(skip_backorder=True).button_validate()
+
+        _logger.info(
+            f"Validated pickings for {len(orders)} orders based on SAP quantities"
+        )
 
 
 class PaymentTerms(models.Model):

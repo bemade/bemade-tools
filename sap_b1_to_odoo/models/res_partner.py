@@ -531,7 +531,7 @@ class SapResPartnerImporter(models.AbstractModel):
             FROM parent_matches pm
             WHERE rp.id = pm.child_id
                 AND rp.parent_id IS NOT NULL
-                AND (rp.%(col)s IS NULL OR rp.%(col)s = '')
+                AND (rp.%(col)s IS NULL)
                 AND (rp.street IS NULL OR rp.street = pm.street)
                 AND (rp.street2 IS NULL OR rp.street2 = pm.street2)
                 AND (rp.city IS NULL OR rp.city = pm.city)
