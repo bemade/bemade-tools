@@ -72,6 +72,7 @@ class SapSaleOrderImporter(models.AbstractModel):
     _date_field = "date_order"
     _quantity_field = "qty_delivered"
     _quantity_method_field = "qty_delivered_method"
+    _order_line_field = "sale_line_id"
 
     @api.model
     def _get_sap_users_dict(self):
@@ -177,17 +178,19 @@ class SapSaleOrderImporter(models.AbstractModel):
         )
         _logger.info("Creating orders.")
         self._create_orders(cr, order_pager)
-        _logger.info("Confirming closed orders.")
+        _logger.info("Confirming closed orders (no picking).")
         self._confirm_closed_orders(cr)
         self._set_delivered_received_qty_for_closed_orders(cr)
         _logger.info("Confirming open orders.")
         self._confirm_open_orders(cr)
-
         _logger.info("Canceling canceled orders.")
         self._cancel_canceled_orders(cr)
-        self._set_order_dates(cr)
         _logger.info("Recomputing delivery status for all orders.")
         self._recompute_delivery_status()
+        _logger.info("Processing pickings that are partially shipped in SAP.")
+        self._validate_pickings_with_sap_quantities(cr)
+        _logger.info("Setting order dates.")
+        self._set_order_dates(cr)
         self.env[self._odoo_model].flush_model()
         self.env.cr.commit()
 
