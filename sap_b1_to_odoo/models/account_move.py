@@ -109,7 +109,12 @@ class AccountMoveCommon(models.AbstractModel):
 
     @api.model
     def _get_order_line_links(self, cr):
-        """Get links between move lines and order lines."""
+        """Get links between move lines and order lines.
+
+        This method finds links between invoice lines and order lines through two paths:
+        1. Direct link: Invoice line -> Sales Order line
+        2. Through delivery: Invoice line -> Delivery line -> Sales Order line
+        """
         config = self._get_order_line_link_config()
         if not config:
             return {}
@@ -117,31 +122,36 @@ class AccountMoveCommon(models.AbstractModel):
         cr.execute(
             """
             SELECT 
-                {invoice_line_table}.DocEntry AS InvoiceDocEntry,
-                {invoice_line_table}.LineNum AS InvoiceLineNum,
-                {order_line_table}.DocEntry AS OrderDocEntry,
-                {order_line_table}.LineNum AS OrderLineNum
-            FROM 
-                {invoice_line_table}
-            INNER JOIN 
-                {picking_table}
-                ON {invoice_line_table}.BaseEntry = {picking_table}.DocEntry 
-                AND {invoice_line_table}.BaseLine = {picking_table}.LineNum 
-                AND {invoice_line_table}.BaseType = {picking_basetype}
-            INNER JOIN 
-                {order_line_table}
-                ON {picking_table}.BaseEntry = {order_line_table}.DocEntry 
-                AND {picking_table}.BaseLine = {order_line_table}.LineNum 
-                AND {picking_table}.BaseType = {order_basetype}
+                {invoice_line_table}.DocEntry AS invoicedocentry,
+                {invoice_line_table}.LineNum AS invoicelinenum,
+                CASE 
+                    WHEN {invoice_line_table}.BaseType = {order_basetype} THEN {invoice_line_table}.BaseEntry  -- Direct from sales order
+                    WHEN {invoice_line_table}.BaseType = {picking_basetype} THEN (  -- Through delivery
+                        SELECT BaseEntry 
+                        FROM {picking_table}
+                        WHERE DocEntry = {invoice_line_table}.BaseEntry 
+                        AND LineNum = {invoice_line_table}.BaseLine
+                    )
+                END as orderdocentry,
+                CASE 
+                    WHEN {invoice_line_table}.BaseType = {order_basetype} THEN {invoice_line_table}.BaseLine  -- Direct from sales order
+                    WHEN {invoice_line_table}.BaseType = {picking_basetype} THEN (  -- Through delivery
+                        SELECT BaseLine 
+                        FROM {picking_table}
+                        WHERE DocEntry = {invoice_line_table}.BaseEntry 
+                        AND LineNum = {invoice_line_table}.BaseLine
+                    )
+                END as orderlinenum
+            FROM {invoice_line_table}
+            WHERE {invoice_line_table}.BaseType IN ({picking_basetype}, {order_basetype})  -- delivery or sales order
             """.format(
                 invoice_line_table=config["invoice_line_table"],
-                order_line_table=config["order_line_table"],
                 picking_table=config["picking_table"],
                 picking_basetype=config["picking_basetype"],
                 order_basetype=config["order_basetype"],
             )
         )
-        rel_lines = cr.fetchall()
+        rel_lines = cr.dictfetchall()
 
         # Only get product lines (where sap_line_num is set)
         order_lines = self.env[config["order_line_model"]].search_read(
@@ -153,11 +163,15 @@ class AccountMoveCommon(models.AbstractModel):
             ["id", "sap_docentry", "sap_line_num"],
         )
         order_lines_dict = {
-            (line["sap_docentry"], line["sap_line_num"]): line["id"]
+            # The sap_line_num in order lines already has +2, so we need to subtract it here
+            (line["sap_docentry"], line["sap_line_num"] - 2): line["id"]
             for line in order_lines
         }
         return {
-            (row[0], row[1]): order_lines_dict.get((row[2], row[3]))
+            # The invoice line numbers from SAP don't have +2 yet
+            (row["invoicedocentry"], row["invoicelinenum"]): order_lines_dict.get(
+                (row["orderdocentry"], row["orderlinenum"])
+            )
             for row in rel_lines
         }
 
@@ -224,6 +238,36 @@ class AccountMoveCommon(models.AbstractModel):
         users_dict = self._get_users_dict()
         invoice_user_id = users_dict.get(order.get("slpcode"), False)
 
+        # Get the currency from SAP's DocCur field, default to CAD if not set
+        currency_code = order.get("doccur", "CAD")
+        currency = self.env["res.currency"].search([("name", "=", currency_code)])
+        if not currency:
+            currency = self.env.ref("base.CAD")
+
+        # Get the currency rate from SAP's DocRate field
+        # SAP stores the rate as foreign currency to base currency
+        # Odoo stores it as 1 / that rate
+        rate = order.get("docrate", 1.0)
+        if rate and rate != 1.0:
+            # Create a rate for this specific date if it doesn't exist
+            date = fix_tz(order["docdate"])
+            existing_rate = self.env["res.currency.rate"].search(
+                [
+                    ("currency_id", "=", currency.id),
+                    ("company_id", "=", self.env.company.id),
+                    ("name", "=", date),
+                ]
+            )
+            if not existing_rate:
+                self.env["res.currency.rate"].create(
+                    {
+                        "currency_id": currency.id,
+                        "rate": 1.0 / rate,  # Invert the rate for Odoo
+                        "name": date,
+                        "company_id": self.env.company.id,
+                    }
+                )
+
         return {
             "partner_id": partner.id,
             "invoice_date": fix_tz(order["docdate"]),
@@ -235,6 +279,7 @@ class AccountMoveCommon(models.AbstractModel):
             "ref": order["numatcard"],
             "line_ids": move_lines,
             "invoice_user_id": invoice_user_id,
+            "currency_id": currency.id,
         }
 
     @api.model
