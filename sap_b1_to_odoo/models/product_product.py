@@ -1,3 +1,4 @@
+from collections import defaultdict
 from odoo import models, fields, api
 from odoo.addons.mrp.models.stock_quant import StockQuant
 import logging
@@ -10,10 +11,6 @@ from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 workers = 8
 
 _logger = logging.getLogger(__name__)
-
-
-def _dummy_check_kits(self):
-    pass
 
 
 class ProductTemplate(models.Model):
@@ -230,35 +227,208 @@ class SapProductImporter(models.AbstractModel):
                 }
             )
 
+    def _get_kit_component_quantities(self, product, quantity):
+        """Get the component quantities for a kit product.
+
+        Args:
+            product: product.product record that is a kit
+            quantity: quantity of the kit needed
+
+        Returns:
+            dict: product_id -> quantity mapping for components
+        """
+        # Get the phantom BOM for this product
+        bom = self.env["mrp.bom"].sudo()._bom_find(product, bom_type="phantom")[product]
+        if not bom:
+            _logger.warning(
+                "Product %s is marked as a kit but has no phantom BOM",
+                product.display_name,
+            )
+            return {}
+
+        components = defaultdict(float)
+
+        # For each BOM line, calculate the needed component quantity
+        for line in bom.bom_line_ids:
+            # Skip this component if it shouldn't be included based on product variant
+            if line._skip_bom_line(product):
+                continue
+
+            # Convert component quantity to the stock UOM if needed
+            component = line.product_id
+            line_qty = line.product_uom_id._compute_quantity(
+                line.product_qty, component.uom_id
+            )
+            components[component] += line_qty * quantity
+
+            # If the component is itself a kit, recursively get its components
+            if component.is_kits:
+                sub_components = self._get_kit_component_quantities(
+                    component, components[component]
+                )
+                for sub_comp, sub_qty in sub_components.items():
+                    components[sub_comp] += sub_qty
+                del components[component]  # Remove the kit component itself
+
+        return components
+
     def _import_stock_quants(self, cr):
-        products = self.env["product.product"].search(
-            [("active", "in", [True, False]), ("sap_item_code", "!=", False)]
+        self.env.flush_all()
+        cr.execute(
+            """
+            SELECT oitw.itemcode,oitw.onhand
+            FROM oitw 
+            INNER JOIN oitm ON oitw.itemcode = oitm.itemcode and oitw.onhand > 0
+            """
         )
+        stocks = cr.dictfetchall()
+        if not stocks:
+            return
+
+        products = self.env["product.product"].search(
+            [("sap_item_code", "in", [s["itemcode"] for s in stocks])]
+        )
+        products_dict = {p.sap_item_code: p for p in products}
+
+        # Get the stock location from the warehouse
         warehouse = self.env["stock.warehouse"].search(
             [("company_id", "=", self.env.company.id)], limit=1
         )
         location = warehouse.lot_stock_id
-        cr.execute("SELECT itemcode, onhand FROM oitm WHERE validfor='Y'")
-        sap_stock = cr.dictfetchall()
-        codes = [stock["itemcode"] for stock in sap_stock]
-        products_dict = {
-            p.sap_item_code: p for p in products if p.sap_item_code in codes
-        }
-        vals = []
-        for stock in sap_stock:
-            vals.append(
-                {
-                    "product_id": products_dict[stock["itemcode"]].id,
-                    "quantity": stock["onhand"],
-                    "location_id": location.id,
-                }
+
+        # Separate kits from regular products
+        kit_vals = []
+        regular_vals = []
+
+        for stock in stocks:
+            if stock["itemcode"] not in products_dict:
+                continue
+
+            product = products_dict[stock["itemcode"]]
+
+            if product.is_kits:
+                kit_vals.append((product, stock["onhand"], location))
+            else:
+                regular_vals.append(
+                    {
+                        "product_id": product.id,
+                        "quantity": stock["onhand"],
+                        "location_id": location.id,
+                    }
+                )
+
+        # Pre-fetch all products and locations we'll need
+        all_product_ids = set()
+        all_location_ids = set()
+
+        # Gather IDs from regular vals
+        for val in regular_vals:
+            all_product_ids.add(val["product_id"])
+            all_location_ids.add(val["location_id"])
+
+        # Pre-fetch all products and locations
+        products = self.env["product.product"].browse(list(all_product_ids))
+        locations = self.env["stock.location"].browse(list(all_location_ids))
+
+        # Create lookup dictionaries
+        products_by_id = {p.id: p for p in products}
+        locations_by_id = {l.id: l for l in locations}
+
+        # Get all existing quants
+        existing_quants = {}
+        for quant in self.env["stock.quant"].search(
+            [
+                ("location_id", "in", list(all_location_ids)),
+                ("product_id", "in", list(all_product_ids)),
+            ]
+        ):
+            existing_quants[(quant.product_id, quant.location_id)] = quant
+
+        def process_quants(vals_list, existing_quants, products_dict, locations_dict):
+            """Process a list of quant values, either creating new quants or updating existing ones.
+
+            Args:
+                vals_list: List of dicts with product_id, location_id, and quantity
+                existing_quants: Dict of existing quants keyed by (product, location)
+                products_dict: Dict of product records keyed by id
+                locations_dict: Dict of location records keyed by id
+
+            Returns:
+                Tuple of (quants_to_create, quants_to_update)
+            """
+            to_create = []
+            to_update = []
+
+            for val in vals_list:
+                product = products_dict.get(val["product_id"])
+                location = locations_dict.get(val["location_id"])
+                if not product or not location:
+                    continue
+
+                key = (product, location)
+                if key in existing_quants:
+                    quant = existing_quants[key]
+                    quant.quantity += val["quantity"]
+                    to_update.append(quant)
+                else:
+                    to_create.append(val)
+
+            return to_create, to_update
+
+        def batch_create(to_create, batch_size=1000):
+            """Create quants in batches."""
+            for i in range(0, len(to_create), batch_size):
+                batch = to_create[i : i + batch_size]
+                self.env["stock.quant"].create(batch)
+                self.env.cr.commit()
+
+        # Process regular products
+        regular_create, regular_update = process_quants(
+            regular_vals, existing_quants, products_by_id, locations_by_id
+        )
+        batch_create(regular_create)
+        if regular_update:
+            self.env.cr.commit()  # Commit the quantity updates
+
+        # Handle kit products
+        components_to_update = defaultdict(float)
+        for product, quantity, location in kit_vals:
+            _logger.info(
+                "Processing kit %s with quantity %s", product.display_name, quantity
             )
-        real_check_kits = StockQuant._check_kits
-        StockQuant._check_kits = _dummy_check_kits
-        try:
-            self.env["stock.quant"].create(vals)
-        finally:
-            StockQuant._check_kits = real_check_kits
+            components = self._get_kit_component_quantities(product, quantity)
+
+            # Aggregate component quantities by location
+            for component, comp_qty in components.items():
+                components_to_update[(component, location)] += comp_qty
+
+        # Convert component quantities to vals list
+        component_vals = [
+            {
+                "product_id": component.id,
+                "quantity": quantity,
+                "location_id": location.id,
+            }
+            for (component, location), quantity in components_to_update.items()
+        ]
+
+        # Add component product IDs to our lookup
+        for val in component_vals:
+            all_product_ids.add(val["product_id"])
+
+        # Update product lookup with any new components
+        new_products = self.env["product.product"].browse(
+            list(all_product_ids - set(products_by_id.keys()))
+        )
+        products_by_id.update({p.id: p for p in new_products})
+
+        # Process component quants
+        component_create, component_update = process_quants(
+            component_vals, existing_quants, products_by_id, locations_by_id
+        )
+        batch_create(component_create)
+        if component_update:
+            self.env.cr.commit()  # Commit the quantity updates
 
     def _import_inventory_valuation(self, cr):
         self.env.flush_all()
