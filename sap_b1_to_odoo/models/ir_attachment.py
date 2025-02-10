@@ -53,8 +53,8 @@ class IrAttachment(models.Model):
     _sql_constraints = [
         (
             "sap_absentry_line_unique",
-            "UNIQUE(sap_absentry, sap_line)",
-            "SAP AbsEntry must be unique",
+            "EXCLUDE USING btree (sap_absentry WITH =, sap_line WITH =) WHERE (sap_absentry != 0 AND sap_line != 0)",
+            "SAP AbsEntry and Line combination must be unique when both are set",
         )
     ]
 

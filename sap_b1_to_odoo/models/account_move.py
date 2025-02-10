@@ -17,8 +17,8 @@ class AccountMove(models.Model):
     _sql_constraints = [
         (
             "sap_docnum_unique",
-            "UNIQUE(sap_docnum, sap_table)",
-            "SAP docnum must be unique!",
+            "EXCLUDE USING btree (sap_docnum WITH =, sap_table WITH =) WHERE (sap_docnum != 0 AND sap_table IS NOT NULL)",
+            "SAP docnum must be unique when set!",
         )
     ]
 
