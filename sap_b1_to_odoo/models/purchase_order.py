@@ -14,7 +14,11 @@ class PurchaseOrder(models.Model):
     sap_atcentry = fields.Integer(index="btree")
 
     _sql_constraints = [
-        ("sap_docnum_unique", "UNIQUE(sap_docnum)", "Sap docnum must be unique!")
+        (
+            "sap_docnum_unique",
+            "EXCLUDE USING btree (sap_docnum WITH =) WHERE (sap_docnum != 0)",
+            "SAP docnum must be unique when set!",
+        )
     ]
 
 
