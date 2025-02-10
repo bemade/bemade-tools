@@ -19,9 +19,9 @@ class ProductPricelist(models.Model):
     sap_listnum = fields.Integer(index="btree")  # ID in OPLN table
     _sql_constraints = [
         (
-            "sap_abs_id_loginstanc_unique",
-            "UNIQUE(sap_abs_id, sap_loginstanc)",
-            "sap_abs_id and sap_loginstance must be unique together",
+            "sap_abs_id_loginstanc_exclude",
+            "EXCLUDE USING btree (sap_abs_id WITH =, sap_loginstanc WITH =) WHERE (sap_abs_id != 0 AND sap_loginstanc != 0)",
+            "sap_abs_id and sap_loginstance must be unique together when both are set",
         )
     ]
 

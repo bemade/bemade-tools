@@ -23,8 +23,8 @@ class SalesOrder(models.Model):
     _sql_constraints = [
         (
             "sap_docnum_unique",
-            "UNIQUE (sap_docnum)",
-            "Another sale order with this docnum already exists",
+            "EXCLUDE USING btree (sap_docnum WITH =) WHERE (sap_docnum != 0)",
+            "Another sale order with this docnum already exists when set",
         )
     ]
 
