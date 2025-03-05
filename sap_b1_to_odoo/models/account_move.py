@@ -1,9 +1,17 @@
 from odoo import models, fields, api, Command
 from odoo.tools.sql import SQL
 import logging
-from odoo.addons.sap_b1_to_odoo.tools import fix_tz
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
+from datetime import timedelta
+from odoo.modules.registry import Registry
+from odoo.addons.sap_b1_to_odoo.tools import fix_tz, PagingIterator
+from psycopg2.errors import SerializationFailure
 
 _logger = logging.getLogger(__name__)
+workers = os.cpu_count() - 1
+chunk_size = 500
 
 
 class AccountMove(models.Model):
@@ -218,7 +226,7 @@ class AccountMoveCommon(models.AbstractModel):
         return product_lines + text_lines
 
     @api.model
-    def _get_move_vals(self, order, partner, lines, sap_table, order_lines_dict):
+    def _get_move_vals(self, order, partner_id, lines, sap_table, order_lines_dict):
         """Get common values for both invoices and bills"""
         if order["docentry"] in lines:
             move_lines = [
@@ -244,32 +252,8 @@ class AccountMoveCommon(models.AbstractModel):
         if not currency:
             currency = self.env.ref("base.CAD")
 
-        # Get the currency rate from SAP's DocRate field
-        # SAP stores the rate as foreign currency to base currency
-        # Odoo stores it as 1 / that rate
-        rate = order.get("docrate", 1.0)
-        if rate and rate != 1.0:
-            # Create a rate for this specific date if it doesn't exist
-            date = fix_tz(order["docdate"])
-            existing_rate = self.env["res.currency.rate"].search(
-                [
-                    ("currency_id", "=", currency.id),
-                    ("company_id", "=", self.env.company.id),
-                    ("name", "=", date),
-                ]
-            )
-            if not existing_rate:
-                self.env["res.currency.rate"].create(
-                    {
-                        "currency_id": currency.id,
-                        "rate": 1.0 / rate,  # Invert the rate for Odoo
-                        "name": date,
-                        "company_id": self.env.company.id,
-                    }
-                )
-
         return {
-            "partner_id": partner.id,
+            "partner_id": partner_id,
             "invoice_date": fix_tz(order["docdate"]),
             "date": fix_tz(order["docdate"]),
             "invoice_date_due": fix_tz(order["docduedate"]),
@@ -306,11 +290,72 @@ class AccountMoveCommon(models.AbstractModel):
     @api.model
     def _get_partners_dict(self):
         return {
-            partner.sap_card_code: partner
+            partner.sap_card_code: partner.id
             for partner in self.env["res.partner"].search(
                 [("sap_card_code", "!=", False)]
             )
         }
+
+    @api.model
+    def _pre_create_currency_rates(self, moves):
+        """Pre-create all currency rates needed for the moves to avoid duplication in multi-processing."""
+        rates_to_create = []
+        processed_rates = (
+            set()
+        )  # Track (currency_id, date) pairs we've already processed
+
+        # Get all existing rates for the company
+        existing_rates = self.env["res.currency.rate"].search(
+            [("company_id", "=", self.env.company.id)]
+        )
+
+        # Create a set of (currency_id, date) tuples for existing rates
+        existing_rate_keys = {
+            (rate.currency_id.id, rate.name) for rate in existing_rates
+        }
+
+        for order in moves:
+            # Skip if no currency or rate information
+            if (
+                not order.get("doccur")
+                or not order.get("docrate")
+                or order.get("docrate") == 1.0
+            ):
+                continue
+
+            # Get the currency
+            currency_code = order.get("doccur", "CAD")
+            currency = self.env["res.currency"].search([("name", "=", currency_code)])
+            if not currency:
+                currency = self.env.ref("base.CAD")
+
+            # Get the date
+            date = fix_tz(order["docdate"]).date()
+
+            # Check if we've already processed this currency/date pair
+            rate_key = (currency.id, date)
+            if rate_key in processed_rates or rate_key in existing_rate_keys:
+                continue
+
+            # Add to rates to create
+            rate = order.get("docrate", 1.0)
+            rates_to_create.append(
+                {
+                    "currency_id": currency.id,
+                    "rate": 1.0 / rate,  # Invert the rate for Odoo
+                    "name": date,
+                    "company_id": self.env.company.id,
+                }
+            )
+
+            # Mark as processed
+            processed_rates.add(rate_key)
+
+        if rates_to_create:
+            _logger.info(f"Pre-creating {len(rates_to_create)} currency rates")
+            self.env["res.currency.rate"].create(rates_to_create)
+            self.env.flush_all()
+            self.env.cr.commit()
 
     @api.model
     def import_moves(self, cr):
@@ -320,61 +365,375 @@ class AccountMoveCommon(models.AbstractModel):
             return
 
         # Filter out already imported documents
-        already_imported = self.env["account.move"].search(
+        already_imported = self.env["account.move"].search_read(
             [
                 ("sap_docnum", "!=", False),
                 ("sap_table", "=", config["header_table"].lower()),
-            ]
+            ],
+            ["sap_docnum"],
         )
 
-        where = "WHERE docstatus='O'"
+        where = ""
         args = []
         if already_imported:
-            where += " AND docentry not in %s"
-            args = [tuple(already_imported.mapped("sap_docentry"))]
+            where += " WHERE docnum not in %s"
+            args = [tuple([move["sap_docnum"] for move in already_imported])]
 
-        # Get open documents from SAP
-        cr.execute(SQL(f"SELECT * FROM {config['header_table']} {where}", *args))
-        open_docs = cr.dictfetchall()
+        # Get all new documents
+        _logger.info(f"Fetching new account moves from {config['header_table']}")
+        sql = SQL(f"SELECT * FROM {config['header_table']} {where}", *args)
+        cr.execute(sql)
+        moves = cr.dictfetchall()
 
-        if not open_docs:
+        # Pre-create all currency rates before processing in parallel
+        self._pre_create_currency_rates(moves)
+
+        chunks = [moves[i : i + chunk_size] for i in range(0, len(moves), chunk_size)]
+
+        # Import moves in chunks with multi-processing
+        return self._import_moves_chunked(cr, chunks, config)
+
+    @api.model
+    def _import_moves_chunked(self, cr, chunks, config, multiproc=True):
+        """Import moves from SAP in chunks with multi-processing."""
+        total_chunks = len(chunks)
+
+        if not total_chunks:
             _logger.info("No new documents to import")
             return
 
-        # Get all lines (product and text)
-        lines = self._get_lines(cr, config["line_table"], open_docs)
+        _logger.info(f"Starting import of {total_chunks} chunks...")
+
+        # Get order line links in the main process
+        order_lines_dict = self._get_order_line_links(cr)
+
+        # Get the partners in the main process
+        partners_dict = self._get_partners_dict()
+
+        # Reorganize chunks based on order references to prevent serialization conflicts
+        if multiproc and order_lines_dict:
+            _logger.info("Reorganizing chunks based on order references...")
+
+            # Flatten all moves from all chunks
+            all_moves = [move for chunk in chunks for move in chunk]
+
+            # Get all invoice lines for these moves
+            all_lines = self._get_lines(cr, config["line_table"], all_moves)
+
+            # Group lines by docentry
+            lines_by_docentry = {}
+            for line in all_lines:
+                docentry = line["docentry"]
+                if docentry not in lines_by_docentry:
+                    lines_by_docentry[docentry] = []
+                lines_by_docentry[docentry].append(line)
+
+            # Extract order references from order_lines_dict
+            # order_lines_dict is {(invoice_docentry, invoice_linenum): order_line_id, ...}
+            invoice_to_orders = {}
+            for (invoice_docentry, _), order_line_id in order_lines_dict.items():
+                if order_line_id and invoice_docentry:
+                    if invoice_docentry not in invoice_to_orders:
+                        invoice_to_orders[invoice_docentry] = set()
+                    # Get the order ID from the order_line_id
+                    order_line = self.env["sale.order.line"].browse(order_line_id)
+                    if order_line.exists() and order_line.order_id:
+                        invoice_to_orders[invoice_docentry].add(order_line.order_id.id)
+
+            # Group invoices by order
+            order_to_invoices = {}
+            for invoice_docentry, order_ids in invoice_to_orders.items():
+                for order_id in order_ids:
+                    if order_id not in order_to_invoices:
+                        order_to_invoices[order_id] = set()
+                    order_to_invoices[order_id].add(invoice_docentry)
+
+            # Create a mapping of docentry to move
+            docentry_to_move = {move["docentry"]: move for move in all_moves}
+
+            # Create new chunks based on order references
+            new_chunks = []
+            processed_docentries = set()
+
+            # Group invoices by order first
+            order_groups = []
+            for order_id, invoice_docentries in order_to_invoices.items():
+                group = []
+                for docentry in invoice_docentries:
+                    if (
+                        docentry in docentry_to_move
+                        and docentry not in processed_docentries
+                    ):
+                        group.append(docentry_to_move[docentry])
+                        processed_docentries.add(docentry)
+                if group:
+                    order_groups.append(group)
+
+            # Sort groups by size (descending) for better packing
+            order_groups.sort(key=len, reverse=True)
+
+            # Now create chunks by packing groups into chunks up to chunk_size
+            current_chunk = []
+            current_chunk_size = 0
+
+            for group in order_groups:
+                group_size = len(group)
+                # If adding this group would exceed chunk_size and we already have items,
+                # finish the current chunk and start a new one
+                if (
+                    current_chunk_size > 0
+                    and current_chunk_size + group_size > chunk_size
+                ):
+                    new_chunks.append(current_chunk)
+                    current_chunk = []
+                    current_chunk_size = 0
+
+                # Add this group to the current chunk
+                current_chunk.extend(group)
+                current_chunk_size += group_size
+
+                # If we've reached or exceeded chunk_size, finish this chunk
+                if current_chunk_size >= chunk_size:
+                    new_chunks.append(current_chunk)
+                    current_chunk = []
+                    current_chunk_size = 0
+
+            # Don't forget the last chunk if it has items
+            if current_chunk:
+                new_chunks.append(current_chunk)
+
+            # Then, create chunks for remaining invoices without order references
+            remaining_moves = [
+                move
+                for move in all_moves
+                if move["docentry"] not in processed_docentries
+            ]
+
+            if remaining_moves:
+                # Try to add remaining moves to existing chunks if they have space
+                if new_chunks:
+                    last_chunk = new_chunks[-1]
+                    space_left = chunk_size - len(last_chunk)
+
+                    if space_left > 0:
+                        # Add as many remaining moves as will fit
+                        moves_to_add = remaining_moves[:space_left]
+                        last_chunk.extend(moves_to_add)
+                        remaining_moves = remaining_moves[space_left:]
+
+                # Create new chunks for any remaining moves
+                if remaining_moves:
+                    remaining_chunks = [
+                        remaining_moves[i : i + chunk_size]
+                        for i in range(0, len(remaining_moves), chunk_size)
+                    ]
+                    new_chunks.extend(remaining_chunks)
+
+            _logger.info(
+                f"Reorganized into {len(new_chunks)} chunks based on order references"
+            )
+            chunks = new_chunks
+            total_chunks = len(chunks)
+
+        # Save the current constraint date parameter
+        IrConfigParam = self.env["ir.config_parameter"].sudo()
+        original_constraint_date = IrConfigParam.get_param(
+            "sequence.mixin.constraint_start_date", "1970-01-01"
+        )
+
+        # Set the constraint date to tomorrow to allow importing historical documents
+        # without sequence validation errors
+        tomorrow = (fields.Date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+        IrConfigParam.set_param("sequence.mixin.constraint_start_date", tomorrow)
+
+        total_moves_count = 0
+        total_lines_count = 0
+        if not multiproc:
+            # Process chunks sequentially
+            for i, chunk in enumerate(chunks, 1):
+                # Get lines for this chunk before processing
+                chunk_lines = self._get_lines(cr, config["line_table"], chunk)
+
+                result = self._process_move_chunk(
+                    config,
+                    chunk,
+                    chunk_lines,
+                    order_lines_dict,
+                    partners_dict,
+                )
+                total_moves_count += result.get("moves_count", 0)
+                total_lines_count += result.get("lines_count", 0)
+                _logger.info(f"Completed chunk {i}/{total_chunks}")
+                self.env.flush_all()
+                self.env.cr.commit()
+
+        else:
+            # Save the current start method and set it to 'fork' for multiprocessing
+            start_method = multiprocessing.get_start_method()
+            multiprocessing.set_start_method("fork", force=True)
+
+            try:
+                # Process chunks in parallel using ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=workers) as executor:
+                    futures = [
+                        executor.submit(
+                            self._process_move_chunk_static,
+                            self._name,
+                            self.env.cr.dbname,
+                            self.env.uid,
+                            dict(self.env.context),
+                            chunk,
+                            config,
+                            self._get_lines(cr, config["line_table"], chunk),
+                            order_lines_dict,
+                            partners_dict,
+                        )
+                        for chunk in chunks
+                    ]
+
+                    # Wait for all futures to complete
+                    for i, future in enumerate(futures, 1):
+                        result = future.result()
+                        total_moves_count += result.get("moves_count", 0)
+                        total_lines_count += result.get("lines_count", 0)
+                        _logger.info(f"Completed chunk {i}/{total_chunks}")
+            except Exception as e:
+                _logger.error("An exception occurred in a subprocess.", exc_info=True)
+                raise
+            finally:
+                # Restore the original multiprocessing start method
+                multiprocessing.set_start_method(start_method, force=True)
+                # Restore the original constraint date parameter
+                self.env["ir.config_parameter"].sudo().set_param(
+                    "sequence.mixin.constraint_start_date", original_constraint_date
+                )
+
+        if total_moves_count > 0:
+            _logger.info(
+                f"Created and posted {total_moves_count} moves with {total_lines_count} lines"
+            )
+
+        _logger.info("Import completed.")
+        return
+
+    @api.model
+    def _process_move_chunk(
+        self,
+        config,
+        chunk,
+        lines,
+        order_lines_dict,
+        partners_dict,
+    ):
+        """Process a chunk of moves."""
+        return self._process_chunk_with_env(
+            self.env, chunk, config, lines, order_lines_dict, partners_dict
+        )
+
+    @api.model
+    def _process_chunk_with_env(
+        self,
+        env,
+        chunk,
+        config,
+        lines,
+        order_lines_dict,
+        partners_dict,
+        max_tries=1,
+    ):
+        """Import a chunk of moves with the given environment."""
+        importer = env[self._name]
+
+        # Organize lines by docentry
         lines_dict = {}
         for line in lines:
             lines_dict.setdefault(line["docentry"], []).append(line)
 
-        partners_dict = self._get_partners_dict()
-        order_lines_dict = self._get_order_line_links(cr)
-
-        moves = self.env["account.move"]
-        _logger.info(f"Creating {len(open_docs)} {config['move_type']} moves...")
-        for doc in open_docs:
-            partner = partners_dict.get(doc["cardcode"])
-            if not partner:
+        vals_list = []
+        _logger.info(f"Processing {len(chunk)} account moves in process {os.getpid()}")
+        for doc in chunk:
+            partner_id = partners_dict.get(doc["cardcode"])
+            if not partner_id:
                 _logger.warning(
-                    "Could not find partner with cardcode %s", doc["cardcode"]
+                    "Could not find partner with cardcode %s, skipping docentry %s",
+                    doc["cardcode"],
+                    doc["docentry"],
                 )
                 continue
 
-            vals = self._get_move_vals(
-                doc, partner, lines_dict, config["line_table"], order_lines_dict
+            vals = importer._get_move_vals(
+                doc,
+                partner_id,
+                lines_dict,
+                config["header_table"],
+                order_lines_dict,
             )
+            # Don't import empty invoices
+            if not vals.get("line_ids"):
+                continue
             vals.update(
                 {
                     "move_type": config["move_type"],
                 }
             )
-            moves |= self.env["account.move"].create(vals)
+            vals_list.append(vals)
 
-        _logger.info(
-            f"Created {len(moves)} moves with {len(moves.mapped('line_ids'))} lines"
-        )
-        moves.action_post()
-        return moves
+        if vals_list:
+            moves = env["account.move"].create(vals_list)
+            _logger.info(f"Created {len(moves)} account moves in process {os.getpid()}")
+            moves.filtered(lambda m: m.amount_total < 0).action_switch_move_type()
+            _logger.info(f"Posting {len(moves)} moves in chunk")
+            moves.action_post()
+        else:
+            _logger.info("No new documents to create in this chunk")
+
+        # Get the count of lines for reporting
+        lines_count = len(moves.mapped("line_ids")) if moves else 0
+        return {"moves_count": len(moves), "lines_count": lines_count}
+
+    @staticmethod
+    def _process_move_chunk_static(
+        importer_model,
+        dbname,
+        uid,
+        context,
+        chunk,
+        config,
+        lines,
+        order_lines_dict,
+        partners_dict,
+    ):
+        """Static method for processing a chunk of moves in a separate process."""
+        max_tries = 5
+        tries = 0
+        while tries < max_tries:
+            tries += 1
+            try:
+                with Registry(dbname).cursor() as cr:
+                    env = api.Environment(cr, uid, context)
+                    importer = env[importer_model]
+                    result = importer._process_chunk_with_env(
+                        env,
+                        chunk,
+                        config,
+                        lines,
+                        order_lines_dict,
+                        partners_dict,
+                        max_tries=5,
+                    )
+                    env.flush_all()
+                    env.cr.commit()
+            except SerializationFailure:
+                if tries == max_tries:
+                    raise
+                _logger.info(
+                    f"Serialization failure in {os.getpid()}. Retrying (attempt {tries+1})..."
+                )
+                env.cr.rollback()
+            except Exception as e:
+                _logger.error(f"Error processing chunk: {str(e)}", exc_info=True)
+                raise
+            return result
 
 
 class InvoiceImporter(models.AbstractModel):
@@ -388,6 +747,7 @@ class InvoiceImporter(models.AbstractModel):
             "header_table": "oinv",
             "line_table": "inv1",
             "move_type": "out_invoice",
+            "credit_type": "out_refund",
         }
 
     @api.model
@@ -421,6 +781,7 @@ class VendorBillsImporter(models.AbstractModel):
             "header_table": "OPCH",
             "line_table": "pch1",
             "move_type": "in_invoice",
+            "credit_type": "in_refund",
         }
 
     @api.model
