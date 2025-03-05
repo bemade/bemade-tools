@@ -1,5 +1,6 @@
 from odoo import models, fields, api, Command
 from odoo.tools.sql import SQL
+from odoo.tools import mute_logger
 import logging
 import multiprocessing
 import os
@@ -7,7 +8,8 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import timedelta
 from odoo.modules.registry import Registry
 from odoo.addons.sap_b1_to_odoo.tools import fix_tz, PagingIterator
-from psycopg2.errors import SerializationFailure
+from psycopg2.errors import SerializationFailure, DeadlockDetected, LockNotAvailable
+import time
 
 _logger = logging.getLogger(__name__)
 workers = os.cpu_count() - 1
@@ -166,7 +168,7 @@ class AccountMoveCommon(models.AbstractModel):
             [
                 ("sap_docentry", "!=", False),
                 ("sap_line_num", "!=", False),
-                ("sap_table", "=", config["order_line_table"].lower()),
+                ("sap_table", "=", config["order_line_table"]),
             ],
             ["id", "sap_docentry", "sap_line_num"],
         )
@@ -368,7 +370,7 @@ class AccountMoveCommon(models.AbstractModel):
         already_imported = self.env["account.move"].search_read(
             [
                 ("sap_docnum", "!=", False),
-                ("sap_table", "=", config["header_table"].lower()),
+                ("sap_table", "=", config["header_table"]),
             ],
             ["sap_docnum"],
         )
@@ -394,6 +396,182 @@ class AccountMoveCommon(models.AbstractModel):
         return self._import_moves_chunked(cr, chunks, config)
 
     @api.model
+    def _reorganize_chunks_by_order(self, cr, chunks, order_lines_dict):
+        _logger.info("Reorganizing chunks based on order references...")
+        config = self._get_import_config()
+
+        order_line_model = self._get_order_line_link_config()["order_line_model"]
+        # Flatten all moves from all chunks
+        all_moves = [move for chunk in chunks for move in chunk]
+
+        # Get all invoice lines for these moves
+        all_lines = self._get_lines(cr, config["line_table"], all_moves)
+
+        # Group lines by docentry
+        lines_by_docentry = {}
+        for line in all_lines:
+            docentry = line["docentry"]
+            if docentry not in lines_by_docentry:
+                lines_by_docentry[docentry] = []
+            lines_by_docentry[docentry].append(line)
+
+        # Use the existing order line links to get the SAP order document entries
+        # This avoids duplicating SQL queries
+        order_line_links = self._get_order_line_links(cr)
+
+        # Group invoices by their SAP order document entries
+        invoice_to_orders = {}
+        for (
+            invoice_docentry,
+            invoice_linenum,
+        ), order_line_id in order_line_links.items():
+            # We need to extract the SAP order docentry from the keys in order_lines_dict
+            # The order_lines_dict maps (order_docentry, order_linenum) to order_line_id
+            for (order_docentry, order_linenum), line_id in order_lines_dict.items():
+                if line_id == order_line_id:
+                    if invoice_docentry not in invoice_to_orders:
+                        invoice_to_orders[invoice_docentry] = set()
+                    invoice_to_orders[invoice_docentry].add(order_docentry)
+                    break
+
+        # Group invoices by SAP order document entry
+        order_to_invoices = {}
+        for invoice_docentry, order_docentries in invoice_to_orders.items():
+            for order_docentry in order_docentries:
+                if order_docentry not in order_to_invoices:
+                    order_to_invoices[order_docentry] = set()
+                order_to_invoices[order_docentry].add(invoice_docentry)
+
+        # Handle the case where a bill is linked to multiple purchase orders
+        # We need to merge groups that share bills
+        # First, build a graph of connected orders
+        connected_orders = {}
+        for order_docentry, invoice_docentries in order_to_invoices.items():
+            if order_docentry not in connected_orders:
+                connected_orders[order_docentry] = set()
+
+            # Find all other orders that share invoices with this order
+            for invoice_docentry in invoice_docentries:
+                for other_order_docentry in invoice_to_orders.get(invoice_docentry, []):
+                    if other_order_docentry != order_docentry:
+                        connected_orders[order_docentry].add(other_order_docentry)
+
+        # Now use a graph traversal to find connected components (groups of related orders)
+        visited = set()
+        order_groups_map = {}
+        group_id = 0
+
+        def dfs(order, group):
+            visited.add(order)
+            order_groups_map[order] = group
+            for connected_order in connected_orders.get(order, []):
+                if connected_order not in visited:
+                    dfs(connected_order, group)
+
+        # Run DFS to find all connected components
+        for order in connected_orders:
+            if order not in visited:
+                dfs(order, group_id)
+                group_id += 1
+
+        # Now rebuild order_to_invoices based on the connected components
+        merged_order_to_invoices = {}
+        for group in range(group_id):
+            merged_order_to_invoices[group] = set()
+            for order, order_group in order_groups_map.items():
+                if order_group == group:
+                    merged_order_to_invoices[group].update(
+                        order_to_invoices.get(order, set())
+                    )
+
+        # Replace the original mapping with the merged one
+        order_to_invoices = merged_order_to_invoices
+
+        # Create a mapping of docentry to move
+        docentry_to_move = {move["docentry"]: move for move in all_moves}
+
+        # Create new chunks based on SAP baseentry references
+        new_chunks = []
+        processed_docentries = set()
+
+        # Group invoices by connected component (related purchase orders)
+        order_groups = []
+        for group_id, invoice_docentries in order_to_invoices.items():
+            group = []
+            for docentry in invoice_docentries:
+                if (
+                    docentry in docentry_to_move
+                    and docentry not in processed_docentries
+                ):
+                    group.append(docentry_to_move[docentry])
+                    processed_docentries.add(docentry)
+            if group:
+                order_groups.append(group)
+
+        # Sort groups by size (descending) for better packing
+        order_groups.sort(key=len, reverse=True)
+
+        # Now create chunks by packing groups into chunks up to chunk_size
+        current_chunk = []
+        current_chunk_size = 0
+
+        for group in order_groups:
+            group_size = len(group)
+
+            # Always keep groups together, even if they exceed chunk_size
+            # If we already have items in the current chunk and adding this group would exceed chunk_size,
+            # finish the current chunk and start a new one with this group
+            if current_chunk_size > 0 and current_chunk_size + group_size > chunk_size:
+                new_chunks.append(current_chunk)
+                current_chunk = []
+                current_chunk_size = 0
+
+            # Add this group to the current chunk
+            # This will happen even if the group itself is larger than chunk_size
+            current_chunk.extend(group)
+            current_chunk_size += group_size
+
+            # If we've reached or exceeded chunk_size, finish this chunk
+            if current_chunk_size >= chunk_size and not (
+                current_chunk_size == group_size
+            ):
+                # Only finish the chunk if it's not just a single large group
+                # This ensures we don't split large groups
+                new_chunks.append(current_chunk)
+                current_chunk = []
+                current_chunk_size = 0
+
+        # Don't forget the last chunk if it has items
+        if current_chunk:
+            new_chunks.append(current_chunk)
+
+        # Then, create chunks for remaining invoices without order references
+        remaining_moves = [
+            move for move in all_moves if move["docentry"] not in processed_docentries
+        ]
+
+        if remaining_moves:
+            # Try to add remaining moves to existing chunks if they have space
+            if new_chunks:
+                last_chunk = new_chunks[-1]
+                space_left = chunk_size - len(last_chunk)
+
+                if space_left > 0:
+                    # Add as many remaining moves as will fit
+                    moves_to_add = remaining_moves[:space_left]
+                    last_chunk.extend(moves_to_add)
+                    remaining_moves = remaining_moves[space_left:]
+
+            # Create new chunks for any remaining moves
+            if remaining_moves:
+                remaining_chunks = [
+                    remaining_moves[i : i + chunk_size]
+                    for i in range(0, len(remaining_moves), chunk_size)
+                ]
+                new_chunks.extend(remaining_chunks)
+        return new_chunks
+
+    @api.model
     def _import_moves_chunked(self, cr, chunks, config, multiproc=True):
         """Import moves from SAP in chunks with multi-processing."""
         total_chunks = len(chunks)
@@ -411,129 +589,9 @@ class AccountMoveCommon(models.AbstractModel):
         partners_dict = self._get_partners_dict()
 
         # Reorganize chunks based on order references to prevent serialization conflicts
-        if multiproc and order_lines_dict:
-            _logger.info("Reorganizing chunks based on order references...")
-
-            # Flatten all moves from all chunks
-            all_moves = [move for chunk in chunks for move in chunk]
-
-            # Get all invoice lines for these moves
-            all_lines = self._get_lines(cr, config["line_table"], all_moves)
-
-            # Group lines by docentry
-            lines_by_docentry = {}
-            for line in all_lines:
-                docentry = line["docentry"]
-                if docentry not in lines_by_docentry:
-                    lines_by_docentry[docentry] = []
-                lines_by_docentry[docentry].append(line)
-
-            # Extract order references from order_lines_dict
-            # order_lines_dict is {(invoice_docentry, invoice_linenum): order_line_id, ...}
-            invoice_to_orders = {}
-            for (invoice_docentry, _), order_line_id in order_lines_dict.items():
-                if order_line_id and invoice_docentry:
-                    if invoice_docentry not in invoice_to_orders:
-                        invoice_to_orders[invoice_docentry] = set()
-                    # Get the order ID from the order_line_id
-                    order_line = self.env["sale.order.line"].browse(order_line_id)
-                    if order_line.exists() and order_line.order_id:
-                        invoice_to_orders[invoice_docentry].add(order_line.order_id.id)
-
-            # Group invoices by order
-            order_to_invoices = {}
-            for invoice_docentry, order_ids in invoice_to_orders.items():
-                for order_id in order_ids:
-                    if order_id not in order_to_invoices:
-                        order_to_invoices[order_id] = set()
-                    order_to_invoices[order_id].add(invoice_docentry)
-
-            # Create a mapping of docentry to move
-            docentry_to_move = {move["docentry"]: move for move in all_moves}
-
-            # Create new chunks based on order references
-            new_chunks = []
-            processed_docentries = set()
-
-            # Group invoices by order first
-            order_groups = []
-            for order_id, invoice_docentries in order_to_invoices.items():
-                group = []
-                for docentry in invoice_docentries:
-                    if (
-                        docentry in docentry_to_move
-                        and docentry not in processed_docentries
-                    ):
-                        group.append(docentry_to_move[docentry])
-                        processed_docentries.add(docentry)
-                if group:
-                    order_groups.append(group)
-
-            # Sort groups by size (descending) for better packing
-            order_groups.sort(key=len, reverse=True)
-
-            # Now create chunks by packing groups into chunks up to chunk_size
-            current_chunk = []
-            current_chunk_size = 0
-
-            for group in order_groups:
-                group_size = len(group)
-                # If adding this group would exceed chunk_size and we already have items,
-                # finish the current chunk and start a new one
-                if (
-                    current_chunk_size > 0
-                    and current_chunk_size + group_size > chunk_size
-                ):
-                    new_chunks.append(current_chunk)
-                    current_chunk = []
-                    current_chunk_size = 0
-
-                # Add this group to the current chunk
-                current_chunk.extend(group)
-                current_chunk_size += group_size
-
-                # If we've reached or exceeded chunk_size, finish this chunk
-                if current_chunk_size >= chunk_size:
-                    new_chunks.append(current_chunk)
-                    current_chunk = []
-                    current_chunk_size = 0
-
-            # Don't forget the last chunk if it has items
-            if current_chunk:
-                new_chunks.append(current_chunk)
-
-            # Then, create chunks for remaining invoices without order references
-            remaining_moves = [
-                move
-                for move in all_moves
-                if move["docentry"] not in processed_docentries
-            ]
-
-            if remaining_moves:
-                # Try to add remaining moves to existing chunks if they have space
-                if new_chunks:
-                    last_chunk = new_chunks[-1]
-                    space_left = chunk_size - len(last_chunk)
-
-                    if space_left > 0:
-                        # Add as many remaining moves as will fit
-                        moves_to_add = remaining_moves[:space_left]
-                        last_chunk.extend(moves_to_add)
-                        remaining_moves = remaining_moves[space_left:]
-
-                # Create new chunks for any remaining moves
-                if remaining_moves:
-                    remaining_chunks = [
-                        remaining_moves[i : i + chunk_size]
-                        for i in range(0, len(remaining_moves), chunk_size)
-                    ]
-                    new_chunks.extend(remaining_chunks)
-
-            _logger.info(
-                f"Reorganized into {len(new_chunks)} chunks based on order references"
-            )
-            chunks = new_chunks
-            total_chunks = len(chunks)
+        # if multiproc and order_lines_dict:
+        #     chunks = self._reorganize_chunks_by_order(cr, chunks, order_lines_dict)
+        #     total_chunks = len(chunks)
 
         # Save the current constraint date parameter
         IrConfigParam = self.env["ir.config_parameter"].sudo()
@@ -545,6 +603,8 @@ class AccountMoveCommon(models.AbstractModel):
         # without sequence validation errors
         tomorrow = (fields.Date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
         IrConfigParam.set_param("sequence.mixin.constraint_start_date", tomorrow)
+        self.env.flush_all()
+        self.env.cr.commit()
 
         total_moves_count = 0
         total_lines_count = 0
@@ -639,7 +699,6 @@ class AccountMoveCommon(models.AbstractModel):
         lines,
         order_lines_dict,
         partners_dict,
-        max_tries=1,
     ):
         """Import a chunk of moves with the given environment."""
         importer = env[self._name]
@@ -679,6 +738,7 @@ class AccountMoveCommon(models.AbstractModel):
             vals_list.append(vals)
 
         if vals_list:
+            importer._lock_orders_and_lines(vals_list)
             moves = env["account.move"].create(vals_list)
             _logger.info(f"Created {len(moves)} account moves in process {os.getpid()}")
             moves.filtered(lambda m: m.amount_total < 0).action_switch_move_type()
@@ -690,6 +750,49 @@ class AccountMoveCommon(models.AbstractModel):
         # Get the count of lines for reporting
         lines_count = len(moves.mapped("line_ids")) if moves else 0
         return {"moves_count": len(moves), "lines_count": lines_count}
+
+    def _lock_orders_and_lines(self, vals_list):
+        """Proactively lock orders and lines that will be affected by this chunk.
+        This helps prevent serialization failures by ensuring consistent lock ordering.
+        """
+        link_config = self._get_order_line_link_config()
+        line_model = link_config["order_line_model"]
+        order_model = line_model.replace("_line", "")
+        line_table = line_model.replace(".", "_")
+        order_table = order_model.replace(".", "_")
+
+        order_ids = []
+        for vals in vals_list:
+            move_lines = vals["line_ids"]
+            for line in move_lines:
+                # Each line is a Command.create, so the 3rd tuple element is its values dict
+                order_link = line[2].get(self._get_order_link_field(), False)
+                if not order_link:
+                    continue
+                if type(order_link) is int:
+                    order_ids.append(order_link)
+                else:
+                    # First item in list, second tuple element - see Command.link
+                    order_ids.append(order_link[0][1])
+        if not order_ids:
+            return
+
+        query = SQL(
+            "LOCK TABLE %s, %s IN exclusive MODE NOWAIT",
+            SQL.identifier(line_table),
+            SQL.identifier(order_table),
+        )
+
+        tries = 0
+        while True:
+            try:
+                with mute_logger("odoo.sql_db"):
+                    self.env.cr.execute(query)
+                return
+            except (SerializationFailure, DeadlockDetected, LockNotAvailable):
+                tries += 1
+                self.env.cr.rollback()
+                time.sleep(2)
 
     @staticmethod
     def _process_move_chunk_static(
@@ -709,7 +812,7 @@ class AccountMoveCommon(models.AbstractModel):
         while tries < max_tries:
             tries += 1
             try:
-                with Registry(dbname).cursor() as cr:
+                with Registry(dbname).cursor() as cr, mute_logger("odoo.sql_db"):
                     env = api.Environment(cr, uid, context)
                     importer = env[importer_model]
                     result = importer._process_chunk_with_env(
@@ -719,21 +822,21 @@ class AccountMoveCommon(models.AbstractModel):
                         lines,
                         order_lines_dict,
                         partners_dict,
-                        max_tries=5,
                     )
-                    env.flush_all()
-                    env.cr.commit()
+                    cr.commit()
+                return result
             except SerializationFailure:
                 if tries == max_tries:
                     raise
                 _logger.info(
-                    f"Serialization failure in {os.getpid()}. Retrying (attempt {tries+1})..."
+                    f"Serialization failure in {os.getpid()}. Retrying (attempt {tries+1})...",
                 )
-                env.cr.rollback()
             except Exception as e:
                 _logger.error(f"Error processing chunk: {str(e)}", exc_info=True)
                 raise
-            return result
+
+    def _get_order_link_field(self):
+        raise NotImplementedError
 
 
 class InvoiceImporter(models.AbstractModel):
@@ -761,13 +864,16 @@ class InvoiceImporter(models.AbstractModel):
             "order_line_model": "sale.order.line",
         }
 
-    def _get_order_line_link_vals(self, order_line_id):
-        return {"sale_line_ids": [Command.link(order_line_id)]}
-
     @api.model
     def import_invoices(self, cr):
         """Import customer invoices from SAP."""
         return self.import_moves(cr)
+
+    def _get_order_link_field(self):
+        return "sale_line_ids"
+
+    def _get_order_line_link_vals(self, order_line_id):
+        return {self._get_order_link_field(): [Command.link(order_line_id)]}
 
 
 class VendorBillsImporter(models.AbstractModel):
@@ -778,7 +884,7 @@ class VendorBillsImporter(models.AbstractModel):
     @api.model
     def _get_import_config(self):
         return {
-            "header_table": "OPCH",
+            "header_table": "opch",
             "line_table": "pch1",
             "move_type": "in_invoice",
             "credit_type": "in_refund",
@@ -787,19 +893,21 @@ class VendorBillsImporter(models.AbstractModel):
     @api.model
     def _get_order_line_link_config(self):
         return {
-            "invoice_line_table": "PCH1",
+            "invoice_line_table": "pch1",
             "order_line_table": "por1",
-            "picking_table": "PDN1",
+            "picking_table": "pdn1",
             "picking_basetype": 20,  # Goods Receipt POs have BaseType = 20
             "order_basetype": 22,  # Purchase Orders have BaseType = 22
             "order_line_model": "purchase.order.line",
         }
 
     @api.model
-    def _get_order_line_link_vals(self, order_line_id):
-        return {"purchase_line_id": order_line_id}
-
-    @api.model
     def import_bills(self, cr):
         """Import vendor bills from SAP."""
         return self.import_moves(cr)
+
+    def _get_order_link_field(self):
+        return "purchase_line_id"
+
+    def _get_order_line_link_vals(self, order_line_id):
+        return {self._get_order_link_field(): order_line_id}
