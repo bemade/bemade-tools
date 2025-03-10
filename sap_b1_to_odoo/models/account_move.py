@@ -112,13 +112,14 @@ class AccountMoveCommon(models.AbstractModel):
         """Get the invoiced quantity for each SAP order line that has been invoiced."""
         links = self._get_order_line_links_raw(cr)
         order_lines = [
-            (line["orderdocentry"], line["orderlinenum"] + 2, line["quantity"])
+            (line["orderdocentry"], (line["orderlinenum"] or 0) + 2, line["quantity"])
             for line in links
-            if line["orderdocentry"] and line["orderlinenum"]
+            if line["orderdocentry"] and line["orderlinenum"] is not None
         ]
         model = self._get_order_line_link_config()["order_line_model"]
         table = model.replace(".", "_")
         field = "sap_qty_invoiced"
+        invoice_status_method = self._get_import_config()["invoice_status_method"]
         # Create a temporary table to hold the data
         self.env.cr.execute("DROP TABLE IF EXISTS temp_order_lines")
         self.env.cr.execute(
@@ -170,10 +171,8 @@ class AccountMoveCommon(models.AbstractModel):
         # the open Odoo invoice quantity stemming from SAP invoices
 
         # Since this is a stored field, we now need to trigger recalculation
-        _logger.info(f"Triggering recalculation of invoiced quantity for {model}")
-        self.env[model].search(
-            [("sap_qty_invoiced", "!=", False)]
-        )._compute_qty_invoiced()
+        lines = self.env[model].search([("sap_qty_invoiced", "!=", False)])
+        self._trigger_recomputation(lines)
 
     def _get_order_line_links_raw(self, cr):
         config = self._get_order_line_link_config()
@@ -459,6 +458,7 @@ class AccountMoveCommon(models.AbstractModel):
             "header_table": "oinv",
             "line_table": "inv1",
             "move_type": "out_invoice",
+            "invoice_status_method": "_compute_invoice_status",
         }
         ```
         """
@@ -476,6 +476,7 @@ class InvoiceImporter(models.AbstractModel):
             "header_table": "oinv",
             "line_table": "inv1",
             "move_type": "out_invoice",
+            "invoice_status_method": "_compute_invoice_status",
         }
 
     @api.model
@@ -497,6 +498,20 @@ class InvoiceImporter(models.AbstractModel):
         """Import customer invoices from SAP."""
         return self.import_moves(cr)
 
+    @api.model
+    def _trigger_recomputation(self, lines):
+        _logger.info(
+            f"Triggering recalculation of invoiced quantity for {len(lines)} {lines._name} entries"
+        )
+        orders = lines.order_id
+        lines._compute_qty_invoiced()
+        lines._compute_qty_to_invoice()
+        # Recompute billing status (waiting bills, etc.)
+        _logger.info(
+            f"Triggering recalculation of invoice/billing status for {len(orders)} {orders._name}"
+        )
+        orders._compute_invoice_status()
+
 
 class VendorBillsImporter(models.AbstractModel):
     _name = "sap.vendor.bill.importer"
@@ -509,6 +524,7 @@ class VendorBillsImporter(models.AbstractModel):
             "header_table": "OPCH",
             "line_table": "pch1",
             "move_type": "in_invoice",
+            "invoice_status_method": "_get_invoiced",
         }
 
     @api.model
@@ -530,3 +546,16 @@ class VendorBillsImporter(models.AbstractModel):
     def import_bills(self, cr):
         """Import vendor bills from SAP."""
         return self.import_moves(cr)
+
+    @api.model
+    def _trigger_recomputation(self, lines):
+        _logger.info(
+            f"Triggering recalculation of invoiced quantity for {len(lines)} {lines._name} entries"
+        )
+        orders = lines.order_id
+        lines._compute_qty_invoiced()
+        # Recompute billing status (waiting bills, etc.)
+        _logger.info(
+            f"Triggering recalculation of invoice/billing status for {len(orders)} {orders._name}"
+        )
+        orders._get_invoiced()
