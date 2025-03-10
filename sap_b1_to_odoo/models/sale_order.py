@@ -38,6 +38,7 @@ class SaleOrderLine(models.Model):
         index="btree", related="order_id.sap_docentry", store=True
     )
     sap_table = fields.Char(index="btree")
+    sap_qty_invoiced = fields.Float()
 
     _sql_constraints = [
         (
@@ -54,6 +55,19 @@ class SaleOrderLine(models.Model):
             "Another line with this line number and docentry already exists for this SAP table.",
         ),
     ]
+
+    @api.depends("invoice_lines.move_id.state", "invoice_lines.quantity")
+    def _compute_qty_invoiced(self):
+        super()._compute_qty_invoiced()
+        # Pre-fetch quantities
+        sap_lines = self.filtered("sap_qty_invoiced")
+        # Prefetch the quantity instead of running one query per line later
+        _ = sap_lines.invoice_lines.filtered("sap_docentry").mapped("quantity")
+        for line in sap_lines:
+            open_sap_qty = line.invoice_lines.filtered("sap_docentry").mapped(
+                "quantity"
+            )
+            line.qty_invoiced += line.sap_qty_invoiced - sum(open_sap_qty)
 
 
 class SapSaleOrderImporter(models.AbstractModel):

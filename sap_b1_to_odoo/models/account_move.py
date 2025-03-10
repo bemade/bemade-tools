@@ -108,13 +108,73 @@ class AccountMoveCommon(models.AbstractModel):
         return vals
 
     @api.model
-    def _get_order_line_links(self, cr):
-        """Get links between move lines and order lines.
-
-        This method finds links between invoice lines and order lines through two paths:
-        1. Direct link: Invoice line -> Sales Order line
-        2. Through delivery: Invoice line -> Delivery line -> Sales Order line
+    def import_order_invoiced_qty(self, cr):
+        """Get the invoiced quantity for each SAP order line that has been invoiced."""
+        links = self._get_order_line_links_raw(cr)
+        order_lines = [
+            (line["orderdocentry"], (line["orderlinenum"] or 0) + 2, line["quantity"])
+            for line in links
+            if line["orderdocentry"] and line["orderlinenum"] is not None
+        ]
+        model = self._get_order_line_link_config()["order_line_model"]
+        table = model.replace(".", "_")
+        field = "sap_qty_invoiced"
+        invoice_status_method = self._get_import_config()["invoice_status_method"]
+        # Create a temporary table to hold the data
+        self.env.cr.execute("DROP TABLE IF EXISTS temp_order_lines")
+        self.env.cr.execute(
+            """
+            CREATE TEMP TABLE temp_order_lines (
+                docentry INTEGER,
+                linenum INTEGER,
+                quantity FLOAT
+            ) ON COMMIT DROP
         """
+        )
+
+        _logger.info(f"Updating sap_qty_invoiced for {len(links)} {model} entries.")
+        # Process in chunks to avoid PostgreSQL's limit on target list entries (1664)
+        chunk_size = 500  # Safe value well below the limit
+        for i in range(0, len(order_lines), chunk_size):
+            chunk = order_lines[i : i + chunk_size]
+            _logger.info(
+                f"Processing chunk {i//chunk_size + 1} with {len(chunk)} entries"
+            )
+
+            # Insert data into the temporary table
+            args = ",".join(["(%s,%s,%s)"] * len(chunk))
+            params = [val for tup in chunk for val in tup]
+            self.env.cr.execute(
+                f"""
+                INSERT INTO temp_order_lines (docentry, linenum, quantity)
+                VALUES {args}
+            """,
+                params,
+            )
+
+        # Update the target table using the temporary table
+        self.env.cr.execute(
+            f"""
+            UPDATE {table}
+            SET {field} = temp_sum.quantity
+            FROM (
+                SELECT docentry, linenum, SUM(quantity) as quantity
+                FROM temp_order_lines
+                GROUP BY docentry, linenum
+            ) temp_sum
+            WHERE {table}.sap_docentry = temp_sum.docentry
+            AND {table}.sap_line_num = temp_sum.linenum
+        """
+        )
+
+        # As there are open SAP invoices that we have imported, we need to deduct
+        # the open Odoo invoice quantity stemming from SAP invoices
+
+        # Since this is a stored field, we now need to trigger recalculation
+        lines = self.env[model].search([("sap_qty_invoiced", "!=", False)])
+        self._trigger_recomputation(lines)
+
+    def _get_order_line_links_raw(self, cr):
         config = self._get_order_line_link_config()
         if not config:
             return {}
@@ -124,6 +184,7 @@ class AccountMoveCommon(models.AbstractModel):
             SELECT 
                 {invoice_line_table}.DocEntry AS invoicedocentry,
                 {invoice_line_table}.LineNum AS invoicelinenum,
+                {invoice_line_table}.Quantity AS quantity,
                 CASE 
                     WHEN {invoice_line_table}.BaseType = {order_basetype} THEN {invoice_line_table}.BaseEntry  -- Direct from sales order
                     WHEN {invoice_line_table}.BaseType = {picking_basetype} THEN (  -- Through delivery
@@ -151,7 +212,17 @@ class AccountMoveCommon(models.AbstractModel):
                 order_basetype=config["order_basetype"],
             )
         )
-        rel_lines = cr.dictfetchall()
+        return cr.dictfetchall()
+
+    @api.model
+    def _get_order_line_links(self, cr):
+        """Get links between move lines and order lines.
+
+        This method finds links between invoice lines and order lines through two paths:
+        1. Direct link: Invoice line -> Sales Order line
+        2. Through delivery: Invoice line -> Delivery line -> Sales Order line
+        """
+        rel_lines = self._get_order_line_links_raw(cr)
 
         # Only get product lines (where sap_line_num is set)
         order_lines = self.env[config["order_line_model"]].search_read(
@@ -376,6 +447,23 @@ class AccountMoveCommon(models.AbstractModel):
         moves.action_post()
         return moves
 
+    @api.model
+    def _get_import_config(self):
+        """
+        Return the import configuration.
+
+        :return: dict in the form
+        ```
+        {
+            "header_table": "oinv",
+            "line_table": "inv1",
+            "move_type": "out_invoice",
+            "invoice_status_method": "_compute_invoice_status",
+        }
+        ```
+        """
+        pass
+
 
 class InvoiceImporter(models.AbstractModel):
     _name = "sap.invoice.importer"
@@ -388,6 +476,7 @@ class InvoiceImporter(models.AbstractModel):
             "header_table": "oinv",
             "line_table": "inv1",
             "move_type": "out_invoice",
+            "invoice_status_method": "_compute_invoice_status",
         }
 
     @api.model
@@ -409,6 +498,20 @@ class InvoiceImporter(models.AbstractModel):
         """Import customer invoices from SAP."""
         return self.import_moves(cr)
 
+    @api.model
+    def _trigger_recomputation(self, lines):
+        _logger.info(
+            f"Triggering recalculation of invoiced quantity for {len(lines)} {lines._name} entries"
+        )
+        orders = lines.order_id
+        lines._compute_qty_invoiced()
+        lines._compute_qty_to_invoice()
+        # Recompute billing status (waiting bills, etc.)
+        _logger.info(
+            f"Triggering recalculation of invoice/billing status for {len(orders)} {orders._name}"
+        )
+        orders._compute_invoice_status()
+
 
 class VendorBillsImporter(models.AbstractModel):
     _name = "sap.vendor.bill.importer"
@@ -421,6 +524,7 @@ class VendorBillsImporter(models.AbstractModel):
             "header_table": "OPCH",
             "line_table": "pch1",
             "move_type": "in_invoice",
+            "invoice_status_method": "_get_invoiced",
         }
 
     @api.model
@@ -442,3 +546,16 @@ class VendorBillsImporter(models.AbstractModel):
     def import_bills(self, cr):
         """Import vendor bills from SAP."""
         return self.import_moves(cr)
+
+    @api.model
+    def _trigger_recomputation(self, lines):
+        _logger.info(
+            f"Triggering recalculation of invoiced quantity for {len(lines)} {lines._name} entries"
+        )
+        orders = lines.order_id
+        lines._compute_qty_invoiced()
+        # Recompute billing status (waiting bills, etc.)
+        _logger.info(
+            f"Triggering recalculation of invoice/billing status for {len(orders)} {orders._name}"
+        )
+        orders._get_invoiced()
