@@ -63,8 +63,17 @@ class PurchaseOrderLine(models.Model):
     )
     def _compute_qty_invoiced(self):
         super()._compute_qty_invoiced()
-        for line in self.filtered("sap_qty_invoiced"):
-            line.qty_invoiced += line.sap_qty_invoiced
+        # Pre-fetch quantities
+        sap_lines = self.filtered("sap_qty_invoiced")
+        # Prefetch the quantity instead of running one query per line later
+        _ = sap_lines.invoice_lines.filtered("sap_docentry").mapped("quantity")
+        for line in sap_lines:
+            open_sap_qty = line.invoice_lines.filtered("sap_docentry").mapped(
+                "quantity"
+            )
+            line.qty_invoiced += line.sap_qty_invoiced - sum(open_sap_qty)
+            # Purchase order lines compute this second field right here
+            line.qty_to_invoice -= line.sap_qty_invoiced
 
 
 class SapPurchaseOrderImporter(models.AbstractModel):
