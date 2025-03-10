@@ -36,6 +36,7 @@ class PurchaseOrderLine(models.Model):
     sap_table = fields.Char(
         index="btree",
     )
+    sap_qty_invoiced = fields.Float()
 
     _sql_constraints = [
         (
@@ -52,6 +53,18 @@ class PurchaseOrderLine(models.Model):
             "Another line with this line number and docentry already exists for this SAP table.",
         ),
     ]
+
+    @api.depends(
+        "invoice_lines.move_id.state",
+        "invoice_lines.quantity",
+        "qty_received",
+        "product_uom_qty",
+        "order_id.state",
+    )
+    def _compute_qty_invoiced(self):
+        super()._compute_qty_invoiced()
+        for line in self.filtered("sap_qty_invoiced"):
+            line.qty_invoiced += line.sap_qty_invoiced
 
 
 class SapPurchaseOrderImporter(models.AbstractModel):
