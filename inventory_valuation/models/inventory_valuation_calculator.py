@@ -1,0 +1,241 @@
+import logging
+import csv
+import os
+from datetime import datetime
+from collections import defaultdict
+from odoo import models, api, fields
+from odoo.tools.sql import SQL
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+_logger = logging.getLogger(__name__)
+
+
+class InventoryValuationReconstructor(models.TransientModel):
+    """Class to handle the reconstruction of inventory valuation based on historical purchase orders."""
+
+    _name = "inventory.valuation.reconstructor"
+    _description = "Inventory Valuation Reconstruction"
+
+    in_stock_products = fields.One2many(
+        "product.product",
+        compute="_compute_in_stock_products",
+    )
+    currency_id = fields.Many2one(
+        "res.currency", default=lambda self: self.env.company.currency_id
+    )
+    db = fields.Many2one(
+        "sap.database",
+        default=lambda self: self.env["sap.database"].search([], limit=1),
+    )
+
+    def _compute_in_stock_products(self):
+        """
+        Get all products that have stock on hand.
+        """
+        for rec in self:
+            rec.in_stock_products = self.env["product.product"].search(
+                [("qty_available", ">", 0)]
+            )
+
+    def _get_purchase_lines_by_product(self):
+        """
+        Calculate the weighted average cost for a product based on purchase history.
+
+        Args:
+            product: Product record
+
+        Returns:
+            dict: Product record to list of purchase lines dicts:
+                {
+                    product_id: [{
+                        qty: float,
+                        price: float,
+                        date: datetime,
+                        order_id: int,
+                    }]
+                }
+        """
+        sql = """
+        SELECT 
+            line.product_id as product_id,
+            line.qty_received as qty,
+            line.price_unit * po.currency_rate as price,
+            po.date_order as date,
+            po.id as order_id
+        FROM
+            purchase_order_line line
+            INNER JOIN purchase_order po ON line.order_id = po.id
+        WHERE
+            line.product_id in %s
+            AND line.qty_received > 0
+        ORDER BY
+            product_id, po.date_order DESC
+        """
+
+        self.env.cr.execute(SQL(sql, tuple(self.in_stock_products.ids)))
+        purchase_lines = self.env.cr.dictfetchall()
+        product_to_lines_dict = {}
+        for line in purchase_lines:
+            product_to_lines_dict.setdefault(line["product_id"], []).append(line)
+        return product_to_lines_dict
+
+    def _calculate_weighted_average_costs(self):
+        """
+        Calculate the weighted average cost for a product based on purchase history.
+
+        Args:
+            product: Product record
+
+        Returns:
+            dict: Product record to weighted average cost
+            float: weighted average cost in company currency
+        """
+        sql = """
+        SELECT 
+            line.product_id as product_id,
+            line.qty_received as qty,
+            line.price_unit * po.currency_rate as price,
+            po.date_order as date
+        FROM
+            purchase_order_line line
+            INNER JOIN purchase_order po ON line.order_id = po.id
+        WHERE
+            line.product_id in %s
+            AND line.qty_received > 0
+        ORDER BY
+            product_id, po.date_order DESC
+        """
+
+        self.env.cr.execute(SQL(sql, tuple(self.in_stock_products.ids)))
+        purchase_lines = self.env.cr.dictfetchall()
+        product_to_lines_dict = {}
+        for line in purchase_lines:
+            product_to_lines_dict.setdefault(line["product_id"], []).append(line)
+        costs = {}
+        for product in self.in_stock_products:
+            lines = product_to_lines_dict.get(product.id, [])
+            if not lines:
+                costs[product] = 0.0
+                continue
+            total_cost = 0.0
+            total_qty = 0.0
+            quantity_to_cover = product.qty_available
+
+            while quantity_to_cover > 0:
+                quantity = min(line.get("qty"), quantity_to_cover)
+                total_cost += line.get("price") * quantity
+                total_qty += quantity
+                quantity_to_cover -= quantity
+                costs[product] = self.currency_id.round(total_cost / total_qty)
+
+        return costs
+
+    def _delete_valuation_layers(self):
+        """
+        Delete existing stock valuation layers.
+        """
+        self.env["stock.valuation.layer"].search([]).unlink()
+
+    def _create_valuation_layer(self, product, cost, quantity=None):
+        """
+        Create a stock valuation layer for a product.
+        """
+        return self.env["stock.valuation.layer"].create(
+            {
+                "company_id": self.env.company.id,
+                "product_id": product.id,
+                "description": f"Automatic revaluation based on purchase orders.",
+                "value": cost,
+                "quantity": quantity or product.qty_available,
+            }
+        )
+
+    def _get_sap_cost_by_product(self):
+        sql = """
+        SELECT itemcode, avgprice
+        FROM OITM
+        WHERE itemcode in %s
+        AND avgprice > 0
+        """
+        with self.db.get_cursor() as cr:
+            cr.execute(SQL(sql, tuple(self.in_stock_products.mapped("sap_item_code"))))
+            sap_items = cr.dictfetchall()
+        products_by_item_code = {p.sap_item_code: p for p in self.in_stock_products}
+        costs = {}
+        for item in sap_items:
+            costs[products_by_item_code[item["itemcode"]]] = item["avgprice"]
+        return costs
+
+    def run(self):
+        """
+        Run the inventory valuation reconstruction process.
+
+        The purchase history is used to calculate the valuation of each product.
+        If no purchase history is available, the SAP valuation is used.
+
+        Returns:
+            dict: Summary of the process
+        """
+        _logger.info(f"Starting inventory valuation reconstruction.")
+        _logger.info(f"Deleting existing valuation layers.")
+        self._delete_valuation_layers()
+        self._compute_in_stock_products()
+        product_to_lines_dict = self._get_purchase_lines_by_product()
+        product_to_sap_cost_dict = self._get_sap_cost_by_product()
+        svl_dates = []
+        for product in self.in_stock_products:
+            lines = product_to_lines_dict.get(product.id, False)
+            if not lines:
+                # Product has no purchase history, use its SAP valuation
+                cost = product_to_sap_cost_dict.get(product, 0.0)
+                self._create_valuation_layer(
+                    product,
+                    cost,
+                )
+                _logger.info(
+                    f"Created valuation layer for product"
+                    f" {product.id} ({product.display_name}) from SAP data."
+                    f" Cost: {cost}, Quantity: {product.qty_available}"
+                )
+                continue
+            qty_remaining = product.qty_available
+            while qty_remaining > 0:
+                if not lines:
+                    # We ran out of purchase lines, so use the SAP cost for the remainder
+                    qty = qty_remaining
+                    cost = product_to_sap_cost_dict.get(product, 0.0)
+                    svl = self._create_valuation_layer(product, cost, qty)
+                    _logger.info(
+                        f"Created valuation layer for product remainder quantity"
+                        f" {product.id} ({product.display_name}) from SAP data."
+                        f" Cost: {cost}, Quantity: {qty}"
+                    )
+                    break
+                line = lines.pop(0)
+                qty = min(qty_remaining, line["qty"])
+                svl = self._create_valuation_layer(product, line["price"], qty)
+                svl_dates.append((svl.id, line["date"]))
+                _logger.info(
+                    f"Created valuation layer for product"
+                    f" {product.id} ({product.display_name}) from purchase order"
+                    f" {line['order_id']}, Quantity: {qty}"
+                )
+                qty_remaining -= qty
+            values_list = []
+            for row in svl_dates:
+                svl_id, date = row
+                formatted_date = date.strftime("%Y-%m-%d %H:%M:%S")
+                values_list.append(f"({svl_id}, '{formatted_date}')")
+        sql = f"""
+        UPDATE stock_valuation_layer svl
+        SET create_date = svl_dates.create_date
+        FROM
+        (VALUES {', '.join(values_list)}) svl_dates
+        WHERE 
+        svl.id = svl_dates.id
+        """
+        _logger.info(f"Updating create_date for stock valuation layers: {sql}")
+        self.env.cr.execute(sql)
