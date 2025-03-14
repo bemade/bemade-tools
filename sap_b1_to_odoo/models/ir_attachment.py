@@ -47,8 +47,8 @@ def _process_attachments_concurrent(
 class IrAttachment(models.Model):
     _inherit = "ir.attachment"
 
-    sap_absentry = fields.Integer(index="btree")
-    sap_line = fields.Integer(index="btree")
+    sap_absentry = fields.Integer(index="btree", copy=False)
+    sap_line = fields.Integer(index="btree", copy=False)
 
     _sql_constraints = [
         (

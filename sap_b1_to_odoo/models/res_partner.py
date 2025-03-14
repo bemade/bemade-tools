@@ -25,11 +25,11 @@ def _create_partners_concurrent(dbname, uid, context, sap_partners, vals_func_na
 class ResPartner(models.Model):
     _inherit = "res.partner"
 
-    sap_card_code = fields.Char(index="btree")
-    sap_parent_card = fields.Char(index="btree")
-    sap_cntct_code = fields.Integer(index="btree")
-    sap_atcentry = fields.Integer(index="btree")
-    sap_partner_type = fields.Char(index="btree")
+    sap_card_code = fields.Char(index="btree", copy=False)
+    sap_parent_card = fields.Char(index="btree", copy=False)
+    sap_cntct_code = fields.Integer(index="btree", copy=False)
+    sap_atcentry = fields.Integer(index="btree", copy=False)
+    sap_partner_type = fields.Char(index="btree", copy=False)
 
     _sql_constraints = [
         (
