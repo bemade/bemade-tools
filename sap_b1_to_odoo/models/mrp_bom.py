@@ -7,7 +7,7 @@ _logger = logging.getLogger(__name__)
 class MrpBom(models.Model):
     _inherit = "mrp.bom"
 
-    sap_code = fields.Char(index="btree")
+    sap_code = fields.Char(index="btree", copy=False)
 
 
 class SapBomImporter(models.AbstractModel):

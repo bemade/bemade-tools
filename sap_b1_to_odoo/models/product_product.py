@@ -16,8 +16,8 @@ _logger = logging.getLogger(__name__)
 class ProductTemplate(models.Model):
     _inherit = "product.template"
 
-    sap_item_code = fields.Char(index="btree")
-    sap_atcentry = fields.Integer()
+    sap_item_code = fields.Char(index="btree", copy=False)
+    sap_atcentry = fields.Integer(copy=False)
     _sql_constraints = [
         (
             "sap_item_code_unique",
@@ -30,7 +30,7 @@ class ProductTemplate(models.Model):
 class ProductCategory(models.Model):
     _inherit = "product.category"
 
-    sap_itms_grp_cod = fields.Integer(index="btree")
+    sap_itms_grp_cod = fields.Integer(index="btree", copy=False)
     _sql_constraints = [
         (
             "sap_itms_grp_cod_unique",

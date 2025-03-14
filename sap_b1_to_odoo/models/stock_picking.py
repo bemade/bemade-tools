@@ -4,7 +4,7 @@ from odoo import models, fields
 class StockPicking(models.Model):
     _inherit = "stock.picking"
 
-    sap_orders = fields.Text(index="trigram", compute="_compute_sap_orders")
+    sap_orders = fields.Text(index="trigram", compute="_compute_sap_orders", copy=False)
 
     def _compute_sap_orders(self):
         for picking in self:

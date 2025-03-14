@@ -10,6 +10,7 @@ class Users(models.Model):
 
     sap_slpcode = fields.Integer(
         string="SAP SLP Code",
+        copy=False,
     )
 
 
