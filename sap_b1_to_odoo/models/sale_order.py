@@ -16,9 +16,9 @@ _logger = logging.getLogger(__name__)
 class SalesOrder(models.Model):
     _inherit = "sale.order"
 
-    sap_docentry = fields.Integer(index="btree")
-    sap_docnum = fields.Integer(index="btree")
-    sap_atcentry = fields.Integer(index="btree")
+    sap_docentry = fields.Integer(index="btree", copy=False)
+    sap_docnum = fields.Integer(index="btree", copy=False)
+    sap_atcentry = fields.Integer(index="btree", copy=False)
 
     _sql_constraints = [
         (
@@ -31,14 +31,14 @@ class SalesOrder(models.Model):
 
 class SaleOrderLine(models.Model):
     _inherit = "sale.order.line"
-    sap_line_num = fields.Integer(index="btree")
-    sap_aftlinenum = fields.Integer(index="btree")
-    sap_lineseq = fields.Integer(index="btree")
+    sap_line_num = fields.Integer(index="btree", copy=False)
+    sap_aftlinenum = fields.Integer(index="btree", copy=False)
+    sap_lineseq = fields.Integer(index="btree", copy=False)
     sap_docentry = fields.Integer(
-        index="btree", related="order_id.sap_docentry", store=True
+        index="btree", related="order_id.sap_docentry", store=True, copy=False
     )
-    sap_table = fields.Char(index="btree")
-    sap_qty_invoiced = fields.Float()
+    sap_table = fields.Char(index="btree", copy=False)
+    sap_qty_invoiced = fields.Float(copy=False)
 
     _sql_constraints = [
         (
