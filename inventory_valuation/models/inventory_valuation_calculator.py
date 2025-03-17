@@ -57,6 +57,7 @@ class InventoryValuationReconstructor(models.TransientModel):
                         price: float,
                         date: datetime,
                         order_id: int,
+                        currency_id: int,
                     }]
                 }
         """
@@ -66,7 +67,8 @@ class InventoryValuationReconstructor(models.TransientModel):
             line.qty_received as qty,
             line.price_unit * po.currency_rate as price,
             po.date_order as date,
-            po.id as order_id
+            po.id as order_id,
+            po.currency_id as currency_id
         FROM
             purchase_order_line line
             INNER JOIN purchase_order po ON line.order_id = po.id
@@ -214,12 +216,19 @@ class InventoryValuationReconstructor(models.TransientModel):
                     break
                 line = lines.pop(0)
                 qty = min(qty_remaining, line["qty"])
-                svl = self._create_valuation_layer(product, line["price"], qty)
+                rates = (
+                    self.env["res.currency"]
+                    .browse(line["currency_id"])
+                    ._get_rates(product.company_id or self.env.company, line["date"])
+                )
+                rate = rates.get(1, 1)
+                price = line["price"] / rate
+                svl = self._create_valuation_layer(product, price, qty)
                 svl_dates.append((svl.id, line["date"]))
                 _logger.info(
                     f"Created valuation layer for product"
                     f" {product.id} ({product.display_name}) from purchase order"
-                    f" {line['order_id']}, Quantity: {qty}"
+                    f" {line['order_id']}, Cost: {price}, Quantity: {qty}"
                 )
                 qty_remaining -= qty
             values_list = []
@@ -227,6 +236,19 @@ class InventoryValuationReconstructor(models.TransientModel):
                 svl_id, date = row
                 formatted_date = date.strftime("%Y-%m-%d %H:%M:%S")
                 values_list.append(f"({svl_id}, '{formatted_date}')")
+
+        sql = f"""
+        UPDATE product_product SET standard_price = jsonb_build_object('1', svl.value)
+        FROM (
+            SELECT
+                product_id AS product_id,
+                AVG(unit_cost * remaining_qty) AS value
+            FROM stock_valuation_layer
+            WHERE remaining_qty>0
+            GROUP BY product_id 
+        ) as svl
+        WHERE svl.product_id = product_product.id
+        """
         sql = f"""
         UPDATE stock_valuation_layer svl
         SET create_date = svl_dates.create_date::timestamp
@@ -237,3 +259,4 @@ class InventoryValuationReconstructor(models.TransientModel):
         """
         _logger.info(f"Updating create_date for stock valuation layers: {sql}")
         self.env.cr.execute(sql)
+        _logger.info("Stock valuation update complete.")
