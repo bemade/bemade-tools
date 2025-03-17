@@ -249,6 +249,10 @@ class InventoryValuationReconstructor(models.TransientModel):
         ) as svl
         WHERE svl.product_id = product_product.id
         """
+        _logger.info(
+            f"Updating average cost on products based on stock valuation layers."
+        )
+        self.env.cr.execute(sql)
         sql = f"""
         UPDATE stock_valuation_layer svl
         SET create_date = svl_dates.create_date::timestamp
