@@ -37,7 +37,9 @@ class InventoryValuationReconstructor(models.TransientModel):
         """
         for rec in self:
             rec.in_stock_products = self.env["product.product"].search(
-                [("qty_available", ">", 0)]
+                [
+                    ("qty_available", ">", 0),
+                ]
             )
 
     def _get_purchase_lines_by_product(self):
@@ -139,35 +141,45 @@ class InventoryValuationReconstructor(models.TransientModel):
         """
         self.env["stock.valuation.layer"].search([]).unlink()
 
-    def _create_valuation_layer(self, product, cost, quantity=None):
+    def _create_valuation_layer(self, product, cost, quantity=0):
         """
         Create a stock valuation layer for a product.
         """
         return self.env["stock.valuation.layer"].create(
-            {
-                "company_id": self.env.company.id,
-                "product_id": product.id,
-                "description": f"Automatic revaluation based on purchase orders.",
-                "value": cost,
-                "quantity": quantity or product.qty_available,
-            }
+            product._prepare_in_svl_vals(quantity, cost)
         )
 
     def _get_sap_cost_by_product(self):
-        sql = """
+        item_codes = str(
+            tuple(
+                self.in_stock_products.filtered("sap_item_code").mapped("sap_item_code")
+            )
+        )
+        sql = f"""
         SELECT itemcode, avgprice
         FROM OITM
-        WHERE itemcode in %s
+        WHERE itemcode in {item_codes}
         AND avgprice > 0
         """
+
         with self.db.get_cursor() as cr:
-            cr.execute(SQL(sql, tuple(self.in_stock_products.mapped("sap_item_code"))))
+            cr.execute(sql)
             sap_items = cr.dictfetchall()
         products_by_item_code = {p.sap_item_code: p for p in self.in_stock_products}
         costs = {}
         for item in sap_items:
             costs[products_by_item_code[item["itemcode"]]] = item["avgprice"]
         return costs
+
+    def _create_svl_from_sap(self, product, sap_cost_dict, qty=None):
+        quantity = qty if qty is not None else product.qty_available
+        cost = sap_cost_dict.get(product, 0.0)
+        self._create_valuation_layer(product, cost, quantity)
+        _logger.info(
+            f"Created valuation layer for product"
+            f" {product.id} ({product.display_name}) from SAP data."
+            f" Cost: {cost}, Quantity: {quantity}"
+        )
 
     def run(self):
         """
@@ -177,7 +189,7 @@ class InventoryValuationReconstructor(models.TransientModel):
         If no purchase history is available, the SAP valuation is used.
 
         Returns:
-            dict: Summary of the process
+            dicte Summary of the process
         """
         _logger.info(f"Starting inventory valuation reconstruction.")
         _logger.info(f"Deleting existing valuation layers.")
@@ -189,29 +201,15 @@ class InventoryValuationReconstructor(models.TransientModel):
         for product in self.in_stock_products:
             lines = product_to_lines_dict.get(product.id, False)
             if not lines:
-                # Product has no purchase history, use its SAP valuation
-                cost = product_to_sap_cost_dict.get(product, 0.0)
-                self._create_valuation_layer(
-                    product,
-                    cost,
-                )
-                _logger.info(
-                    f"Created valuation layer for product"
-                    f" {product.id} ({product.display_name}) from SAP data."
-                    f" Cost: {cost}, Quantity: {product.qty_available}"
-                )
+                self._create_svl_from_sap(product, product_to_sap_cost_dict)
                 continue
             qty_remaining = product.qty_available
             while qty_remaining > 0:
                 if not lines:
-                    # We ran out of purchase lines, so use the SAP cost for the remainder
-                    qty = qty_remaining
-                    cost = product_to_sap_cost_dict.get(product, 0.0)
-                    svl = self._create_valuation_layer(product, cost, qty)
-                    _logger.info(
-                        f"Created valuation layer for product remainder quantity"
-                        f" {product.id} ({product.display_name}) from SAP data."
-                        f" Cost: {cost}, Quantity: {qty}"
+                    self._create_svl_from_sap(
+                        product,
+                        product_to_sap_cost_dict,
+                        qty_remaining,
                     )
                     break
                 line = lines.pop(0)
@@ -231,9 +229,9 @@ class InventoryValuationReconstructor(models.TransientModel):
                 values_list.append(f"({svl_id}, '{formatted_date}')")
         sql = f"""
         UPDATE stock_valuation_layer svl
-        SET create_date = svl_dates.create_date
+        SET create_date = svl_dates.create_date::timestamp
         FROM
-        (VALUES {', '.join(values_list)}) svl_dates
+        (VALUES {', '.join(values_list)} ) as svl_dates (id, create_date)
         WHERE 
         svl.id = svl_dates.id
         """

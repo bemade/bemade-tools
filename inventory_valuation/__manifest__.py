@@ -28,7 +28,7 @@ allowing administrators to:
 - Generate detailed reports for auditing and verification
 
 Technical Features:
-------------------
+-------------------
 - Weighted average cost calculation based on purchase history
 - Configurable thresholds for cost difference and purchase history coverage
 - CSV report generation for processed products, skipped products, and errors
