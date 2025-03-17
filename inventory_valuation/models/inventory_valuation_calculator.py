@@ -159,7 +159,7 @@ class InventoryValuationReconstructor(models.TransientModel):
         )
         sql = f"""
         SELECT itemcode, avgprice
-        FROM OITM
+        FROM OITW
         WHERE itemcode in {item_codes}
         AND avgprice > 0
         """
