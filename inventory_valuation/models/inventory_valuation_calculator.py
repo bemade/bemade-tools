@@ -1,10 +1,8 @@
 import logging
-import csv
-import os
-from datetime import datetime
-from collections import defaultdict
-from odoo import models, api, fields
+from odoo import models, fields, Command, api
+from odoo.exceptions import ValidationError
 from odoo.tools.sql import SQL
+from datetime import timedelta
 
 # Configure logging
 logging.basicConfig(
@@ -62,7 +60,7 @@ class InventoryValuationReconstructor(models.TransientModel):
                 }
         """
         sql = """
-        SELECT 
+        SELECT
             line.product_id as product_id,
             line.qty_received as qty,
             line.price_unit * po.currency_rate as price,
@@ -98,7 +96,7 @@ class InventoryValuationReconstructor(models.TransientModel):
             float: weighted average cost in company currency
         """
         sql = """
-        SELECT 
+        SELECT
             line.product_id as product_id,
             line.qty_received as qty,
             line.price_unit * po.currency_rate as price,
@@ -129,11 +127,15 @@ class InventoryValuationReconstructor(models.TransientModel):
             quantity_to_cover = product.qty_available
 
             while quantity_to_cover > 0:
-                quantity = min(line.get("qty"), quantity_to_cover)
-                total_cost += line.get("price") * quantity
-                total_qty += quantity
-                quantity_to_cover -= quantity
-                costs[product] = self.currency_id.round(total_cost / total_qty)
+                if not lines:
+                    costs[product] = 0.0
+                    break
+                line = lines.pop(0)
+                qty = min(line.get("qty"), quantity_to_cover)
+                total_cost += line.get("price") * qty
+                total_qty += qty
+                quantity_to_cover -= qty
+            costs[product] = self.currency_id.round(total_cost / total_qty)
 
         return costs
 
@@ -191,7 +193,7 @@ class InventoryValuationReconstructor(models.TransientModel):
         If no purchase history is available, the SAP valuation is used.
 
         Returns:
-            dicte Summary of the process
+            dict: Summary of the process
         """
         _logger.info(f"Starting inventory valuation reconstruction.")
         _logger.info(f"Deleting existing valuation layers.")
@@ -245,7 +247,7 @@ class InventoryValuationReconstructor(models.TransientModel):
                 AVG(unit_cost * remaining_qty) AS value
             FROM stock_valuation_layer
             WHERE remaining_qty>0
-            GROUP BY product_id 
+            GROUP BY product_id
         ) as svl
         WHERE svl.product_id = product_product.id
         """
@@ -258,9 +260,245 @@ class InventoryValuationReconstructor(models.TransientModel):
         SET create_date = svl_dates.create_date::timestamp
         FROM
         (VALUES {', '.join(values_list)} ) as svl_dates (id, create_date)
-        WHERE 
+        WHERE
         svl.id = svl_dates.id
         """
         _logger.info(f"Updating create_date for stock valuation layers: {sql}")
         self.env.cr.execute(sql)
         _logger.info("Stock valuation update complete.")
+
+    def repair_after_manual_to_auto_valuation(self):
+        label = "Valuation method change"
+        _logger.info(
+            "Starting repair of valuation and journal entries created by going to automatic valuation."
+        )
+        broken_products = self.env["product.product"].search(
+            [
+                (
+                    "stock_valuation_layer_ids.account_move_id.invoice_line_ids.display_name",
+                    "ilike",
+                    label,
+                )
+            ]
+        )
+        correct_credit_account = self.env["account.account"].search(
+            [
+                (
+                    "code",
+                    "=",
+                    "2028",
+                )
+            ]
+        )
+        self._fix_broken_journal_entries(label, correct_credit_account)
+
+        _logger.info("Creating stock valuation layer corrections.")
+        for product in broken_products:
+            # Iterate until we find the broken one.
+            # The broken one's predecessor will have the value that we need to use to
+            # adjust the remaining value on the broken one.
+            svls = product.stock_valuation_layer_ids
+            last_svl = self.env["stock.valuation.layer"]
+            for svl in svls:
+                if svl.account_move_id.invoice_line_ids.filtered(
+                    lambda n: "Valuation method change" in n.display_name
+                ):
+                    broken_svl = svl
+                    predecessor_svl = last_svl
+                    self._revaluate_broken_svl(broken_svl, predecessor_svl)
+                last_svl = svl
+
+    def _fix_broken_journal_entries(self, label, correct_credit_account):
+        _logger.info("Fixing broken journal entries (wrong accounts).")
+        broken_journal_entries = self.env["account.move"].search(
+            [
+                (
+                    "line_ids.name",
+                    "ilike",
+                    label,
+                )
+            ]
+        )
+        wrong_debit_accounts = self.env["account.account"].search(
+            [("code", "in", ["1511"])]
+        )
+        wrong_credit_accounts = self.env["account.account"].search(
+            [("code", "in", ["1700", "1701", "2028"])]
+        )
+        correct_debit_account = self.env["account.account"].search(
+            [
+                (
+                    "code",
+                    "=",
+                    "1300",
+                )
+            ]
+        )
+        broken_journal_entries.button_draft()
+        _logger.info("Entries are set to draft... fixing accounts.")
+        debit_lines = broken_journal_entries.line_ids.filtered(
+            lambda aml: aml.account_id in wrong_debit_accounts
+        )
+        credit_lines = broken_journal_entries.line_ids.filtered(
+            lambda aml: aml.account_id in wrong_credit_accounts
+        )
+        debit_lines.account_id = correct_debit_account
+        credit_lines.account_id = correct_credit_account
+        _logger.info("Entries are corrected, posting.")
+        broken_journal_entries.action_post()
+
+    def _revaluate_broken_svl(self, broken_svl, predecessor_svl):
+        """
+        Directly revalue a broken stock valuation layer and adjust its account move.
+
+        This method:
+        1. Calculates the correct value based on the predecessor SVL
+        2. Updates the broken SVL's value directly
+        3. Adjusts the associated account move's debit/credit values
+        4. Revalues any subsequent outgoing layers until we hit zero remaining quantity
+        """
+        if not broken_svl or not predecessor_svl:
+            _logger.info("Missing broken_svl or predecessor_svl, skipping revaluation")
+            return
+
+        product = broken_svl.product_id
+        _logger.info(
+            f"Directly revaluing SVL {broken_svl.id} for product {product.name} (id: {product.id})"
+        )
+
+        # Calculate the target value we want to achieve
+        target_value = abs(predecessor_svl.value)
+        current_value = broken_svl.value
+        adjustment = target_value - current_value
+
+        if abs(adjustment) < 0.01:
+            _logger.info(f"Adjustment is negligible (${adjustment}), skipping")
+            return
+
+        _logger.info(
+            f"Current value: {current_value}, Target value: {target_value}, Adjustment: {adjustment}"
+        )
+
+        # Collect all account moves that need to be updated
+        moves_to_update = self.env["account.move"]
+
+        # Get the associated account move
+        moves_to_update |= broken_svl.account_move_id
+
+        # Update the SVL value directly
+        old_value = broken_svl.value
+        broken_svl.write(
+            {
+                "value": target_value,
+                "remaining_value": (
+                    target_value if broken_svl.remaining_qty > 0 else 0
+                ),
+                "unit_cost": (
+                    target_value / broken_svl.quantity if broken_svl.quantity else 0
+                ),
+            }
+        )
+        _logger.info(
+            f"Updated SVL {broken_svl.id} value from {old_value} to {target_value}"
+        )
+
+        # Find and update subsequent outgoing layers
+        subsequent_layers = []
+        if broken_svl.remaining_qty > 0:
+            subsequent_layers = self.env["stock.valuation.layer"].search(
+                [
+                    ("product_id", "=", product.id),
+                    ("id", ">", broken_svl.id),
+                    ("quantity", "<", 0),  # Only outgoing layers
+                ],
+                order="id asc",
+            )
+
+            if subsequent_layers:
+                _logger.info(
+                    f"Found {len(subsequent_layers)} subsequent outgoing layers to update"
+                )
+                new_unit_cost = (
+                    target_value / broken_svl.quantity if broken_svl.quantity else 0
+                )
+
+                for layer in subsequent_layers:
+                    old_value = layer.value
+                    new_value = layer.quantity * new_unit_cost
+
+                    layer.write(
+                        {
+                            "value": new_value,
+                            "unit_cost": new_unit_cost,
+                            "remaining_value": new_unit_cost * layer.remaining_qty,
+                        }
+                    )
+
+                    _logger.info(
+                        f"Updated subsequent layer {layer.id} value from {old_value} to {new_value}"
+                    )
+
+                    moves_to_update |= layer.account_move_id
+
+        # Update all the collected account moves
+        if moves_to_update:
+            self._update_account_moves(moves_to_update)
+
+    def _update_account_moves(self, moves):
+        """Update account moves by setting to draft, updating values, and re-posting."""
+        if not moves:
+            return
+
+        # Deduplicate moves
+        unique_moves = list(set(moves))
+        _logger.info(f"Updating {len(unique_moves)} account moves")
+        
+        # Process each move
+        for move in unique_moves:
+            # Set to draft if posted
+            if move.state == "posted":
+                move.button_draft()
+                _logger.info(f"Set account move {move.id} to draft")
+                
+            svl = move.stock_valuation_layer_ids
+            if not svl or len(svl) > 1:
+                _logger.warning(f"Unexpected number of SVLs ({len(svl)}) for journal entry {move.id}")
+                continue
+
+            # Find the debit and credit lines
+            move_lines = move.line_ids
+            debit_line = move_lines.filtered(lambda l: l.debit > 0)
+            credit_line = move_lines.filtered(lambda l: l.credit > 0)
+
+            if not debit_line or not credit_line:
+                _logger.warning(
+                    f"Could not find both debit and credit lines in move {move.id}"
+                )
+                continue
+
+            # Update the debit and credit lines with the new values
+            new_value = abs(svl.value)
+
+            _logger.info(f"Updating move {move.id} lines - New value: {new_value}")
+
+            # Important: Update both lines in a single write operation to maintain balance
+            # This is how Odoo handles updating move lines while maintaining the balance constraint
+            move.write({
+                'line_ids': [
+                    Command.update(debit_line.id, {
+                        'debit': new_value,
+                        'credit': 0.0,
+                        'balance': new_value,
+                    }),
+                    Command.update(credit_line.id, {
+                        'debit': 0.0,
+                        'credit': new_value,
+                        'balance': -new_value,
+                    })
+                ]
+            })
+            _logger.info(f"Updated move lines for account move {move.id}")
+            
+            # Re-post the move
+            move.action_post()
+            _logger.info(f"Re-posted account move {move.id}")
