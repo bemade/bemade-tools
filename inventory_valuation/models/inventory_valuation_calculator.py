@@ -56,7 +56,7 @@ class InventoryValuationReconstructor(models.TransientModel):
                         date: datetime,
                         order_id: int,
                         currency_id: int,
-                    }]
+                    }an y
                 }
         """
         sql = """
