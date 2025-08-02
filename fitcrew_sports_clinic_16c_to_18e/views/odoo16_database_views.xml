@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+        <!-- Odoo 16 Database Form View -->
+        <record id="view_odoo16_database_form" model="ir.ui.view">
+            <field name="name">odoo16.database.form</field>
+            <field name="model">odoo16.database</field>
+            <field name="arch" type="xml">
+                <form string="Odoo 16 Database Connection">
+                    <header>
+                        <button name="test_connection" string="Test Connection" type="object" class="btn-primary"/>
+                        <button name="action_validate_source_data" string="Validate Source Data" type="object" class="btn-secondary"/>
+                        <button name="action_migrate_all" string="Migrate All Data" type="object" class="btn-success" 
+                                confirm="This will migrate all data from Odoo 16 to Odoo 18. Are you sure?"/>
+                        <field name="migration_status" widget="statusbar" statusbar_visible="not_started,in_progress,completed,failed"/>
+                    </header>
+                    <sheet>
+                        <div class="oe_title">
+                            <h1>
+                                <field name="name" placeholder="Connection Name"/>
+                            </h1>
+                        </div>
+                        <group>
+                            <group name="connection" string="Database Connection">
+                                <field name="database_host"/>
+                                <field name="database_name"/>
+                                <field name="database_username"/>
+                                <field name="database_password" password="True"/>
+                                <field name="database_port"/>
+                            </group>
+                            <group name="migration_info" string="Migration Information">
+                                <field name="filestore_path"/>
+                                <field name="skip_filestore"/>
+                                <field name="migrate_ir_filters"/>
+                                <field name="last_migration_date"/>
+                                <field name="migration_status"/>
+                            </group>
+                        </group>
+                        <group name="migration_actions" string="Individual Migration Actions">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <button name="action_migrate_users_partners" string="Migrate Users &amp; Partners" type="object" class="btn-outline-success btn-block"/>
+                                    <button name="action_migrate_teams" string="Migrate Teams" type="object" class="btn-outline-primary btn-block"/>
+                                    <button name="action_migrate_patients" string="Migrate Patients" type="object" class="btn-outline-primary btn-block"/>
+                                    <button name="action_migrate_injuries" string="Migrate Injuries" type="object" class="btn-outline-primary btn-block"/>
+                                    <button name="action_migrate_activities" string="Migrate Activities" type="object" class="btn-outline-primary btn-block"/>
+                                </div>
+                                <div class="col-md-6">
+                                    <button name="action_migrate_calendar_events_to_tasks" string="Migrate Calendar Events to Tasks" type="object" class="btn-outline-secondary btn-block"/>
+                                    <button name="action_migrate_mail_system" string="Migrate Mail System" type="object" class="btn-outline-info btn-block"/>
+                                    <button name="action_migrate_attachments" string="Migrate Attachments" type="object" class="btn-outline-primary btn-block"/>
+                                    <button name="action_migrate_ir_filters" string="Migrate User Filters (ir.filter)" type="object" class="btn-outline-warning btn-block"/>
+                                </div>
+                            </div>
+                        </group>
+                        <notebook>
+                            <page string="Migration Log" name="migration_log">
+                                <field name="migration_log" widget="text" readonly="1"/>
+                            </page>
+                        </notebook>
+                    </sheet>
+                </form>
+            </field>
+        </record>
+
+        <!-- Odoo 16 Database List View -->
+        <record id="view_odoo16_database_tree" model="ir.ui.view">
+            <field name="name">odoo16.database.list</field>
+            <field name="model">odoo16.database</field>
+            <field name="arch" type="xml">
+                <list string="Odoo 16 Database Connections">
+                    <field name="name"/>
+                    <field name="database_host"/>
+                    <field name="database_name"/>
+                    <field name="migration_status"/>
+                    <field name="last_migration_date"/>
+                </list>
+            </field>
+        </record>
+
+        <!-- Odoo 16 Database Search View -->
+        <record id="view_odoo16_database_search" model="ir.ui.view">
+            <field name="name">odoo16.database.search</field>
+            <field name="model">odoo16.database</field>
+            <field name="arch" type="xml">
+                <search string="Search Odoo 16 Database Connections">
+                    <field name="name"/>
+                    <field name="database_host"/>
+                    <field name="database_name"/>
+                    <filter string="Not Started" name="not_started" domain="[('migration_status', '=', 'not_started')]"/>
+                    <filter string="In Progress" name="in_progress" domain="[('migration_status', '=', 'in_progress')]"/>
+                    <filter string="Completed" name="completed" domain="[('migration_status', '=', 'completed')]"/>
+                    <filter string="Failed" name="failed" domain="[('migration_status', '=', 'failed')]"/>
+                    <group expand="0" string="Group By">
+                        <filter string="Migration Status" name="group_by_status" context="{'group_by': 'migration_status'}"/>
+                        <filter string="Database Host" name="group_by_host" context="{'group_by': 'database_host'}"/>
+                    </group>
+                </search>
+            </field>
+        </record>
+
+        <!-- Action for Odoo 16 Database -->
+        <record id="action_odoo16_database" model="ir.actions.act_window">
+            <field name="name">Odoo 16 Database Connections</field>
+            <field name="res_model">odoo16.database</field>
+            <field name="view_mode">tree,form</field>
+            <field name="help" type="html">
+                <p class="o_view_nocontent_smiling_face">
+                    Create your first Odoo 16 database connection!
+                </p>
+                <p>
+                    Configure a connection to your Odoo 16 Community database to begin migrating
+                    your FitCrew Sports Clinic data to Odoo 18 Enterprise.
+                </p>
+            </field>
+        </record>
+
+        <!-- Menu Items -->
+        <menuitem id="menu_migration_root" 
+                  name="Data Migration" 
+                  sequence="100"/>
+        
+        <menuitem id="menu_odoo16_database" 
+                  name="Odoo 16 Connections" 
+                  parent="menu_migration_root"
+                  action="action_odoo16_database" 
+                  sequence="10"/>
+
+    </data>
+</odoo>
