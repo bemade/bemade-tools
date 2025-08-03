@@ -103,7 +103,7 @@
         <record id="action_odoo16_database" model="ir.actions.act_window">
             <field name="name">Odoo 16 Database Connections</field>
             <field name="res_model">odoo16.database</field>
-            <field name="view_mode">tree,form</field>
+            <field name="view_mode">list,form</field>
             <field name="help" type="html">
                 <p class="o_view_nocontent_smiling_face">
                     Create your first Odoo 16 database connection!

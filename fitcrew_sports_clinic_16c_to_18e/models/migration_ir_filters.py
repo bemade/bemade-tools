@@ -91,15 +91,22 @@ class MigrationIrFilters(models.Model):
                         'active': filter_data[9],
                     }
                     
-                    # Check if filter already exists
-                    existing_filter = self.env['ir.filters'].search([
+                    # Use merge functionality to create or update filter
+                    search_domain = [
                         ('name', '=', filter_data[1]),
                         ('model_id', '=', filter_data[2]),
                         ('user_id', '=', filter_data[3])
-                    ], limit=1)
+                    ]
                     
-                    if not existing_filter:
-                        self.env['ir.filters'].create(filter_vals)
+                    record_identifier = f"IR filter '{filter_data[1]}' for user {filter_data[3]} on model {filter_data[2]}"
+                    filter_record, action = self.database_id._create_or_update_record(
+                        'ir.filters',
+                        search_domain,
+                        filter_vals,
+                        record_identifier
+                    )
+                    
+                    if action in ['created', 'updated']:
                         filter_count += 1
             
             status_message = f'IR filters migration completed: {filter_count} filters migrated'

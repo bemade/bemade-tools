@@ -4,5 +4,9 @@ from . import test_migration_mail_system
 from . import test_migration_calendar_events
 from . import test_migration_attachments
 from . import test_migration_ir_filters
+from . import test_migration_sports_teams
+from . import test_migration_sports_patients
+from . import test_migration_sports_injuries
 from . import test_odoo16_database_coordinator
 from . import test_integration_migration
+from . import test_users_partners_migration_focused

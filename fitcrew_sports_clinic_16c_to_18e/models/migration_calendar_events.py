@@ -137,14 +137,21 @@ class MigrationCalendarEvents(models.Model):
                         'tag_ids': [(6, 0, [self._get_or_create_migration_tag().id])],
                     }
                     
-                    # Check if task already exists (by name and project)
-                    existing_task = self.env['project.task'].search([
+                    # Use merge functionality to create or update task
+                    search_domain = [
                         ('name', '=', task_vals['name']),
                         ('project_id', '=', project.id)
-                    ], limit=1)
+                    ]
                     
-                    if not existing_task:
-                        self.env['project.task'].create(task_vals)
+                    record_identifier = f"project task '{task_vals['name']}' in project '{project.name}'"
+                    task, action = self.database_id._create_or_update_record(
+                        'project.task',
+                        search_domain,
+                        task_vals,
+                        record_identifier
+                    )
+                    
+                    if action in ['created', 'updated']:
                         task_count += 1
             
             self._update_migration_status('completed', 
