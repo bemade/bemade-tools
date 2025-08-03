@@ -21,6 +21,9 @@ class Odoo16Database(models.Model):
     calendar_events_migration_id = fields.Many2one('migration.calendar.events', ondelete='cascade')
     attachments_migration_id = fields.Many2one('migration.attachments', ondelete='cascade')
     ir_filters_migration_id = fields.Many2one('migration.ir.filters', ondelete='cascade')
+    sports_teams_migration_id = fields.Many2one('migration.sports.teams', ondelete='cascade')
+    sports_patients_migration_id = fields.Many2one('migration.sports.patients', ondelete='cascade')
+    sports_injuries_migration_id = fields.Many2one('migration.sports.injuries', ondelete='cascade')
     
     # Configuration fields (delegated from components)
     skip_filestore = fields.Boolean(
@@ -34,9 +37,19 @@ class Odoo16Database(models.Model):
         string='Migrate User Filters'
     )
     
-    @api.model
-    def create(self, vals):
-        """Create migration coordinator with all component migrations."""
+
+    
+    @api.model_create_multi
+    def create(self, vals_list):
+        """Create migration coordinators with all component migrations (batch support)."""
+        coordinators = self.browse()
+        for vals in vals_list:
+            coordinator = self._create_single_coordinator(vals)
+            coordinators += coordinator
+        return coordinators
+    
+    def _create_single_coordinator(self, vals):
+        """Create a single migration coordinator with all components."""
         # Create base database record
         base_vals = {
             'database_host': vals.get('database_host'),
@@ -49,7 +62,7 @@ class Odoo16Database(models.Model):
         vals['database_id'] = database_base.id
         
         # Create the coordinator record
-        coordinator = super().create(vals)
+        coordinator = super().create([vals])[0]  # Use batch create for consistency
         
         # Create all migration component records
         coordinator._create_migration_components()
@@ -87,6 +100,24 @@ class Odoo16Database(models.Model):
             'database_id': self.database_id.id
         })
         self.ir_filters_migration_id = ir_filters.id
+        
+        # Create sports teams migration
+        sports_teams = self.env['migration.sports.teams'].create({
+            'database_id': self.database_id.id
+        })
+        self.sports_teams_migration_id = sports_teams.id
+        
+        # Create sports patients migration
+        sports_patients = self.env['migration.sports.patients'].create({
+            'database_id': self.database_id.id
+        })
+        self.sports_patients_migration_id = sports_patients.id
+        
+        # Create sports injuries migration
+        sports_injuries = self.env['migration.sports.injuries'].create({
+            'database_id': self.database_id.id
+        })
+        self.sports_injuries_migration_id = sports_injuries.id
     
     # Delegation methods for migration actions
     def action_migrate_users_partners(self):
@@ -109,18 +140,30 @@ class Odoo16Database(models.Model):
         """Delegate to IR filters migration."""
         return self.ir_filters_migration_id.action_migrate_ir_filters()
     
-    # Placeholder methods for sports clinic migrations (to be implemented)
+    def action_migrate_sports_teams(self):
+        """Delegate to sports teams migration."""
+        return self.sports_teams_migration_id.action_migrate_sports_teams()
+    
+    def action_migrate_sports_patients(self):
+        """Delegate to sports patients migration."""
+        return self.sports_patients_migration_id.action_migrate_sports_patients()
+    
+    def action_migrate_sports_injuries(self):
+        """Delegate to sports injuries migration."""
+        return self.sports_injuries_migration_id.action_migrate_sports_injuries()
+    
+    # Updated sports clinic migration methods
     def action_migrate_teams(self):
-        """Migrate sports teams (placeholder - to be implemented)."""
-        return self._success_notification("Teams Migration", "Teams migration not yet implemented")
+        """Migrate sports teams - delegates to sports teams migration component."""
+        return self.action_migrate_sports_teams()
     
     def action_migrate_patients(self):
-        """Migrate patients (placeholder - to be implemented)."""
-        return self._success_notification("Patients Migration", "Patients migration not yet implemented")
+        """Migrate patients - delegates to sports patients migration component."""
+        return self.action_migrate_sports_patients()
     
     def action_migrate_injuries(self):
-        """Migrate injuries (placeholder - to be implemented)."""
-        return self._success_notification("Injuries Migration", "Injuries migration not yet implemented")
+        """Migrate injuries - delegates to sports injuries migration component."""
+        return self.action_migrate_sports_injuries()
     
     def action_migrate_activities(self):
         """Migrate activities (placeholder - to be implemented)."""

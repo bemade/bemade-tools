@@ -35,6 +35,9 @@ class MigrationUsersPartners(models.Model):
         try:
             self._update_migration_status('in_progress', 'Starting users and partners migration')
             
+            # Create a mapping to track Odoo 16 -> Odoo 18 partner ID relationships
+            partner_id_mapping = {}
+            
             with self.get_cursor() as cr:
                 # Check which columns exist in res_partner table
                 cr.execute("""
@@ -64,6 +67,18 @@ class MigrationUsersPartners(models.Model):
                     # Create a dictionary mapping column names to values
                     partner_dict = dict(zip(query_columns, partner_data))
                     
+                    # Skip system partners that shouldn't be migrated (check early to avoid warnings)
+                    partner_name = partner_dict.get('name')
+                    if not partner_name:
+                        continue  # Skip partners without names
+                    
+                    system_partner_names = [
+                        'OdooBot', 'Public user', 'Default User Template', 
+                        'Portal User Template', 'Administrator'
+                    ]
+                    if partner_name in system_partner_names:
+                        continue
+                    
                     # Build partner values dynamically based on available columns
                     partner_vals = {
                         'name': partner_dict.get('name'),
@@ -75,6 +90,7 @@ class MigrationUsersPartners(models.Model):
                         'street2': partner_dict.get('street2'),
                         'city': partner_dict.get('city'),
                         'zip': partner_dict.get('zip'),
+                        'odoo16_partner_id': partner_dict.get('id'),  # Store original Odoo 16 partner ID for efficient lookups
                     }
                     
                     # Add optional fields if they exist, validating foreign key references
@@ -107,22 +123,46 @@ class MigrationUsersPartners(models.Model):
                     if 'active' in partner_dict:
                         partner_vals['active'] = partner_dict['active']
                     
-                    # Check if partner already exists
-                    existing_partner = self.env['res.partner'].search([
-                        ('name', '=', partner_dict.get('name')),
-                        ('email', '=', partner_dict.get('email'))
-                    ], limit=1)
-                    
-                    if not existing_partner:
-                        try:
-                            # Use savepoint to isolate this creation
-                            with self.env.cr.savepoint():
-                                self.env['res.partner'].sudo().create(partner_vals)
+                    # Create or update partner using merge functionality
+                    try:
+                        # Use savepoint to isolate this operation
+                        with self.env.cr.savepoint():
+                            search_domain = []
+                            # Build search domain based on available unique identifiers
+                            if partner_dict.get('email'):
+                                search_domain.append(('email', '=', partner_dict.get('email')))
+                            elif partner_dict.get('name'):
+                                search_domain.append(('name', '=', partner_dict.get('name')))
+                            else:
+                                # Skip partners without identifiable information
+                                continue
+                                
+                            record_identifier = f"partner '{partner_dict.get('name', 'Unknown')}'"
+                            partner, action = self.database_id._create_or_update_record(
+                                'res.partner', 
+                                search_domain, 
+                                partner_vals, 
+                                record_identifier
+                            )
+                            
+                            # Debug logging to track merge vs create behavior
+                            if action == 'created':
+                                _logger.info(f"🆕 CREATED partner: {partner_dict.get('name')} (email: {partner_dict.get('email')})")
+                            elif action == 'updated':
+                                _logger.info(f"🔄 MERGED partner: {partner_dict.get('name')} (email: {partner_dict.get('email')})")
+                            
+                            if action in ('created', 'updated'):
                                 partner_count += 1
-                        except Exception as e:
-                            # Log the error but continue with other partners
-                            _logger.warning(f"Failed to create partner {partner_dict.get('name')}: {str(e)}")
-                            continue
+                                
+                            # Store the mapping between Odoo 16 and Odoo 18 partner IDs
+                            odoo16_partner_id = partner_dict.get('id')
+                            if odoo16_partner_id and partner:
+                                partner_id_mapping[odoo16_partner_id] = partner.id
+                                
+                    except Exception as e:
+                        # Log the error but continue with other partners
+                        _logger.warning(f"Failed to process partner {partner_dict.get('name')}: {str(e)}")
+                        continue
                 
                 # Check which columns exist in res_users table
                 cr.execute("""
@@ -152,55 +192,120 @@ class MigrationUsersPartners(models.Model):
                     # Create a dictionary mapping column names to values
                     user_dict = dict(zip(user_query_columns, user_data))
                     
+                    # Check if user should be migrated (do this first to avoid unnecessary processing)
+                    login = user_dict.get('login')
+                    if not login:
+                        continue  # Skip users without login
+                    
+                    # Skip system users that shouldn't be migrated (check early to avoid warnings)
+                    system_logins = [
+                        '__system__', 'admin', 'public', 'default', 'portaltemplate',
+                        'demo', 'base.user_demo', 'base.user_admin', 'base.default_user'
+                    ]
+                    if login in system_logins:
+                        continue
+                    
+                    # Skip archived users (they shouldn't be migrated)
+                    if not user_dict.get('active', True):
+                        _logger.debug(f"Skipping archived user: {login}")
+                        continue
+                    
                     # Build user values dynamically based on available columns
+                    # Handle partner_id mapping from Odoo 16 to Odoo 18
+                    odoo16_partner_id = user_dict.get('partner_id')
+                    mapped_partner_id = None
+                    
+                    if odoo16_partner_id:
+                        # Try to find the mapped partner ID
+                        mapped_partner_id = partner_id_mapping.get(odoo16_partner_id)
+                        
+                        if not mapped_partner_id:
+                            # If no mapping found, try to find partner by other means or create a basic one
+                            _logger.warning(f"No partner mapping found for Odoo 16 partner_id {odoo16_partner_id} for user {user_dict.get('login')}")
+                            # Skip this user for now - we could create a basic partner here if needed
+                            continue
+                    
                     user_vals = {
                         'login': user_dict.get('login'),
-                        'partner_id': user_dict.get('partner_id'),
-                        'active': user_dict.get('active', True),
+                        'partner_id': mapped_partner_id,
+                        'active': True,  # Always create as active initially to avoid constraint issues
                     }
                     
-                    # Add optional fields if they exist, validating foreign key references
-                    if 'password' in user_dict:
-                        user_vals['password'] = user_dict['password']
+                    # Add optional fields if they exist, validating foreign key references and data types
+                    if 'password' in user_dict and user_dict['password']:
+                        password_value = user_dict['password']
+                        # Ensure password is a string, not boolean or other type
+                        if isinstance(password_value, (str, bytes)):
+                            user_vals['password'] = password_value
+                        else:
+                            _logger.warning(f"Invalid password type for user {login}: {type(password_value)}, skipping password field")
                     
                     if 'company_id' in user_dict and user_dict['company_id']:
                         # Validate company exists
                         if self.env['res.company'].browse(user_dict['company_id']).exists():
                             user_vals['company_id'] = user_dict['company_id']
                     
-                    if 'signature' in user_dict:
-                        user_vals['signature'] = user_dict['signature']
-                    if 'notification_type' in user_dict:
-                        user_vals['notification_type'] = user_dict['notification_type']
-                    if 'odoobot_state' in user_dict:
+                    if 'signature' in user_dict and user_dict['signature']:
+                        signature_value = user_dict['signature']
+                        # Ensure signature is a string
+                        if isinstance(signature_value, str):
+                            user_vals['signature'] = signature_value
+                        else:
+                            _logger.warning(f"Invalid signature type for user {login}: {type(signature_value)}, skipping signature field")
+                    
+                    if 'notification_type' in user_dict and user_dict['notification_type']:
+                        notification_value = user_dict['notification_type']
+                        # Ensure notification_type is a string
+                        if isinstance(notification_value, str):
+                            user_vals['notification_type'] = notification_value
+                        else:
+                            _logger.warning(f"Invalid notification_type for user {login}: {type(notification_value)}, skipping notification_type field")
+                    
+                    if 'odoobot_state' in user_dict and user_dict['odoobot_state'] is not None:
                         user_vals['odoobot_state'] = user_dict['odoobot_state']
-                    if 'odoobot_failed' in user_dict:
+                    
+                    if 'odoobot_failed' in user_dict and isinstance(user_dict['odoobot_failed'], bool):
                         user_vals['odoobot_failed'] = user_dict['odoobot_failed']
                     
-                    # Check if user already exists or is a system user
-                    login = user_dict.get('login')
-                    if not login:
-                        continue  # Skip users without login
+                    # Store original active state for later processing (login already validated above)
+                    original_active_state = user_dict.get('active', True)
                     
-                    # Skip system users that shouldn't be migrated
-                    system_logins = ['__system__', 'admin', 'public']
-                    if login in system_logins:
-                        continue
-                    
-                    existing_user = self.env['res.users'].search([
-                        ('login', '=', login)
-                    ], limit=1)
-                    
-                    if not existing_user:
-                        try:
-                            # Use savepoint to isolate this creation
-                            with self.env.cr.savepoint():
-                                self.env['res.users'].sudo().create(user_vals)
+                    # Create or update user using merge functionality
+                    try:
+                        # Use savepoint to isolate this operation
+                        with self.env.cr.savepoint():
+                            # Search for existing user (including archived ones)
+                            search_domain = [('login', '=', login)]
+                            record_identifier = f"user '{login}'"
+                            
+                            # Debug: Check if user already exists
+                            existing_user = self.env['res.users'].with_context(active_test=False).search(search_domain, limit=1)
+                            if existing_user:
+                                _logger.info(f"Found existing user '{login}' (ID: {existing_user.id}, active: {existing_user.active})")
+                            
+                            user, action = self.database_id._create_or_update_record(
+                                'res.users',
+                                search_domain,
+                                user_vals,
+                                record_identifier
+                            )
+                            
+                            if action in ('created', 'updated'):
                                 user_count += 1
-                        except Exception as e:
-                            # Log the error but continue with other users
-                            _logger.warning(f"Failed to create user {login}: {str(e)}")
-                            continue
+                                
+                                # If the user was originally inactive, mark them as inactive now
+                                # (after successful creation to avoid constraint issues)
+                                if not original_active_state:
+                                    try:
+                                        user.write({'active': False})
+                                        _logger.info(f"Marked user '{login}' as inactive (preserving original state)")
+                                    except Exception as deactivate_error:
+                                        _logger.warning(f"Failed to deactivate user '{login}': {deactivate_error}")
+                                
+                    except Exception as e:
+                        # Log the error but continue with other users
+                        _logger.warning(f"Failed to process user {login}: {str(e)}")
+                        continue
             
             self._update_migration_status('completed', 
                 f'Users and partners migration completed: {user_count} users, {partner_count} partners migrated')

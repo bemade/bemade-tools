@@ -131,3 +131,73 @@ class Odoo16DatabaseBase(models.Model):
                 'sticky': True,
             }
         }
+    
+    def _create_or_update_record(self, model_name, search_domain, values, record_identifier="record"):
+        """Create or update a record with merge functionality and chatter logging.
+        
+        Args:
+            model_name (str): Name of the model (e.g., 'res.partner')
+            search_domain (list): Domain to search for existing record
+            values (dict): Values to create/update the record with
+            record_identifier (str): Human-readable identifier for logging
+            
+        Returns:
+            tuple: (record, action) where action is 'created' or 'updated'
+        """
+        model = self.env[model_name]
+        # Search for existing records including archived ones
+        existing_record = model.with_context(active_test=False).search(search_domain, limit=1)
+        
+        if existing_record:
+            # Record exists - merge/overwrite with Odoo 16 data
+            old_values = {}
+            updated_fields = []
+            
+            # Track which fields are being updated
+            for field_name, new_value in values.items():
+                if hasattr(existing_record, field_name):
+                    old_value = getattr(existing_record, field_name)
+                    # Handle different field types for comparison
+                    if field_name.endswith('_id') and hasattr(old_value, 'id'):
+                        old_value = old_value.id
+                    elif hasattr(old_value, 'ids'):  # Many2many field
+                        old_value = old_value.ids
+                    
+                    if old_value != new_value:
+                        old_values[field_name] = old_value
+                        updated_fields.append(field_name)
+            
+            if updated_fields:
+                # Update the record
+                existing_record.sudo().write(values)
+                
+                # Log the overwrite
+                _logger.info(f"Overwritten {record_identifier} (ID: {existing_record.id}) - "
+                           f"Updated fields: {', '.join(updated_fields)}")
+                
+                # Add chatter message if the model supports mail.thread
+                if hasattr(existing_record, 'message_post'):
+                    try:
+                        message = f"""<p><strong>Data Migration Update</strong></p>
+                        <p>This {record_identifier} was updated during Odoo 16 to 18 migration.</p>
+                        <p><strong>Updated fields:</strong> {', '.join(updated_fields)}</p>
+                        <p><strong>Previous data was overwritten with Odoo 16 source data.</strong></p>"""
+                        
+                        existing_record.message_post(
+                            body=message,
+                            subject=f"Migration Update: {record_identifier}",
+                            message_type='notification'
+                        )
+                    except Exception as e:
+                        _logger.warning(f"Could not post chatter message for {record_identifier}: {e}")
+                
+                return existing_record, 'updated'
+            else:
+                # No changes needed
+                _logger.info(f"No changes needed for {record_identifier} (ID: {existing_record.id})")
+                return existing_record, 'unchanged'
+        else:
+            # Record doesn't exist - create new one
+            new_record = model.sudo().create(values)
+            _logger.info(f"Created new {record_identifier} (ID: {new_record.id})")
+            return new_record, 'created'

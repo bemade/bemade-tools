@@ -85,7 +85,7 @@ class TestMigrationIntegration(TransactionCase):
             
             # Step 7: Verify migration status
             _logger.info("Step 7: Verifying migration status...")
-            coordinator.refresh()
+            coordinator.invalidate_cache()
             _logger.info(f"Migration status: {coordinator.migration_status}")
             _logger.info(f"Last migration date: {coordinator.last_migration_date}")
             

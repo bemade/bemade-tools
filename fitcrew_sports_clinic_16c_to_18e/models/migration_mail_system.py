@@ -124,19 +124,22 @@ class MigrationMailSystem(models.Model):
                 if 'uuid' in channel_dict:
                     channel_vals['uuid'] = channel_dict['uuid']
                 
-                # Check if channel already exists
-                existing_channel = self.env['mail.channel'].search([
-                    ('name', '=', channel_dict.get('name'))
-                ], limit=1)
+                # Use merge functionality to create or update channel
+                search_domain = [('name', '=', channel_dict.get('name'))]
                 
-                # Also check by UUID if available
-                if not existing_channel and 'uuid' in channel_dict and channel_dict['uuid']:
-                    existing_channel = self.env['mail.channel'].search([
-                        ('uuid', '=', channel_dict['uuid'])
-                    ], limit=1)
+                # Also search by UUID if available for better matching
+                if 'uuid' in channel_dict and channel_dict['uuid']:
+                    search_domain = ['|'] + search_domain + [('uuid', '=', channel_dict['uuid'])]
                 
-                if not existing_channel:
-                    self.env['mail.channel'].create(channel_vals)
+                record_identifier = f"mail channel '{channel_dict.get('name')}'"
+                channel, action = self.database_id._create_or_update_record(
+                    'mail.channel',
+                    search_domain,
+                    channel_vals,
+                    record_identifier
+                )
+                
+                if action in ['created', 'updated']:
                     count += 1
         
         return count
@@ -174,14 +177,21 @@ class MigrationMailSystem(models.Model):
                     'last_seen_dt': member_data[11],
                 }
                 
-                # Check if member already exists
-                existing_member = self.env['mail.channel.member'].search([
+                # Use merge functionality to create or update channel member
+                search_domain = [
                     ('channel_id', '=', member_data[1]),
                     ('partner_id', '=', member_data[2])
-                ], limit=1)
+                ]
                 
-                if not existing_member:
-                    self.env['mail.channel.member'].create(member_vals)
+                record_identifier = f"mail channel member (channel: {member_data[1]}, partner: {member_data[2]})"
+                member, action = self.database_id._create_or_update_record(
+                    'mail.channel.member',
+                    search_domain,
+                    member_vals,
+                    record_identifier
+                )
+                
+                if action in ['created', 'updated']:
                     count += 1
         
         return count
@@ -243,14 +253,21 @@ class MigrationMailSystem(models.Model):
                     # Skip notifications for non-existent messages
                     continue
                 
-                # Check if notification already exists
-                existing_notification = self.env['mail.notification'].search([
+                # Use merge functionality to create or update notification
+                search_domain = [
                     ('mail_message_id', '=', notification_data[1]),
                     ('res_partner_id', '=', notification_data[2])
-                ], limit=1)
+                ]
                 
-                if not existing_notification:
-                    self.env['mail.notification'].create(notification_vals)
+                record_identifier = f"mail notification (message: {notification_data[1]}, partner: {notification_data[2]})"
+                notification, action = self.database_id._create_or_update_record(
+                    'mail.notification',
+                    search_domain,
+                    notification_vals,
+                    record_identifier
+                )
+                
+                if action in ['created', 'updated']:
                     count += 1
         
         return count
@@ -311,19 +328,24 @@ class MigrationMailSystem(models.Model):
                         # Skip reactions for non-existent messages
                         continue
                 
-                # Check if reaction already exists (only if we have required fields)
+                # Use merge functionality to create or update reaction (only if we have required fields)
                 if 'message_id' in reaction_vals and 'partner_id' in reaction_vals and 'content' in reaction_vals:
-                    existing_reaction = self.env['mail.message.reaction'].search([
+                    search_domain = [
                         ('message_id', '=', reaction_vals['message_id']),
                         ('partner_id', '=', reaction_vals['partner_id']),
                         ('content', '=', reaction_vals['content'])
-                    ], limit=1)
-                else:
-                    existing_reaction = None
-                
-                if not existing_reaction:
-                    self.env['mail.message.reaction'].create(reaction_vals)
-                    count += 1
+                    ]
+                    
+                    record_identifier = f"mail reaction (message: {reaction_vals['message_id']}, partner: {reaction_vals['partner_id']}, content: {reaction_vals['content']})"
+                    reaction, action = self.database_id._create_or_update_record(
+                        'mail.message.reaction',
+                        search_domain,
+                        reaction_vals,
+                        record_identifier
+                    )
+                    
+                    if action in ['created', 'updated']:
+                        count += 1
         
         return count
     

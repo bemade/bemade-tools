@@ -133,15 +133,22 @@ class MigrationAttachments(models.Model):
                                          '\n\n[NOTE: Original file content not migrated - filestore import was skipped]'
                         })
                     
-                    # Check if attachment already exists
-                    existing_attachment = self.env['ir.attachment'].search([
+                    # Use merge functionality to create or update attachment
+                    search_domain = [
                         ('name', '=', attachment_dict.get('name')),
                         ('res_model', '=', attachment_dict.get('res_model')),
                         ('res_id', '=', attachment_dict.get('res_id'))
-                    ], limit=1)
+                    ]
                     
-                    if not existing_attachment:
-                        self.env['ir.attachment'].create(attachment_vals)
+                    record_identifier = f"attachment '{attachment_dict.get('name')}' on {attachment_dict.get('res_model')} (ID: {attachment_dict.get('res_id')})"
+                    attachment, action = self.database_id._create_or_update_record(
+                        'ir.attachment',
+                        search_domain,
+                        attachment_vals,
+                        record_identifier
+                    )
+                    
+                    if action in ['created', 'updated']:
                         attachment_count += 1
             
             status_message = f'Attachments migration completed: {attachment_count} attachments migrated'
