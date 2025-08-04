@@ -24,6 +24,7 @@ class Odoo16Database(models.Model):
     sports_teams_migration_id = fields.Many2one('migration.sports.teams', ondelete='cascade')
     sports_patients_migration_id = fields.Many2one('migration.sports.patients', ondelete='cascade')
     sports_injuries_migration_id = fields.Many2one('migration.sports.injuries', ondelete='cascade')
+    activities_migration_id = fields.Many2one('migration.activities', ondelete='cascade')
     
     # Configuration fields (delegated from components)
     skip_filestore = fields.Boolean(
@@ -118,6 +119,12 @@ class Odoo16Database(models.Model):
             'database_id': self.database_id.id
         })
         self.sports_injuries_migration_id = sports_injuries.id
+        
+        # Create activities migration
+        activities = self.env['migration.activities'].create({
+            'database_id': self.database_id.id
+        })
+        self.activities_migration_id = activities.id
     
     # Delegation methods for migration actions
     def action_migrate_users_partners(self):
@@ -152,6 +159,10 @@ class Odoo16Database(models.Model):
         """Delegate to sports injuries migration."""
         return self.sports_injuries_migration_id.action_migrate_sports_injuries()
     
+    def action_migrate_activities(self):
+        """Delegate to activities migration."""
+        return self.activities_migration_id.action_migrate_activities()
+    
     # Updated sports clinic migration methods
     def action_migrate_teams(self):
         """Migrate sports teams - delegates to sports teams migration component."""
@@ -164,10 +175,6 @@ class Odoo16Database(models.Model):
     def action_migrate_injuries(self):
         """Migrate injuries - delegates to sports injuries migration component."""
         return self.action_migrate_sports_injuries()
-    
-    def action_migrate_activities(self):
-        """Migrate activities (placeholder - to be implemented)."""
-        return self._success_notification("Activities Migration", "Activities migration not yet implemented")
     
     def action_migrate_all(self):
         """Perform complete migration from Odoo 16 to Odoo 18."""

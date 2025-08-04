@@ -10,3 +10,9 @@ from . import test_migration_sports_injuries
 from . import test_odoo16_database_coordinator
 from . import test_integration_migration
 from . import test_users_partners_migration_focused
+from . import test_comprehensive_migration
+from . import test_patient_migration_debug
+from . import test_patient_migration_isolated
+from . import test_partner_lookup_debug
+from . import test_partner_migration_verification
+from . import test_partner_staff_debug

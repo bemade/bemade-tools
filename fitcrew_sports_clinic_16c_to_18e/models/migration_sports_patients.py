@@ -45,14 +45,30 @@ class MigrationSportsPatients(models.Model):
         """Migrate sports patients from Odoo 16 to Odoo 18."""
         try:
             self._update_migration_status('in_progress', 'Starting sports patients migration')
+            
+            # Step 1: Migrate patients first and commit
             with self.get_cursor() as cr:
                 patients_count = self._migrate_patients(cr)
-                contacts_count = self._migrate_patient_contacts(cr)
-                relations_count = self._migrate_team_patient_relations(cr)
             
             self.patients_migrated = patients_count
+            self.env.cr.commit()
+            _logger.info(f"✅ Patients migration committed - {patients_count} patients persisted")
+            
+            # Step 2: Migrate patient contacts (depends on patients) and commit
+            with self.get_cursor() as cr:
+                contacts_count = self._migrate_patient_contacts(cr)
+            
             self.patient_contacts_migrated = contacts_count
+            self.env.cr.commit()
+            _logger.info(f"✅ Patient contacts migration committed - {contacts_count} contacts persisted")
+            
+            # Step 3: Migrate team-patient relations (depends on patients and teams) and commit
+            with self.get_cursor() as cr:
+                relations_count = self._migrate_team_patient_relations(cr)
+            
             self.team_patient_relations_migrated = relations_count
+            self.env.cr.commit()
+            _logger.info(f"✅ Team-patient relations migration committed - {relations_count} relations persisted")
             
             message = f'Successfully migrated {patients_count} patients, {contacts_count} contacts, and {relations_count} team relations'
             self._update_migration_status('completed', message)
@@ -67,6 +83,9 @@ class MigrationSportsPatients(models.Model):
     def _migrate_patients(self, cursor):
         """Migrate sports patients from source database."""
         _logger.info("Starting sports patients migration...")
+        
+        # Ensure we have a proper environment reference
+        target_env = self.env
         
         # Query source patients
         cursor.execute("""
@@ -85,6 +104,8 @@ class MigrationSportsPatients(models.Model):
         
         _logger.info(f"Found {len(source_patients)} patients to migrate")
         migrated_count = 0
+        failed_count = 0
+        failed_patient_ids = []
         
         for patient_data in source_patients:
             try:
@@ -93,19 +114,69 @@ class MigrationSportsPatients(models.Model):
                  last_consultation_date, allergies, team_info_notes,
                  create_date, create_uid, write_date, write_uid) = patient_data
                 
-                # Find corresponding partner in target database
+                # Find or create corresponding partner (MANDATORY for sports.patient)
                 partner = None
                 if partner_id:
-                    partner = self.env['res.partner'].search([('id', '=', partner_id)], limit=1)
-                    if not partner:
-                        _logger.warning(f"Partner {partner_id} not found for patient {patient_id}")
+                    # First try direct lookup by odoo16_partner_id
+                    partner = target_env['res.partner'].with_context(active_test=False).search([('odoo16_partner_id', '=', partner_id)], limit=1)
+                    if partner:
+                        _logger.debug(f"Found existing partner {partner.id} for patient {patient_id} via odoo16_partner_id")
+                    else:
+                        # Fallback: Search for deduplicated partner using source partner data
+                        _logger.warning(f"Partner with odoo16_partner_id {partner_id} not found for patient {patient_id}, searching for deduplicated partner...")
+                        
+                        # Query source database to get original partner details
+                        cursor.execute("""
+                            SELECT name, email, phone, mobile 
+                            FROM res_partner 
+                            WHERE id = %s
+                        """, (partner_id,))
+                        source_partner = cursor.fetchone()
+                        
+                        if source_partner:
+                            source_name, source_email, source_phone, source_mobile = source_partner
+                            
+                            # Try to find partner by email (most reliable identifier)
+                            if source_email:
+                                partner = target_env['res.partner'].with_context(active_test=False).search([
+                                    ('email', '=', source_email)
+                                ], limit=1)
+                                if partner:
+                                    _logger.warning(f"✅ Found deduplicated partner {partner.id} for patient {patient_id} via email: {source_email}")
+                            
+                            # If not found by email, try by name + phone/mobile
+                            if not partner and source_name:
+                                search_domain = [('name', '=', source_name)]
+                                if source_phone:
+                                    search_domain.append(('phone', '=', source_phone))
+                                elif source_mobile:
+                                    search_domain.append(('mobile', '=', source_mobile))
+                                
+                                if len(search_domain) > 1:  # Only search if we have name + phone/mobile
+                                    partner = target_env['res.partner'].with_context(active_test=False).search(search_domain, limit=1)
+                                    if partner:
+                                        _logger.warning(f"✅ Found deduplicated partner {partner.id} for patient {patient_id} via name+phone: {source_name}")
+                        
+                        if not partner:
+                            _logger.warning(f"❌ Could not find deduplicated partner for patient {patient_id} (source partner_id: {partner_id}), will create new partner")
                 
-                # Prepare patient values
+                # Create partner if none exists (partner_id is MANDATORY for sports.patient)
+                if not partner:
+                    partner_name = f"{first_name or ''} {last_name or ''}".strip() or f"Patient {patient_id}"
+                    partner = target_env['res.partner'].create({
+                        'name': partner_name,
+                        'email': email,
+                        'mobile': mobile,
+                        'is_company': False,
+                        'odoo16_partner_id': partner_id or (100000 + patient_id)  # Use offset if no partner_id
+                    })
+                    _logger.info(f"Created basic partner {partner.id} for patient {patient_id}")
+                
+                # Prepare patient values with MANDATORY partner_id
                 patient_vals = {
                     'first_name': first_name or '',
                     'last_name': last_name or '',
-                    'email': email,
-                    'mobile': mobile,
+                    'partner_id': partner.id,  # MANDATORY!
                     'date_of_birth': date_of_birth,
                     'match_status': match_status or 'available',
                     'practice_status': practice_status or 'available',
@@ -114,11 +185,8 @@ class MigrationSportsPatients(models.Model):
                     'last_consultation_date': last_consultation_date,
                     'allergies': allergies,
                     'team_info_notes': team_info_notes,
+                    'odoo16_patient_id': patient_id,  # Store original Odoo 16 patient ID for efficient lookups
                 }
-                
-                # Add partner relationship if found
-                if partner:
-                    patient_vals['partner_id'] = partner.id
                 
                 # Add audit trail fields
                 if create_date:
@@ -126,28 +194,46 @@ class MigrationSportsPatients(models.Model):
                 if write_date:
                     patient_vals['write_date'] = write_date
                 
-                # Create patient in target database
-                new_patient = self.env['sports.patient'].create(patient_vals)
+                # Create patient directly (no deduplication)
+                # Note: If there are duplicate odoo16_patient_id values in source, they will be preserved as separate records
+                new_patient = target_env['sports.patient'].create(patient_vals)
                 migrated_count += 1
                 
                 _logger.info(f"Migrated patient: {first_name} {last_name} (ID: {patient_id} -> {new_patient.id})")
                 
             except Exception as e:
-                _logger.error(f"Failed to migrate patient {patient_id}: {str(e)}")
+                _logger.error(f"Failed to migrate patient {patient_id} ({first_name} {last_name}): {str(e)}")
+                _logger.error(f"Exception type: {type(e).__name__}")
+                _logger.error(f"Exception args: {e.args}")
+                import traceback
+                _logger.error(f"Full traceback: {traceback.format_exc()}")
+                # Log the specific error to help debug
+                if 'odoo16_patient_id_unique' in str(e):
+                    _logger.error(f"Duplicate patient ID {patient_id} found in source database")
+                failed_count += 1
+                failed_patient_ids.append(patient_id)
                 continue
         
         _logger.info(f"Successfully migrated {migrated_count} patients")
+        if failed_count > 0:
+            _logger.error(f"Failed to migrate {failed_count} patients. Failed patient IDs: {failed_patient_ids[:10]}{'...' if len(failed_patient_ids) > 10 else ''}")
+            _logger.error(f"This explains why {failed_count} patient injuries will fail to find their associated patients")
+            
+        # Verify migration by checking total count in target
+        total_in_target = self.env['sports.patient'].search_count([('odoo16_patient_id', '!=', False)])
+        _logger.info(f"📊 PATIENT MIGRATION SUMMARY: Source: {len(source_patients)}, Migrated: {migrated_count}, Failed: {failed_count}, Target total: {total_in_target}")
         return migrated_count
 
     def _migrate_patient_contacts(self, cursor):
         """Migrate patient emergency contacts from source database."""
         _logger.info("Starting patient contacts migration...")
         
-        # Query source patient contacts
+        # Query source patient contacts (exclude contacts with null patient_id)
         cursor.execute("""
             SELECT id, patient_id, name, contact_type, mobile, sequence,
                    create_date, create_uid, write_date, write_uid
             FROM sports_patient_contact 
+            WHERE patient_id IS NOT NULL
             ORDER BY id
         """)
         source_contacts = cursor.fetchall()
@@ -164,10 +250,14 @@ class MigrationSportsPatients(models.Model):
                 (contact_id, patient_id, name, contact_type, mobile, sequence,
                  create_date, create_uid, write_date, write_uid) = contact_data
                 
-                # Find corresponding patient in target database
-                patient = self.env['sports.patient'].search([('id', '=', patient_id)], limit=1)
+                # Find corresponding patient in target database using original Odoo 16 patient ID
+                patient = self.env['sports.patient'].search([('odoo16_patient_id', '=', patient_id)], limit=1)
                 if not patient:
-                    _logger.warning(f"Patient {patient_id} not found for contact {contact_id}")
+                    _logger.warning(f"Patient with odoo16_patient_id {patient_id} not found for contact {contact_id} (contact name: {name})")
+                    # Check if any patient exists with this ID to debug the issue
+                    all_patients_with_id = self.env['sports.patient'].search([('odoo16_patient_id', '=', patient_id)])
+                    if all_patients_with_id:
+                        _logger.error(f"Found {len(all_patients_with_id)} patients with odoo16_patient_id {patient_id} - this should not happen!")
                     continue
                 
                 # Prepare contact values
@@ -202,9 +292,20 @@ class MigrationSportsPatients(models.Model):
         """Migrate team-patient relationships from source database."""
         _logger.info("Starting team-patient relations migration...")
         
-        # Query source team-patient relationships
+        # Query source team-patient relationships with dynamic column detection
         cursor.execute("""
-            SELECT team_id, patient_id, create_date, create_uid, write_date, write_uid
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'sports_team_patient_rel' AND table_schema = 'public'
+        """)
+        available_columns = [row[0] for row in cursor.fetchall()]
+        
+        # Build query based on available columns
+        base_columns = ['team_id', 'patient_id']
+        optional_columns = ['create_date', 'create_uid', 'write_date', 'write_uid']
+        query_columns = base_columns + [col for col in optional_columns if col in available_columns]
+        
+        cursor.execute(f"""
+            SELECT {', '.join(query_columns)}
             FROM sports_team_patient_rel 
             ORDER BY team_id, patient_id
         """)
@@ -219,11 +320,19 @@ class MigrationSportsPatients(models.Model):
         
         for relation_data in source_relations:
             try:
-                (team_id, patient_id, create_date, create_uid, write_date, write_uid) = relation_data
+                # Build relation dictionary dynamically based on available columns
+                relation_dict = {}
+                for i, col_name in enumerate(query_columns):
+                    relation_dict[col_name] = relation_data[i] if i < len(relation_data) else None
                 
-                # Find corresponding team and patient in target database
-                team = self.env['sports.team'].search([('id', '=', team_id)], limit=1)
-                patient = self.env['sports.patient'].search([('id', '=', patient_id)], limit=1)
+                team_id = relation_dict['team_id']
+                patient_id = relation_dict['patient_id']
+                
+                # Find corresponding team and patient in target database using original Odoo 16 IDs
+                # Teams are looked up by name since they don't have an odoo16_team_id field
+                team_name = self._get_team_name_by_id(cursor, team_id)
+                team = self.env['sports.team'].search([('name', '=', team_name)], limit=1) if team_name else None
+                patient = self.env['sports.patient'].search([('odoo16_patient_id', '=', patient_id)], limit=1)
                 
                 if not team:
                     _logger.warning(f"Team {team_id} not found for relation")
@@ -253,4 +362,12 @@ class MigrationSportsPatients(models.Model):
         if result:
             first_name, last_name = result
             return f"{first_name} {last_name}"
-        return f"Patient {patient_id}"
+        return None
+
+    def _get_team_name_by_id(self, cursor, team_id):
+        """Helper method to get team name by ID from source database."""
+        cursor.execute("SELECT name FROM sports_team WHERE id = %s", (team_id,))
+        result = cursor.fetchone()
+        if result:
+            return result[0]
+        return None

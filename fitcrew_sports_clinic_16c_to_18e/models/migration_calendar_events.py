@@ -98,9 +98,12 @@ class MigrationCalendarEvents(models.Model):
                         partner_id = attendee_dict.get('partner_id')
                         if partner_id:
                             # Check if the partner has a corresponding user in the target database
-                            user = self.env['res.users'].search([('partner_id', '=', partner_id)], limit=1)
-                            if user:
-                                assignee_ids.append(user.id)
+                            # First find the partner by odoo16_partner_id, then check for user
+                            partner = self.env['res.partner'].with_context(active_test=False).search([('odoo16_partner_id', '=', partner_id)], limit=1)
+                            if partner:
+                                user = self.env['res.users'].search([('partner_id', '=', partner.id)], limit=1)
+                                if user:
+                                    assignee_ids.append(user.id)
                     
                     # Create task description with event details
                     description_parts = []
@@ -198,6 +201,6 @@ class MigrationCalendarEvents(models.Model):
         return tag
     
     def _get_partner_name(self, partner_id):
-        """Get partner name by ID."""
-        partner = self.env['res.partner'].browse(partner_id)
-        return partner.name if partner.exists() else f"Partner ID {partner_id}"
+        """Get partner name by odoo16_partner_id."""
+        partner = self.env['res.partner'].with_context(active_test=False).search([('odoo16_partner_id', '=', partner_id)], limit=1)
+        return partner.name if partner else f"Partner ID {partner_id}"

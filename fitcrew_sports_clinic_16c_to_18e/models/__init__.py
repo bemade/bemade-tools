@@ -8,4 +8,8 @@ from . import migration_ir_filters
 from . import migration_sports_teams
 from . import migration_sports_patients
 from . import migration_sports_injuries
+from . import migration_activities
 from . import res_partner
+from . import res_users
+from . import sports_patient
+from . import sports_patient_injury

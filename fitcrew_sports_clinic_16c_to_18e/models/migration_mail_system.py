@@ -474,11 +474,13 @@ class MigrationMailSystem(models.Model):
                             follower_vals['subtype_ids'] = [(6, 0, subtype_data)]
                         col_index += 1
                     
-                    # Check if the referenced partner exists in target database
-                    referenced_partner = self.env['res.partner'].browse(follower_vals['partner_id'])
-                    if not referenced_partner.exists():
+                    # Check if the referenced partner exists in target database using odoo16_partner_id
+                    referenced_partner = self.env['res.partner'].with_context(active_test=False).search([('odoo16_partner_id', '=', follower_vals['partner_id'])], limit=1)
+                    if not referenced_partner:
                         # Skip followers for non-existent partners
                         continue
+                    # Update follower_vals to use the target database partner ID
+                    follower_vals['partner_id'] = referenced_partner.id
                     
                     # Check if follower already exists
                     existing_follower = self.env['mail.followers'].search([

@@ -62,6 +62,9 @@ class MigrationUsersPartners(models.Model):
                 
                 partners = cr.fetchall()
                 partner_count = 0
+                total_partners_in_source = len(partners)
+                skipped_partners = 0
+                created_partners = 0
                 
                 for partner_data in partners:
                     # Create a dictionary mapping column names to values
@@ -70,6 +73,8 @@ class MigrationUsersPartners(models.Model):
                     # Skip system partners that shouldn't be migrated (check early to avoid warnings)
                     partner_name = partner_dict.get('name')
                     if not partner_name:
+                        _logger.info(f"⚠️ SKIPPED partner ID {partner_dict.get('id')}: No name provided")
+                        skipped_partners += 1
                         continue  # Skip partners without names
                     
                     system_partner_names = [
@@ -77,6 +82,8 @@ class MigrationUsersPartners(models.Model):
                         'Portal User Template', 'Administrator'
                     ]
                     if partner_name in system_partner_names:
+                        _logger.info(f"⚠️ SKIPPED system partner ID {partner_dict.get('id')}: '{partner_name}' (system partner)")
+                        skipped_partners += 1
                         continue
                     
                     # Build partner values dynamically based on available columns
@@ -123,36 +130,23 @@ class MigrationUsersPartners(models.Model):
                     if 'active' in partner_dict:
                         partner_vals['active'] = partner_dict['active']
                     
-                    # Create or update partner using merge functionality
+                    # Create partner directly without deduplication (preserve source data as-is)
                     try:
                         # Use savepoint to isolate this operation
                         with self.env.cr.savepoint():
-                            search_domain = []
-                            # Build search domain based on available unique identifiers
-                            if partner_dict.get('email'):
-                                search_domain.append(('email', '=', partner_dict.get('email')))
-                            elif partner_dict.get('name'):
-                                search_domain.append(('name', '=', partner_dict.get('name')))
-                            else:
-                                # Skip partners without identifiable information
+                            # Skip partners without basic required information
+                            if not partner_dict.get('name'):
+                                _logger.warning(f"⚠️ SKIPPED partner ID {partner_dict.get('id')}: No name provided")
+                                skipped_partners += 1
                                 continue
                                 
-                            record_identifier = f"partner '{partner_dict.get('name', 'Unknown')}'"
-                            partner, action = self.database_id._create_or_update_record(
-                                'res.partner', 
-                                search_domain, 
-                                partner_vals, 
-                                record_identifier
-                            )
+                            # Create partner directly (no deduplication)
+                            partner = self.env['res.partner'].create(partner_vals)
                             
-                            # Debug logging to track merge vs create behavior
-                            if action == 'created':
-                                _logger.info(f"🆕 CREATED partner: {partner_dict.get('name')} (email: {partner_dict.get('email')})")
-                            elif action == 'updated':
-                                _logger.info(f"🔄 MERGED partner: {partner_dict.get('name')} (email: {partner_dict.get('email')})")
-                            
-                            if action in ('created', 'updated'):
-                                partner_count += 1
+                            # Log successful creation
+                            _logger.info(f"✅ CREATED partner ID {partner_dict.get('id')}: '{partner_dict.get('name')}' (email: {partner_dict.get('email')})")
+                            created_partners += 1
+                            partner_count += 1
                                 
                             # Store the mapping between Odoo 16 and Odoo 18 partner IDs
                             odoo16_partner_id = partner_dict.get('id')
@@ -161,8 +155,12 @@ class MigrationUsersPartners(models.Model):
                                 
                     except Exception as e:
                         # Log the error but continue with other partners
-                        _logger.warning(f"Failed to process partner {partner_dict.get('name')}: {str(e)}")
+                        _logger.warning(f"⚠️ FAILED to process partner ID {partner_dict.get('id')} '{partner_dict.get('name')}' (email: {partner_dict.get('email')}): {str(e)}")
+                        skipped_partners += 1
                         continue
+                
+                # Log partner migration summary
+                _logger.info(f"📊 PARTNER MIGRATION SUMMARY: Total in source: {total_partners_in_source}, Created: {created_partners}, Skipped: {skipped_partners}")
                 
                 # Check which columns exist in res_users table
                 cr.execute("""
@@ -229,6 +227,7 @@ class MigrationUsersPartners(models.Model):
                         'login': user_dict.get('login'),
                         'partner_id': mapped_partner_id,
                         'active': True,  # Always create as active initially to avoid constraint issues
+                        'odoo16_user_id': user_dict.get('id'),  # Store original Odoo 16 user ID
                     }
                     
                     # Add optional fields if they exist, validating foreign key references and data types
@@ -309,6 +308,10 @@ class MigrationUsersPartners(models.Model):
             
             self._update_migration_status('completed', 
                 f'Users and partners migration completed: {user_count} users, {partner_count} partners migrated')
+            
+            # Commit the transaction to ensure partners are persisted before dependent migrations
+            self.env.cr.commit()
+            _logger.info(f"✅ Partner migration transaction committed - {partner_count} partners and {user_count} users persisted")
             
             return self._success_notification(
                 "Users & Partners Migration Successful",

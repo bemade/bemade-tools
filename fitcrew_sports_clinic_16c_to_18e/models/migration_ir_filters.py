@@ -63,13 +63,15 @@ class MigrationIrFilters(models.Model):
                 filters = cr.fetchall()
                 
                 for filter_data in filters:
-                    # Validate that the user exists in the target system
+                    # Validate that the user exists in the target system using odoo16_user_id
+                    target_user_id = None
                     if filter_data[3]:  # user_id
-                        user_exists = self.env['res.users'].search([('id', '=', filter_data[3])], limit=1)
+                        user_exists = self.env['res.users'].search([('odoo16_user_id', '=', filter_data[3])], limit=1)
                         if not user_exists:
-                            _logger.warning(f"Skipping filter '{filter_data[1]}' - user {filter_data[3]} not found")
+                            _logger.warning(f"Skipping filter '{filter_data[1]}' - user with odoo16_user_id {filter_data[3]} not found")
                             skipped_count += 1
                             continue
+                        target_user_id = user_exists.id
                     
                     # Validate that the model exists in the target system
                     if filter_data[2]:  # model_id
@@ -82,7 +84,7 @@ class MigrationIrFilters(models.Model):
                     filter_vals = {
                         'name': filter_data[1],
                         'model_id': filter_data[2],
-                        'user_id': filter_data[3],
+                        'user_id': target_user_id,
                         'domain': filter_data[4],
                         'context': filter_data[5],
                         'sort': filter_data[6],
