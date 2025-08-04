@@ -62,6 +62,10 @@ class MigrationSportsTeams(models.Model):
             message = f"Sports teams migration completed: {teams_count} teams, {staff_count} staff relationships migrated"
             self._update_migration_status('completed', message)
             
+            # Commit the transaction to ensure teams are persisted before dependent migrations
+            self.env.cr.commit()
+            _logger.info(f"✅ Sports teams migration transaction committed - {teams_count} teams and {staff_count} staff relationships persisted")
+            
             return self._success_notification("Sports Teams Migration", message)
             
         except Exception as e:
@@ -94,47 +98,22 @@ class MigrationSportsTeams(models.Model):
             team_id, name, parent_id, create_date, create_uid, write_date, write_uid, head_coach_id, head_therapist_id, website = team_data
             
             try:
-                # Check if team already exists
-                existing_team = target_env['sports.team'].search([
-                    ('name', '=', name)
-                ], limit=1)
-                
                 # Prepare team values
                 team_vals = {
                     'name': name,
                     'parent_id': parent_id,  # Will be validated by Odoo
                 }
                 
-                if existing_team:
-                    # Update existing team
-                    changed_fields = []
-                    for field, value in team_vals.items():
-                        if getattr(existing_team, field) != value:
-                            changed_fields.append(field)
-                    
-                    if changed_fields:
-                        existing_team.write(team_vals)
-                        _logger.info(f"Updated team '{name}' (ID: {existing_team.id}) - Updated fields: {', '.join(changed_fields)}")
-                        
-                        # Add chatter message
-                        if hasattr(existing_team, 'message_post'):
-                            existing_team.message_post(
-                                body=f"Team updated during Odoo 16 migration. Updated fields: {', '.join(changed_fields)}",
-                                message_type='comment'
-                            )
-                    else:
-                        _logger.info(f"No changes needed for team '{name}' (ID: {existing_team.id})")
-                else:
-                    # Create new team
-                    new_team = target_env['sports.team'].create(team_vals)
-                    _logger.info(f"Created team '{name}' (ID: {new_team.id})")
-                    
-                    # Add chatter message
-                    if hasattr(new_team, 'message_post'):
-                        new_team.message_post(
-                            body="Team migrated from Odoo 16",
-                            message_type='comment'
-                        )
+                # Create team directly (no deduplication)
+                new_team = target_env['sports.team'].create(team_vals)
+                _logger.info(f"Created team '{name}' (ID: {new_team.id})")
+                
+                # Add chatter message
+                if hasattr(new_team, 'message_post'):
+                    new_team.message_post(
+                        body="Team migrated from Odoo 16",
+                        message_type='comment'
+                    )
                 
                 teams_count += 1
                 
@@ -190,11 +169,48 @@ class MigrationSportsTeams(models.Model):
                     _logger.debug(f"Found target team: {target_team.id}")
                     
                     # Find the target partner using indexed lookup on original Odoo 16 partner ID
+                    # Include inactive partners since team staff relationships should be preserved
                     _logger.debug(f"Looking up partner by odoo16_partner_id={partner_id}")
-                    target_partner = target_env['res.partner'].search([('odoo16_partner_id', '=', partner_id)], limit=1)
+                    target_partner = target_env['res.partner'].with_context(active_test=False).search([('odoo16_partner_id', '=', partner_id)], limit=1)
                     if not target_partner:
-                        _logger.warning(f"Could not find target partner with odoo16_partner_id={partner_id} for staff {staff_id} - skipping")
-                        continue
+                        # Fallback: Search for deduplicated partner using source partner data
+                        _logger.warning(f"Partner with odoo16_partner_id={partner_id} not found for staff {staff_id}, searching for deduplicated partner...")
+                        
+                        # Query source database to get original partner details
+                        cursor.execute("""
+                            SELECT name, email, phone, mobile 
+                            FROM res_partner 
+                            WHERE id = %s
+                        """, (partner_id,))
+                        source_partner = cursor.fetchone()
+                        
+                        if source_partner:
+                            source_name, source_email, source_phone, source_mobile = source_partner
+                            
+                            # Try to find partner by email (most reliable identifier)
+                            if source_email:
+                                target_partner = target_env['res.partner'].with_context(active_test=False).search([
+                                    ('email', '=', source_email)
+                                ], limit=1)
+                                if target_partner:
+                                    _logger.warning(f"✅ Found deduplicated partner {target_partner.id} for staff {staff_id} via email: {source_email}")
+                            
+                            # If not found by email, try by name + phone/mobile
+                            if not target_partner and source_name:
+                                search_domain = [('name', '=', source_name)]
+                                if source_phone:
+                                    search_domain.append(('phone', '=', source_phone))
+                                elif source_mobile:
+                                    search_domain.append(('mobile', '=', source_mobile))
+                                
+                                if len(search_domain) > 1:  # Only search if we have name + phone/mobile
+                                    target_partner = target_env['res.partner'].with_context(active_test=False).search(search_domain, limit=1)
+                                    if target_partner:
+                                        _logger.warning(f"✅ Found deduplicated partner {target_partner.id} for staff {staff_id} via name+phone: {source_name}")
+                        
+                        if not target_partner:
+                            _logger.warning(f"❌ Could not find deduplicated partner for staff {staff_id} (source partner_id: {partner_id}) - skipping")
+                            continue
                     _logger.debug(f"Found target partner: {target_partner.id} - {target_partner.name}")
                     
                     # Create staff relationship
