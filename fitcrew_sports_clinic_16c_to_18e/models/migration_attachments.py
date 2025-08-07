@@ -43,6 +43,8 @@ class MigrationAttachments(models.Model):
             self._update_migration_status('in_progress', 'Starting attachments migration')
             
             attachment_count = 0
+            skipped_count = 0
+            skipped_reasons = {}
             
             with self.get_cursor() as cr:
                 # Get available columns in ir_attachment table
@@ -59,10 +61,8 @@ class MigrationAttachments(models.Model):
                 # Build select columns list based on what's available
                 select_columns = base_columns + [col for col in optional_columns if col in available_columns]
                 
-                # Build WHERE clause conditionally based on available columns
+                # Include both active and inactive attachments for complete migration
                 where_clause = ""
-                if 'active' in available_columns:
-                    where_clause = "WHERE active = true"
                 
                 query = f"SELECT {', '.join(select_columns)} FROM ir_attachment {where_clause} ORDER BY id LIMIT %s"
                 cr.execute(query, (PAGE_SIZE,))
@@ -140,18 +140,44 @@ class MigrationAttachments(models.Model):
                         ('res_id', '=', attachment_dict.get('res_id'))
                     ]
                     
-                    record_identifier = f"attachment '{attachment_dict.get('name')}' on {attachment_dict.get('res_model')} (ID: {attachment_dict.get('res_id')})"
-                    attachment, action = self.database_id._create_or_update_record(
-                        'ir.attachment',
-                        search_domain,
-                        attachment_vals,
-                        record_identifier
-                    )
-                    
-                    if action in ['created', 'updated']:
-                        attachment_count += 1
+                    try:
+                        record_identifier = f"attachment '{attachment_dict.get('name')}' on {attachment_dict.get('res_model')} (ID: {attachment_dict.get('res_id')})"
+                        attachment, action = self.database_id._create_or_update_record(
+                            'ir.attachment',
+                            search_domain,
+                            attachment_vals,
+                            record_identifier
+                        )
+                        
+                        if action in ['created', 'updated']:
+                            attachment_count += 1
+                    except Exception as e:
+                        reason = f"Attachment processing failed: {str(e)}"
+                        self.database_id._log_skipped_item(
+                            'ir.attachment', 
+                            attachment_id, 
+                            reason,
+                            {
+                                'name': attachment_dict.get('name'),
+                                'res_model': attachment_dict.get('res_model'),
+                                'res_id': attachment_dict.get('res_id'),
+                                'error': str(e)
+                            }
+                        )
+                        skipped_count += 1
+                        skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                        continue
             
-            status_message = f'Attachments migration completed: {attachment_count} attachments migrated'
+            # Log comprehensive attachments migration summary
+            total_processed = attachment_count + skipped_count
+            self.database_id._log_migration_summary(
+                'IR Attachments', 
+                total_processed, 
+                skipped_count, 
+                skipped_reasons
+            )
+            
+            status_message = f'Attachments migration completed: {attachment_count} attachments migrated, {skipped_count} skipped'
             if self.skip_filestore:
                 status_message += ' (file content skipped)'
             

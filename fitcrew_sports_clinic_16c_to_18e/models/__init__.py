@@ -9,6 +9,9 @@ from . import migration_sports_teams
 from . import migration_sports_patients
 from . import migration_sports_injuries
 from . import migration_activities
+from . import mail_message
+from . import discuss_channel
+from . import project_task
 from . import res_partner
 from . import res_users
 from . import sports_patient

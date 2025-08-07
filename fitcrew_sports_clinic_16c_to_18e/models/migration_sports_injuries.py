@@ -46,6 +46,8 @@ class MigrationSportsInjuries(models.Model):
                 _logger.info(f"Found {len(injury_records)} patient injury records to migrate")
                 
                 migrated_count = 0
+                skipped_count = 0
+                skipped_reasons = {}
                 
                 for injury_data in injury_records:
                     (
@@ -57,7 +59,7 @@ class MigrationSportsInjuries(models.Model):
                     
                     try:
                         # Find the corresponding migrated patient using odoo16_patient_id
-                        migrated_patient = self.env['sports.patient'].search([
+                        migrated_patient = self.env['sports.patient'].with_context(active_test=False).search([
                             ('odoo16_patient_id', '=', patient_id)
                         ], limit=1)
                         
@@ -75,16 +77,26 @@ class MigrationSportsInjuries(models.Model):
                             total_migrated = self.env['sports.patient'].search_count([('odoo16_patient_id', '!=', False)])
                             _logger.error(f"Total migrated patients: {total_migrated}")
                             
-                            # Check if there are any patients with this exact ID
-                            all_with_id = self.env['sports.patient'].search([('odoo16_patient_id', '=', patient_id)])
-                            _logger.error(f"Patients with odoo16_patient_id {patient_id}: {len(all_with_id)}")
-                            
+                            # Log skipped injury due to missing patient
+                            reason = f"Patient not found in target database (patient_id: {patient_id})"
+                            self.database_id._log_skipped_item(
+                                'sports.patient.injury', 
+                                source_id, 
+                                reason,
+                                {
+                                    'patient_id': patient_id,
+                                    'diagnosis': diagnosis,
+                                    'injury_date': str(injury_date) if injury_date else None
+                                }
+                            )
+                            skipped_count += 1
+                            skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                             continue
                         
                         # Find the corresponding migrated user using odoo16_user_id
                         migrated_user = None
                         if create_uid:
-                            migrated_user = self.env['res.users'].search([
+                            migrated_user = self.env['res.users'].with_context(active_test=False).search([
                                 ('odoo16_user_id', '=', create_uid)
                             ], limit=1)
                         
@@ -117,10 +129,32 @@ class MigrationSportsInjuries(models.Model):
                         migrated_count += 1
                         
                     except Exception as e:
-                        _logger.error(f"Error migrating injury {source_id}: {str(e)}")
+                        reason = f"Processing error: {str(e)}"
+                        self.database_id._log_skipped_item(
+                            'sports.patient.injury', 
+                            source_id, 
+                            reason,
+                            {
+                                'patient_id': patient_id,
+                                'diagnosis': diagnosis,
+                                'injury_date': str(injury_date) if injury_date else None,
+                                'error': str(e)
+                            }
+                        )
+                        skipped_count += 1
+                        skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                         continue
                 
-                _logger.info(f"Successfully migrated {migrated_count} patient injuries")
+                # Log comprehensive injuries migration summary
+                total_processed = migrated_count + skipped_count
+                self.database_id._log_migration_summary(
+                    'Sports Patient Injuries', 
+                    total_processed, 
+                    skipped_count, 
+                    skipped_reasons
+                )
+                
+                _logger.info(f"Sports injuries migration completed: {migrated_count} injuries migrated, {skipped_count} skipped")
                 return migrated_count
                 
         except Exception as e:

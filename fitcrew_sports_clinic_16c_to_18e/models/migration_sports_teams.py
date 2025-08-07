@@ -45,6 +45,21 @@ class MigrationSportsTeams(models.Model):
         try:
             self._update_migration_status('in_progress', 'Starting sports teams migration')
             
+            # Debug: Check what transaction state we inherited
+            try:
+                _logger.info(f"🔍 DEBUG: Sports teams migration starting - inherited cursor status: {self.env.cr._cnx.status}")
+                _logger.info(f"🔍 DEBUG: Inherited transaction info - autocommit: {self.env.cr._cnx.autocommit}, closed: {self.env.cr._cnx.closed}")
+            except Exception as debug_error:
+                _logger.warning(f"Could not get inherited transaction debug info: {debug_error}")
+            
+            # Test if we can execute a simple query to check transaction state
+            try:
+                self.env.cr.execute("SELECT 1")
+                _logger.info("✅ Transaction state is clean at start of sports teams migration")
+            except Exception as test_error:
+                _logger.error(f"❌ Transaction appears to be in failed state at start: {test_error}")
+                _logger.error("This indicates a previous migration left the transaction in an aborted state")
+            
             # Use the inherited cursor method from base class
             with self.get_cursor() as cr:
                 # Migrate teams first (foundational)
@@ -92,6 +107,8 @@ class MigrationSportsTeams(models.Model):
             return 0
         
         teams_count = 0
+        skipped_count = 0
+        skipped_reasons = {}
         target_env = self.env
         
         for team_data in source_teams:
@@ -101,8 +118,21 @@ class MigrationSportsTeams(models.Model):
                 # Prepare team values
                 team_vals = {
                     'name': name,
-                    'parent_id': parent_id,  # Will be validated by Odoo
                 }
+                
+                # Map parent_id from Odoo 16 to migrated partner ID if needed
+                if parent_id:
+                    # Look up the migrated partner using odoo16_partner_id
+                    migrated_parent = target_env['res.partner'].with_context(active_test=False).search([
+                        ('odoo16_partner_id', '=', parent_id)
+                    ], limit=1)
+                    
+                    if migrated_parent:
+                        team_vals['parent_id'] = migrated_parent.id
+                        _logger.debug(f"Mapped parent_id {parent_id} -> {migrated_parent.id} for team '{name}'")
+                    else:
+                        _logger.warning(f"Could not find migrated partner for parent_id {parent_id} for team '{name}' - skipping parent relationship")
+                        # Don't set parent_id if we can't find the migrated partner
                 
                 # Create team directly (no deduplication)
                 new_team = target_env['sports.team'].create(team_vals)
@@ -118,10 +148,26 @@ class MigrationSportsTeams(models.Model):
                 teams_count += 1
                 
             except Exception as e:
-                _logger.error(f"Failed to migrate team '{name}': {str(e)}")
+                reason = f"Processing error: {str(e)}"
+                self.database_id._log_skipped_item(
+                    'sports.team', 
+                    team_id, 
+                    reason,
+                    {'team_name': name, 'error': str(e)}
+                )
+                skipped_count += 1
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                 continue
         
-        _logger.info(f"Sports teams migration completed: {teams_count} teams processed")
+        # Log comprehensive teams migration summary
+        total_processed = teams_count + skipped_count
+        self.database_id._log_migration_summary(
+            'Sports Teams', 
+            total_processed, 
+            skipped_count, 
+            skipped_reasons
+        )
+        _logger.info(f"Sports teams migration completed: {teams_count} teams processed, {skipped_count} skipped")
         return teams_count
     
     def _migrate_team_staff(self, cursor):
@@ -144,6 +190,8 @@ class MigrationSportsTeams(models.Model):
         _logger.info(f"Found {len(source_staff)} staff relationships to migrate")
         
         migrated_count = 0
+        staff_skipped_count = 0
+        staff_skipped_reasons = {}
         
         for i, staff_data in enumerate(source_staff):
             staff_id, team_id, partner_id, role, sequence, create_date, create_uid, write_date, write_uid = staff_data
@@ -209,7 +257,15 @@ class MigrationSportsTeams(models.Model):
                                         _logger.warning(f"✅ Found deduplicated partner {target_partner.id} for staff {staff_id} via name+phone: {source_name}")
                         
                         if not target_partner:
-                            _logger.warning(f"❌ Could not find deduplicated partner for staff {staff_id} (source partner_id: {partner_id}) - skipping")
+                            reason = f"Could not find partner for staff relationship (source partner_id: {partner_id})"
+                            self.database_id._log_skipped_item(
+                                'sports.team.staff', 
+                                staff_id, 
+                                reason,
+                                {'team_id': team_id, 'partner_id': partner_id, 'role': role}
+                            )
+                            staff_skipped_count += 1
+                            staff_skipped_reasons[reason] = staff_skipped_reasons.get(reason, 0) + 1
                             continue
                     _logger.debug(f"Found target partner: {target_partner.id} - {target_partner.name}")
                     
@@ -250,12 +306,26 @@ class MigrationSportsTeams(models.Model):
                     _logger.debug(f"Successfully processed staff {staff_id}, total migrated: {migrated_count}")
                     
             except Exception as e:
-                _logger.error(f"Error migrating staff {staff_id} (team_id: {team_id}, partner_id: {partner_id}): {e}")
-                _logger.error(f"Exception type: {type(e).__name__}")
-                _logger.error(f"Exception details: {str(e)}")
+                reason = f"Processing error: {str(e)}"
+                self.database_id._log_skipped_item(
+                    'sports.team.staff', 
+                    staff_id, 
+                    reason,
+                    {'team_id': team_id, 'partner_id': partner_id, 'role': role, 'error': str(e)}
+                )
+                staff_skipped_count += 1
+                staff_skipped_reasons[reason] = staff_skipped_reasons.get(reason, 0) + 1
                 continue
         
-        _logger.info(f"Team staff migration completed. Migrated {migrated_count} staff relationships")
+        # Log comprehensive team staff migration summary
+        total_processed = migrated_count + staff_skipped_count
+        self.database_id._log_migration_summary(
+            'Team Staff Relationships', 
+            total_processed, 
+            staff_skipped_count, 
+            staff_skipped_reasons
+        )
+        _logger.info(f"Team staff migration completed: {migrated_count} staff relationships migrated, {staff_skipped_count} skipped")
         return migrated_count
     
     def _get_team_name_by_id(self, cursor, team_id):
