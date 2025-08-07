@@ -49,7 +49,7 @@ class MigrationCalendarEvents(models.Model):
                 
                 # Define base columns and optional columns
                 base_columns = ['id', 'name', 'description', 'start', 'stop', 'allday']
-                optional_columns = ['location', 'privacy', 'show_as', 'user_id', 'partner_ids', 'create_date', 'write_date', 'create_uid', 'write_uid']
+                optional_columns = ['location', 'privacy', 'show_as', 'client_id', 'user_id', 'partner_ids', 'create_date', 'write_date', 'create_uid', 'write_uid']
                 
                 # Build select columns list based on what's available
                 select_columns = base_columns + [col for col in optional_columns if col in available_columns]
@@ -159,8 +159,12 @@ class MigrationCalendarEvents(models.Model):
                                 attendee_list.append(f"- {partner_name} ({state})")
                             description_parts.append(f"Original Attendees:\n" + "\n".join(attendee_list))
                         
-                        # Determine client for this event (use user_id, create_uid, or default)
-                        client_id = event_dict.get('user_id') or event_dict.get('create_uid') or 0
+                        # Determine client for this event (prioritize client_id, fallback to user_id, create_uid, or special fallback)
+                        client_id = event_dict.get('client_id') or event_dict.get('user_id') or event_dict.get('create_uid')
+                        
+                        # Use special key for events without any client identification
+                        if not client_id:
+                            client_id = 'no_client_fallback'
                         
                         # Get or create project for this client
                         if client_id not in client_projects:
@@ -253,23 +257,67 @@ class MigrationCalendarEvents(models.Model):
     
     def _get_or_create_client_project(self, client_id):
         """Get or create a project for a specific client's migrated calendar events."""
-        # Determine project name based on client
-        if client_id and client_id != 0:
-            # Try to find the user/partner name for the client
-            client_name = self._get_client_name(client_id)
-            project_name = f"Migrated Calendar Events - {client_name}"
-        else:
-            project_name = "Migrated Calendar Events - Unknown Client"
+        # Handle special fallback case for events without client identification
+        if client_id == 'no_client_fallback':
+            project_name = "Migrated Calendar Events - No Client"
+            project = self.env['project.project'].search([
+                ('name', '=', project_name)
+            ], limit=1)
             
-        project = self.env['project.project'].search([
-            ('name', '=', project_name)
-        ], limit=1)
+            if not project:
+                project = self.env['project.project'].create({
+                    'name': project_name,
+                    'description': 'Project containing calendar events migrated from Odoo 16 that had no client identification',
+                })
+            
+            return project
+        
+        # Find the migrated partner using odoo16_partner_id lookup
+        partner = None
+        if client_id and client_id != 0:
+            # First try to find partner by odoo16_partner_id (direct client lookup)
+            partner = self.env['res.partner'].with_context(active_test=False).search([
+                ('odoo16_partner_id', '=', client_id)
+            ], limit=1)
+            
+            # If no direct partner found, try to find user first then get their partner
+            if not partner:
+                user = self.env['res.users'].with_context(active_test=False).search([
+                    ('odoo16_user_id', '=', client_id)
+                ], limit=1)
+                if user:
+                    partner = user.partner_id
+        
+        # Determine project name and search criteria
+        if partner:
+            client_name = partner.name
+            project_name = f"Migrated Calendar Events - {client_name}"
+            # Search for existing project by both name and partner_id
+            project = self.env['project.project'].search([
+                ('name', '=', project_name),
+                ('partner_id', '=', partner.id)
+            ], limit=1)
+        else:
+            client_name = self._get_client_name(client_id) if client_id and client_id != 0 else "Unknown Client"
+            project_name = f"Migrated Calendar Events - {client_name}"
+            # Search for existing project by name only (no partner link)
+            project = self.env['project.project'].search([
+                ('name', '=', project_name)
+            ], limit=1)
         
         if not project:
-            project = self.env['project.project'].create({
+            project_vals = {
                 'name': project_name,
                 'description': f'Project containing calendar events migrated from Odoo 16 for client ID {client_id}',
-            })
+            }
+            # Link to partner if found and ensure company consistency
+            if partner:
+                project_vals['partner_id'] = partner.id
+                # Set project company to match partner's company to avoid conflicts
+                if partner.company_id:
+                    project_vals['company_id'] = partner.company_id.id
+                
+            project = self.env['project.project'].create(project_vals)
         
         return project
     
