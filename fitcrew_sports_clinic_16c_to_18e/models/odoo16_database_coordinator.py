@@ -78,30 +78,6 @@ class Odoo16Database(models.Model):
         })
         self.users_partners_migration_id = users_partners.id
         
-        # Create mail system migration
-        mail_system = self.env['migration.mail.system'].create({
-            'database_id': self.database_id.id
-        })
-        self.mail_system_migration_id = mail_system.id
-        
-        # Create calendar events migration
-        calendar_events = self.env['migration.calendar.events'].create({
-            'database_id': self.database_id.id
-        })
-        self.calendar_events_migration_id = calendar_events.id
-        
-        # Create attachments migration
-        attachments = self.env['migration.attachments'].create({
-            'database_id': self.database_id.id
-        })
-        self.attachments_migration_id = attachments.id
-        
-        # Create IR filters migration
-        ir_filters = self.env['migration.ir.filters'].create({
-            'database_id': self.database_id.id
-        })
-        self.ir_filters_migration_id = ir_filters.id
-        
         # Create sports teams migration
         sports_teams = self.env['migration.sports.teams'].create({
             'database_id': self.database_id.id
@@ -120,11 +96,35 @@ class Odoo16Database(models.Model):
         })
         self.sports_injuries_migration_id = sports_injuries.id
         
+        # Create calendar events migration
+        calendar_events = self.env['migration.calendar.events'].create({
+            'database_id': self.database_id.id
+        })
+        self.calendar_events_migration_id = calendar_events.id
+        
+        # Create attachments migration
+        attachments = self.env['migration.attachments'].create({
+            'database_id': self.database_id.id
+        })
+        self.attachments_migration_id = attachments.id
+        
         # Create activities migration
         activities = self.env['migration.activities'].create({
             'database_id': self.database_id.id
         })
         self.activities_migration_id = activities.id
+        
+        # Create IR filters migration
+        ir_filters = self.env['migration.ir.filters'].create({
+            'database_id': self.database_id.id
+        })
+        self.ir_filters_migration_id = ir_filters.id
+        
+        # Create mail system migration
+        mail_system = self.env['migration.mail.system'].create({
+            'database_id': self.database_id.id
+        })
+        self.mail_system_migration_id = mail_system.id
     
     # Delegation methods for migration actions
     def action_migrate_users_partners(self):

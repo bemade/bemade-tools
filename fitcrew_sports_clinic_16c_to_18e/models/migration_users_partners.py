@@ -38,6 +38,20 @@ class MigrationUsersPartners(models.Model):
             # Create a mapping to track Odoo 16 -> Odoo 18 partner ID relationships
             partner_id_mapping = {}
             
+            # First, set odoo16_partner_id for existing system partners (IDs 1-5) in target database
+            _logger.info("Setting odoo16_partner_id for existing system partners (IDs 1-5)")
+            for partner_id in range(1, 6):  # IDs 1-5
+                try:
+                    existing_partner = self.env['res.partner'].browse(partner_id)
+                    if existing_partner.exists():
+                        existing_partner.write({'odoo16_partner_id': partner_id})
+                        partner_id_mapping[partner_id] = partner_id  # 1:1 mapping
+                        _logger.info(f"✅ Set odoo16_partner_id={partner_id} for existing system partner '{existing_partner.name}' (ID: {partner_id})")
+                    else:
+                        _logger.warning(f"System partner ID {partner_id} does not exist in target database")
+                except Exception as e:
+                    _logger.warning(f"Failed to set odoo16_partner_id for system partner ID {partner_id}: {e}")
+            
             with self.get_cursor() as cr:
                 # Check which columns exist in res_partner table
                 cr.execute("""
@@ -65,25 +79,39 @@ class MigrationUsersPartners(models.Model):
                 total_partners_in_source = len(partners)
                 skipped_partners = 0
                 created_partners = 0
+                skipped_reasons = {}
                 
                 for partner_data in partners:
                     # Create a dictionary mapping column names to values
                     partner_dict = dict(zip(query_columns, partner_data))
                     
-                    # Skip system partners that shouldn't be migrated (check early to avoid warnings)
+                    # Skip system partners (IDs 1-5) - they're handled upfront
+                    source_partner_id = partner_dict.get('id')
                     partner_name = partner_dict.get('name')
+                    
                     if not partner_name:
-                        _logger.info(f"⚠️ SKIPPED partner ID {partner_dict.get('id')}: No name provided")
+                        reason = "No name provided"
+                        self.database_id._log_skipped_item(
+                            'res.partner', 
+                            source_partner_id, 
+                            reason,
+                            {'partner_data': str(partner_dict)}
+                        )
                         skipped_partners += 1
+                        skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                         continue  # Skip partners without names
                     
-                    system_partner_names = [
-                        'OdooBot', 'Public user', 'Default User Template', 
-                        'Portal User Template', 'Administrator'
-                    ]
-                    if partner_name in system_partner_names:
-                        _logger.info(f"⚠️ SKIPPED system partner ID {partner_dict.get('id')}: '{partner_name}' (system partner)")
+                    # System partners (IDs 1-5) are handled upfront, skip them here
+                    if source_partner_id and source_partner_id <= 5:
+                        reason = "System partner - handled upfront"
+                        self.database_id._log_skipped_item(
+                            'res.partner', 
+                            source_partner_id, 
+                            reason,
+                            {'partner_name': partner_name}
+                        )
                         skipped_partners += 1
+                        skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                         continue
                     
                     # Build partner values dynamically based on available columns
@@ -155,12 +183,30 @@ class MigrationUsersPartners(models.Model):
                                 
                     except Exception as e:
                         # Log the error but continue with other partners
-                        _logger.warning(f"⚠️ FAILED to process partner ID {partner_dict.get('id')} '{partner_dict.get('name')}' (email: {partner_dict.get('email')}): {str(e)}")
+                        reason = f"Processing error: {str(e)}"
+                        self.database_id._log_skipped_item(
+                            'res.partner', 
+                            partner_dict.get('id'), 
+                            reason,
+                            {
+                                'partner_name': partner_dict.get('name'),
+                                'partner_email': partner_dict.get('email'),
+                                'error': str(e)
+                            }
+                        )
                         skipped_partners += 1
+                        skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                         continue
                 
-                # Log partner migration summary
-                _logger.info(f"📊 PARTNER MIGRATION SUMMARY: Total in source: {total_partners_in_source}, Created: {created_partners}, Skipped: {skipped_partners}")
+                # Log comprehensive partner migration summary
+                total_processed = created_partners + skipped_partners
+                self.database_id._log_migration_summary(
+                    'Partners (res.partner)', 
+                    total_processed, 
+                    skipped_partners, 
+                    skipped_reasons
+                )
+                _logger.info(f"📊 PARTNER MIGRATION SUMMARY: Total processed: {total_processed}, Created: {created_partners}, Skipped: {skipped_partners}")
                 
                 # Check which columns exist in res_users table
                 cr.execute("""
@@ -185,6 +231,8 @@ class MigrationUsersPartners(models.Model):
                 
                 users = cr.fetchall()
                 user_count = 0
+                user_skipped_count = 0
+                user_skipped_reasons = {}
                 
                 for user_data in users:
                     # Create a dictionary mapping column names to values
@@ -193,6 +241,15 @@ class MigrationUsersPartners(models.Model):
                     # Check if user should be migrated (do this first to avoid unnecessary processing)
                     login = user_dict.get('login')
                     if not login:
+                        reason = "No login provided"
+                        self.database_id._log_skipped_item(
+                            'res.users', 
+                            user_dict.get('id'), 
+                            reason,
+                            {'user_data': str(user_dict)}
+                        )
+                        user_skipped_count += 1
+                        user_skipped_reasons[reason] = user_skipped_reasons.get(reason, 0) + 1
                         continue  # Skip users without login
                     
                     # Skip system users that shouldn't be migrated (check early to avoid warnings)
@@ -201,12 +258,35 @@ class MigrationUsersPartners(models.Model):
                         'demo', 'base.user_demo', 'base.user_admin', 'base.default_user'
                     ]
                     if login in system_logins:
+                        # Still need to set odoo16_user_id for existing system user so other migrations can find it
+                        odoo16_user_id = user_dict.get('id')
+                        if odoo16_user_id:
+                            # Find existing system user by login
+                            existing_system_user = self.env['res.users'].with_context(active_test=False).search([
+                                ('login', '=', login)
+                            ], limit=1)
+                            if existing_system_user:
+                                try:
+                                    existing_system_user.write({'odoo16_user_id': odoo16_user_id})
+                                    _logger.info(f"✅ Set odoo16_user_id={odoo16_user_id} for existing system user '{login}' (ID: {existing_system_user.id})")
+                                except Exception as e:
+                                    _logger.warning(f"Failed to set odoo16_user_id for system user '{login}': {e}")
+                        reason = "System user - handled upfront"
+                        self.database_id._log_skipped_item(
+                            'res.users', 
+                            user_dict.get('id'), 
+                            reason,
+                            {'login': login}
+                        )
+                        user_skipped_count += 1
+                        user_skipped_reasons[reason] = user_skipped_reasons.get(reason, 0) + 1
                         continue
                     
-                    # Skip archived users (they shouldn't be migrated)
-                    if not user_dict.get('active', True):
-                        _logger.debug(f"Skipping archived user: {login}")
-                        continue
+                    # Migrate both active and inactive users to preserve references in mail system, activities, etc.
+                    # Inactive users will be created with active=False to maintain their status
+                    user_active = user_dict.get('active', True)
+                    if not user_active:
+                        _logger.debug(f"Migrating inactive user: {login} (will be created as inactive)")
                     
                     # Build user values dynamically based on available columns
                     # Handle partner_id mapping from Odoo 16 to Odoo 18
@@ -306,12 +386,33 @@ class MigrationUsersPartners(models.Model):
                         _logger.warning(f"Failed to process user {login}: {str(e)}")
                         continue
             
+            # Debug: Check transaction state before commit
+            try:
+                _logger.info(f"🔍 DEBUG: Transaction state before commit - cursor status: {self.env.cr._cnx.status}")
+                _logger.info(f"🔍 DEBUG: Transaction info - autocommit: {self.env.cr._cnx.autocommit}, closed: {self.env.cr._cnx.closed}")
+            except Exception as debug_error:
+                _logger.warning(f"Could not get transaction debug info: {debug_error}")
+            
+            # Commit the transaction to ensure partners are persisted before dependent migrations
+            try:
+                self.env.cr.commit()
+                _logger.info(f"✅ Partner migration transaction committed successfully - {partner_count} partners and {user_count} users persisted")
+            except Exception as commit_error:
+                _logger.error(f"❌ COMMIT FAILED in users/partners migration: {commit_error}")
+                raise
+            
+            # Debug: Check transaction state after commit
+            try:
+                _logger.info(f"🔍 DEBUG: Transaction state after commit - cursor status: {self.env.cr._cnx.status}")
+                _logger.info(f"🔍 DEBUG: Transaction info - autocommit: {self.env.cr._cnx.autocommit}, closed: {self.env.cr._cnx.closed}")
+            except Exception as debug_error:
+                _logger.warning(f"Could not get post-commit transaction debug info: {debug_error}")
+            
+            # Update status after successful commit
             self._update_migration_status('completed', 
                 f'Users and partners migration completed: {user_count} users, {partner_count} partners migrated')
             
-            # Commit the transaction to ensure partners are persisted before dependent migrations
-            self.env.cr.commit()
-            _logger.info(f"✅ Partner migration transaction committed - {partner_count} partners and {user_count} users persisted")
+            _logger.info(f"✅ Users and partners migration completed cleanly with transaction state verified")
             
             return self._success_notification(
                 "Users & Partners Migration Successful",
@@ -319,6 +420,16 @@ class MigrationUsersPartners(models.Model):
             )
             
         except Exception as e:
-            self._update_migration_status('failed', f'Users and partners migration failed: {str(e)}')
-            _logger.error(f"Users and partners migration failed: {str(e)}")
-            raise UserError(_("Users and partners migration failed: %s") % str(e))
+            error_msg = f'Users and partners migration failed: {str(e)}'
+            _logger.error(error_msg, exc_info=True)
+            
+            # Ensure clean transaction state before attempting status update
+            try:
+                self.env.cr.rollback()
+                self._update_migration_status('failed', error_msg)
+                self.env.cr.commit()
+            except Exception as status_error:
+                _logger.error(f"Failed to update migration status after error: {status_error}")
+                # Continue with the original error even if status update fails
+            
+            raise UserError(_(error_msg))

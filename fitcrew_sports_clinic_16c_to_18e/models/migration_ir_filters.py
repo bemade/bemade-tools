@@ -50,13 +50,13 @@ class MigrationIrFilters(models.Model):
             
             filter_count = 0
             skipped_count = 0
+            skipped_reasons = {}
             
             with self.get_cursor() as cr:
                 cr.execute("""
                     SELECT id, name, model_id, user_id, domain, context, sort, is_default,
                            action_id, active, create_date, write_date, create_uid, write_uid
                     FROM ir_filters 
-                    WHERE active = true 
                     ORDER BY id LIMIT %s
                 """, (PAGE_SIZE,))
                 
@@ -66,7 +66,7 @@ class MigrationIrFilters(models.Model):
                     # Validate that the user exists in the target system using odoo16_user_id
                     target_user_id = None
                     if filter_data[3]:  # user_id
-                        user_exists = self.env['res.users'].search([('odoo16_user_id', '=', filter_data[3])], limit=1)
+                        user_exists = self.env['res.users'].with_context(active_test=False).search([('odoo16_user_id', '=', filter_data[3])], limit=1)
                         if not user_exists:
                             _logger.warning(f"Skipping filter '{filter_data[1]}' - user with odoo16_user_id {filter_data[3]} not found")
                             skipped_count += 1
@@ -74,16 +74,66 @@ class MigrationIrFilters(models.Model):
                         target_user_id = user_exists.id
                     
                     # Validate that the model exists in the target system
-                    if filter_data[2]:  # model_id
-                        model_exists = self.env['ir.model'].search([('id', '=', filter_data[2])], limit=1)
-                        if not model_exists:
-                            _logger.warning(f"Skipping filter '{filter_data[1]}' - model {filter_data[2]} not found")
-                            skipped_count += 1
-                            continue
+                    target_model_id = None
+                    if filter_data[2]:  # model_id from source
+                        # First, get the model name from the source database
+                        with self.get_cursor() as model_cr:
+                            model_cr.execute("SELECT model FROM ir_model WHERE id = %s", (filter_data[2],))
+                            model_result = model_cr.fetchone()
+                            if model_result:
+                                source_model_name = model_result[0]
+                                # Now find the corresponding model in the target system
+                                target_model = self.env['ir.model'].search([('model', '=', source_model_name)], limit=1)
+                                if target_model:
+                                    target_model_id = target_model.id
+                                else:
+                                    reason = f"Model '{source_model_name}' not found in target"
+                                    self.database_id._log_skipped_item(
+                                        'ir.filters', 
+                                        filter_data[0], 
+                                        reason,
+                                        {
+                                            'filter_name': filter_data[1],
+                                            'source_model_name': source_model_name,
+                                            'user_id': filter_data[3]
+                                        }
+                                    )
+                                    skipped_count += 1
+                                    skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                                    continue
+                            else:
+                                reason = f"Source model ID {filter_data[2]} not found"
+                                self.database_id._log_skipped_item(
+                                    'ir.filters', 
+                                    filter_data[0], 
+                                    reason,
+                                    {
+                                        'filter_name': filter_data[1],
+                                        'source_model_id': filter_data[2],
+                                        'user_id': filter_data[3]
+                                    }
+                                )
+                                skipped_count += 1
+                                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                                continue
+                    else:
+                        reason = "No model_id specified"
+                        self.database_id._log_skipped_item(
+                            'ir.filters', 
+                            filter_data[0], 
+                            reason,
+                            {
+                                'filter_name': filter_data[1],
+                                'user_id': filter_data[3]
+                            }
+                        )
+                        skipped_count += 1
+                        skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                        continue
                     
                     filter_vals = {
                         'name': filter_data[1],
-                        'model_id': filter_data[2],
+                        'model_id': target_model_id,  # Use the target model ID
                         'user_id': target_user_id,
                         'domain': filter_data[4],
                         'context': filter_data[5],
@@ -96,25 +146,48 @@ class MigrationIrFilters(models.Model):
                     # Use merge functionality to create or update filter
                     search_domain = [
                         ('name', '=', filter_data[1]),
-                        ('model_id', '=', filter_data[2]),
-                        ('user_id', '=', filter_data[3])
+                        ('model_id', '=', target_model_id),
+                        ('user_id', '=', target_user_id)
                     ]
                     
-                    record_identifier = f"IR filter '{filter_data[1]}' for user {filter_data[3]} on model {filter_data[2]}"
-                    filter_record, action = self.database_id._create_or_update_record(
-                        'ir.filters',
-                        search_domain,
-                        filter_vals,
-                        record_identifier
-                    )
-                    
-                    if action in ['created', 'updated']:
-                        filter_count += 1
+                    try:
+                        record_identifier = f"IR filter '{filter_data[1]}' for user {filter_data[3]} on model {filter_data[2]}"
+                        filter_record, action = self.database_id._create_or_update_record(
+                            'ir.filters',
+                            search_domain,
+                            filter_vals,
+                            record_identifier
+                        )
+                        
+                        if action in ['created', 'updated']:
+                            filter_count += 1
+                    except Exception as e:
+                        reason = f"Filter processing failed: {str(e)}"
+                        self.database_id._log_skipped_item(
+                            'ir.filters', 
+                            filter_data[0], 
+                            reason,
+                            {
+                                'filter_name': filter_data[1],
+                                'user_id': filter_data[3],
+                                'model_id': filter_data[2],
+                                'error': str(e)
+                            }
+                        )
+                        skipped_count += 1
+                        skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                        continue
             
-            status_message = f'IR filters migration completed: {filter_count} filters migrated'
-            if skipped_count > 0:
-                status_message += f', {skipped_count} filters skipped (missing dependencies)'
+            # Log comprehensive IR filters migration summary
+            total_processed = filter_count + skipped_count
+            self.database_id._log_migration_summary(
+                'IR Filters', 
+                total_processed, 
+                skipped_count, 
+                skipped_reasons
+            )
             
+            status_message = f'IR filters migration completed: {filter_count} filters migrated, {skipped_count} skipped'
             self._update_migration_status('completed', status_message)
             
             success_message = f"Successfully migrated {filter_count} user filters from Odoo 16."

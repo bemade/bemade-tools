@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import psycopg2
 import os
 import logging
+from datetime import datetime
 
 _logger = logging.getLogger(__name__)
 PAGE_SIZE = 1000
@@ -201,3 +202,87 @@ class Odoo16DatabaseBase(models.Model):
             new_record = model.sudo().create(values)
             _logger.info(f"Created new {record_identifier} (ID: {new_record.id})")
             return new_record, 'created'
+    
+    def _get_skipped_items_log_path(self):
+        """Get the path for the skipped items log file."""
+        # Create logs directory if it doesn't exist
+        logs_dir = '/tmp/migration_logs'
+        if not os.path.exists(logs_dir):
+            os.makedirs(logs_dir)
+        
+        # Create unique log file name with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return os.path.join(logs_dir, f'migration_skipped_items_{timestamp}.log')
+    
+    def _log_skipped_item(self, item_type, source_id, reason, context=None):
+        """Log a skipped item to the dedicated skipped items log file.
+        
+        Args:
+            item_type (str): Type of item (e.g., 'mail.message', 'channel.member', 'partner')
+            source_id (int/str): ID of the item in the source database
+            reason (str): Reason why the item was skipped
+            context (dict): Additional context information
+        """
+        try:
+            log_path = self._get_skipped_items_log_path()
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Format context information
+            context_str = ''
+            if context:
+                context_parts = []
+                for key, value in context.items():
+                    context_parts.append(f"{key}={value}")
+                context_str = f" | Context: {', '.join(context_parts)}"
+            
+            # Create log entry
+            log_entry = f"[{timestamp}] SKIPPED: {item_type} (ID: {source_id}) | Reason: {reason}{context_str}\n"
+            
+            # Append to log file
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(log_entry)
+            
+            # Also log to standard logger with WARNING level so it's visible
+            _logger.warning(f"SKIPPED {item_type} ID {source_id}: {reason}")
+            
+        except Exception as e:
+            _logger.error(f"Failed to log skipped item {item_type} ID {source_id}: {e}")
+    
+    def _log_migration_summary(self, component_name, total_processed, total_skipped, skipped_breakdown=None):
+        """Log a summary of migration results including skipped items.
+        
+        Args:
+            component_name (str): Name of the migration component
+            total_processed (int): Total number of items processed
+            total_skipped (int): Total number of items skipped
+            skipped_breakdown (dict): Breakdown of skipped items by reason
+        """
+        try:
+            log_path = self._get_skipped_items_log_path()
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            summary_lines = [
+                f"\n{'='*80}",
+                f"[{timestamp}] MIGRATION SUMMARY: {component_name}",
+                f"{'='*80}",
+                f"Total Processed: {total_processed}",
+                f"Total Skipped: {total_skipped}",
+                f"Success Rate: {((total_processed - total_skipped) / total_processed * 100):.1f}%" if total_processed > 0 else "Success Rate: 0%"
+            ]
+            
+            if skipped_breakdown:
+                summary_lines.append("\nSkipped Items Breakdown:")
+                for reason, count in skipped_breakdown.items():
+                    summary_lines.append(f"  - {reason}: {count}")
+            
+            summary_lines.append(f"{'='*80}\n")
+            
+            # Write to log file
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write('\n'.join(summary_lines))
+            
+            # Also log to standard logger
+            _logger.info(f"Migration Summary - {component_name}: {total_processed - total_skipped}/{total_processed} successful, {total_skipped} skipped")
+            
+        except Exception as e:
+            _logger.error(f"Failed to log migration summary for {component_name}: {e}")

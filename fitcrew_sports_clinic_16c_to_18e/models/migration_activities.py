@@ -40,13 +40,142 @@ class MigrationActivities(models.Model):
     
     # Migration statistics
     activities_migrated = fields.Integer(string='Activities Migrated', default=0, readonly=True)
+    activities_skipped = fields.Integer(string='Activities Skipped', default=0, readonly=True)
+    model_mappings_found = fields.Integer(string='Model Mappings Found', default=0, readonly=True)
+    
+    def _build_model_mapping(self):
+        """Build mapping table between source and target database model IDs."""
+        # Use a simple approach - rebuild mapping each time for now
+        # In a production environment, you might want to cache this in a file or database
+        _logger.info("Building model ID mapping between source and target databases")
+        model_mapping = {}
+        
+        try:
+            with self.get_cursor() as cr:
+                # Get all models from source database (Odoo 16)
+                cr.execute("""
+                    SELECT id, model FROM ir_model 
+                    WHERE model IS NOT NULL AND model != ''
+                    ORDER BY model
+                """)
+                source_models = cr.fetchall()
+                
+            # Get all models from target database (Odoo 18)
+            target_models = self.env['ir.model'].search_read(
+                [('model', '!=', False)], 
+                ['id', 'model']
+            )
+            
+            # Create mapping dictionaries for efficient lookup
+            source_model_dict = {model_name: model_id for model_id, model_name in source_models}
+            target_model_dict = {model['model']: model['id'] for model in target_models}
+            
+            # Build the mapping
+            mappings_found = 0
+            for model_name in source_model_dict:
+                source_id = source_model_dict[model_name]
+                if model_name in target_model_dict:
+                    target_id = target_model_dict[model_name]
+                    model_mapping[source_id] = {
+                        'model_name': model_name,
+                        'source_id': source_id,
+                        'target_id': target_id
+                    }
+                    mappings_found += 1
+                else:
+                    _logger.warning(f"Model '{model_name}' (ID: {source_id}) exists in source but not in target database")
+            
+            # Update statistics
+            self.write({'model_mappings_found': mappings_found})
+            
+            _logger.info(f"Model mapping completed: {mappings_found} models mapped out of {len(source_models)} source models")
+            
+            return model_mapping
+            
+        except Exception as e:
+            _logger.error(f"Failed to build model mapping: {str(e)}")
+            raise UserError(_(f"Failed to build model mapping: {str(e)}"))
+    
+    def _get_target_model_info(self, source_res_model, source_res_id, model_mapping):
+        """Get target model information for a given source res_model and res_id.
+        
+        Args:
+            source_res_model: Model name from source database (e.g., 'sports.patient')
+            source_res_id: Record ID from source database
+            model_mapping: Dictionary mapping source model IDs to target model info
+            
+        Returns:
+            tuple: (target_model_name, target_res_id, target_model_id) or (None, None, None) if not found
+        """
+        # For most cases, model names should be the same between Odoo 16 and 18
+        # But we should verify the model exists in the target environment
+        if source_res_model not in self.env:
+            _logger.warning(f"Model '{source_res_model}' not available in target environment")
+            return None, None, None
+            
+        # Get the target model ID from our mapping
+        target_model_id = None
+        for mapping_info in model_mapping.values():
+            if mapping_info['model_name'] == source_res_model:
+                target_model_id = mapping_info['target_id']
+                break
+                
+        if not target_model_id:
+            _logger.warning(f"No model ID mapping found for '{source_res_model}'")
+            return None, None, None
+            
+        # Find the target record using the appropriate odoo16_*_id field
+        target_record = None
+        try:
+            if source_res_model == 'sports.patient':
+                target_record = self.env['sports.patient'].with_context(active_test=False).search([
+                    ('odoo16_patient_id', '=', source_res_id)
+                ], limit=1)
+            elif source_res_model == 'sports.patient.injury':
+                target_record = self.env['sports.patient.injury'].with_context(active_test=False).search([
+                    ('odoo16_injury_id', '=', source_res_id)
+                ], limit=1)
+            elif source_res_model == 'sports.team':
+                # Sports teams don't have odoo16_team_id, they use direct ID mapping
+                # Check if this is a migrated team by looking for it directly
+                target_record = self.env['sports.team'].browse(source_res_id)
+                if not target_record.exists():
+                    target_record = None
+            elif source_res_model == 'res.partner':
+                target_record = self.env['res.partner'].with_context(active_test=False).search([
+                    ('odoo16_partner_id', '=', source_res_id)
+                ], limit=1)
+            elif source_res_model == 'res.users':
+                target_record = self.env['res.users'].with_context(active_test=False).search([
+                    ('odoo16_user_id', '=', source_res_id)
+                ], limit=1)
+            else:
+                # For other models, try direct ID lookup as fallback
+                _logger.warning(f"No specific odoo16_*_id mapping defined for model '{source_res_model}', trying direct ID lookup")
+                target_record = self.env[source_res_model].browse(source_res_id)
+                if not target_record.exists():
+                    target_record = None
+                    
+            if not target_record:
+                _logger.warning(f"Target record {source_res_model}({source_res_id}) not found using odoo16_*_id mapping")
+                return None, None, None
+                
+            return source_res_model, target_record.id, target_model_id
+            
+        except Exception as e:
+            _logger.warning(f"Error looking up target record {source_res_model}({source_res_id}): {str(e)}")
+            return None, None, None
     
     def action_migrate_activities(self):
         """Migrate mail.activity records from Odoo 16 to Odoo 18."""
         try:
             self._update_migration_status('in_progress', 'Starting activities migration')
             
+            # Build model mapping first
+            model_mapping = self._build_model_mapping()
+            
             activities_count = 0
+            skipped_count = 0
             
             with self.get_cursor() as cr:
                 # Check if mail_activity table exists in source database
@@ -103,12 +232,15 @@ class MigrationActivities(models.Model):
                         "No activities found in source database"
                     )
                 
-                activities_count = self._migrate_activities(activities_data, select_columns)
+                activities_count, skipped_count = self._migrate_activities(activities_data, select_columns, model_mapping)
             
             # Update migration statistics
-            self.write({'activities_migrated': activities_count})
+            self.write({
+                'activities_migrated': activities_count,
+                'activities_skipped': skipped_count
+            })
             
-            success_message = f"Activities migration completed: {activities_count} activities migrated"
+            success_message = f"Activities migration completed: {activities_count} activities migrated, {skipped_count} skipped"
             self._update_migration_status('completed', success_message)
             
             return self._success_notification("Activities Migration Successful", success_message)
@@ -119,10 +251,20 @@ class MigrationActivities(models.Model):
             _logger.error(error_message, exc_info=True)
             raise UserError(_(error_message))
     
-    def _migrate_activities(self, activities_data, column_names):
-        """Migrate individual activity records."""
+    def _migrate_activities(self, activities_data, column_names, model_mapping):
+        """Migrate individual activity records with model mapping.
+        
+        Args:
+            activities_data: List of activity records from source database
+            column_names: List of column names corresponding to activity_data
+            model_mapping: Dictionary mapping source model IDs to target model info
+            
+        Returns:
+            tuple: (migrated_count, skipped_count)
+        """
         migrated_count = 0
         skipped_count = 0
+        skipped_reasons = {}
         
         for activity_data in activities_data:
             try:
@@ -132,33 +274,47 @@ class MigrationActivities(models.Model):
                 
                 # Validate required fields
                 if not activity_dict.get('res_model') or not activity_dict.get('res_id'):
-                    _logger.warning(f"Skipping activity {source_id}: missing res_model or res_id")
+                    reason = "Missing res_model or res_id"
+                    self.database_id._log_skipped_item(
+                        'mail.activity', 
+                        source_id, 
+                        reason,
+                        {
+                            'res_model': activity_dict.get('res_model'),
+                            'res_id': activity_dict.get('res_id'),
+                            'summary': activity_dict.get('summary')
+                        }
+                    )
                     skipped_count += 1
+                    skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                     continue
                 
-                # Check if the target model exists in current Odoo 18 environment
-                res_model = activity_dict['res_model']
-                if res_model not in self.env:
-                    _logger.warning(f"Skipping activity {source_id}: model '{res_model}' not available in target environment")
+                # Use model mapping to get target model information
+                source_res_model = activity_dict['res_model']
+                source_res_id = activity_dict['res_id']
+                
+                target_model, target_res_id, target_model_id = self._get_target_model_info(source_res_model, source_res_id, model_mapping)
+                if not target_model or not target_res_id or not target_model_id:
+                    reason = f"Cannot map model/record {source_res_model}({source_res_id})"
+                    self.database_id._log_skipped_item(
+                        'mail.activity', 
+                        source_id, 
+                        reason,
+                        {
+                            'res_model': source_res_model,
+                            'res_id': source_res_id,
+                            'summary': activity_dict.get('summary')
+                        }
+                    )
                     skipped_count += 1
+                    skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                     continue
                 
-                # Check if the target record exists
-                try:
-                    target_record = self.env[res_model].browse(activity_dict['res_id'])
-                    if not target_record.exists():
-                        _logger.warning(f"Skipping activity {source_id}: target record {res_model}({activity_dict['res_id']}) does not exist")
-                        skipped_count += 1
-                        continue
-                except Exception as e:
-                    _logger.warning(f"Skipping activity {source_id}: error accessing target record: {str(e)}")
-                    skipped_count += 1
-                    continue
-                
-                # Prepare activity values
+                # Prepare activity values with mapped model information
                 activity_vals = {
-                    'res_model': res_model,
-                    'res_id': activity_dict['res_id'],
+                    'res_model': target_model,
+                    'res_model_id': target_model_id,  # This is required in Odoo 18
+                    'res_id': target_res_id,
                     'summary': activity_dict.get('summary') or 'Migrated Activity',
                 }
                 
@@ -179,7 +335,7 @@ class MigrationActivities(models.Model):
                 user_id = activity_dict.get('user_id')
                 if user_id:
                     # Try to find migrated user
-                    migrated_user = self.env['res.users'].search([
+                    migrated_user = self.env['res.users'].with_context(active_test=False).search([
                         ('odoo16_user_id', '=', user_id)
                     ], limit=1)
                     if migrated_user:
@@ -210,7 +366,7 @@ class MigrationActivities(models.Model):
                 # Handle create_uid - find migrated user
                 create_uid = activity_dict.get('create_uid')
                 if create_uid:
-                    migrated_user = self.env['res.users'].search([
+                    migrated_user = self.env['res.users'].with_context(active_test=False).search([
                         ('odoo16_user_id', '=', create_uid)
                     ], limit=1)
                     if migrated_user:
@@ -218,8 +374,8 @@ class MigrationActivities(models.Model):
                 
                 # Use merge functionality to create or update activity
                 search_domain = [
-                    ('res_model', '=', res_model),
-                    ('res_id', '=', activity_dict['res_id']),
+                    ('res_model', '=', target_model),
+                    ('res_id', '=', target_res_id),
                     ('summary', '=', activity_vals['summary']),
                 ]
                 
@@ -227,7 +383,7 @@ class MigrationActivities(models.Model):
                 if 'user_id' in activity_vals:
                     search_domain.append(('user_id', '=', activity_vals['user_id']))
                 
-                record_identifier = f"mail.activity on {res_model}({activity_dict['res_id']}) - {activity_vals['summary']}"
+                record_identifier = f"mail.activity on {target_model}({target_res_id}) - {activity_vals['summary']}"
                 
                 activity, action = self.database_id._create_or_update_record(
                     'mail.activity',
@@ -241,13 +397,30 @@ class MigrationActivities(models.Model):
                     _logger.debug(f"Successfully {action} activity {source_id} -> {activity.id}")
                 
             except Exception as e:
-                _logger.error(f"Failed to migrate activity {source_id}: {str(e)}")
+                reason = f"Processing error: {str(e)}"
+                self.database_id._log_skipped_item(
+                    'mail.activity', 
+                    source_id, 
+                    reason,
+                    {
+                        'res_model': activity_dict.get('res_model'),
+                        'res_id': activity_dict.get('res_id'),
+                        'summary': activity_dict.get('summary'),
+                        'error': str(e)
+                    }
+                )
                 skipped_count += 1
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                 continue
         
-        if skipped_count > 0:
-            _logger.info(f"Activities migration completed: {migrated_count} migrated, {skipped_count} skipped")
-        else:
-            _logger.info(f"Activities migration completed: {migrated_count} activities migrated")
+        # Log comprehensive activities migration summary
+        total_processed = migrated_count + skipped_count
+        self.database_id._log_migration_summary(
+            'Mail Activities', 
+            total_processed, 
+            skipped_count, 
+            skipped_reasons
+        )
         
-        return migrated_count
+        _logger.info(f"Activities migration completed: {migrated_count} activities migrated, {skipped_count} skipped")
+        return migrated_count, skipped_count

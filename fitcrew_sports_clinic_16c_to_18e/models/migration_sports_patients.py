@@ -106,6 +106,8 @@ class MigrationSportsPatients(models.Model):
         migrated_count = 0
         failed_count = 0
         failed_patient_ids = []
+        skipped_count = 0
+        skipped_reasons = {}
         
         for patient_data in source_patients:
             try:
@@ -194,22 +196,38 @@ class MigrationSportsPatients(models.Model):
                 if write_date:
                     patient_vals['write_date'] = write_date
                 
-                # Create patient directly (no deduplication)
-                # Note: If there are duplicate odoo16_patient_id values in source, they will be preserved as separate records
-                new_patient = target_env['sports.patient'].create(patient_vals)
-                migrated_count += 1
+                # Use merge functionality to handle duplicate odoo16_patient_id gracefully
+                search_domain = [('odoo16_patient_id', '=', patient_id)]
+                record_identifier = f"patient {patient_id} ({first_name} {last_name})"
                 
-                _logger.info(f"Migrated patient: {first_name} {last_name} (ID: {patient_id} -> {new_patient.id})")
+                new_patient, action = self.database_id._create_or_update_record(
+                    'sports.patient',
+                    search_domain,
+                    patient_vals,
+                    record_identifier
+                )
+                
+                if action in ['created', 'updated']:
+                    migrated_count += 1
+                    _logger.info(f"{'Created' if action == 'created' else 'Updated'} patient: {first_name} {last_name} (ID: {patient_id} -> {new_patient.id})")
+                else:
+                    _logger.warning(f"No action taken for patient {patient_id} ({first_name} {last_name}) - action: {action}")
                 
             except Exception as e:
-                _logger.error(f"Failed to migrate patient {patient_id} ({first_name} {last_name}): {str(e)}")
-                _logger.error(f"Exception type: {type(e).__name__}")
-                _logger.error(f"Exception args: {e.args}")
-                import traceback
-                _logger.error(f"Full traceback: {traceback.format_exc()}")
-                # Log the specific error to help debug
-                if 'odoo16_patient_id_unique' in str(e):
-                    _logger.error(f"Duplicate patient ID {patient_id} found in source database")
+                reason = f"Processing error: {str(e)}"
+                self.database_id._log_skipped_item(
+                    'sports.patient', 
+                    patient_id, 
+                    reason,
+                    {
+                        'first_name': first_name,
+                        'last_name': last_name,
+                        'email': email,
+                        'error': str(e)
+                    }
+                )
+                skipped_count += 1
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                 failed_count += 1
                 failed_patient_ids.append(patient_id)
                 continue
@@ -219,9 +237,18 @@ class MigrationSportsPatients(models.Model):
             _logger.error(f"Failed to migrate {failed_count} patients. Failed patient IDs: {failed_patient_ids[:10]}{'...' if len(failed_patient_ids) > 10 else ''}")
             _logger.error(f"This explains why {failed_count} patient injuries will fail to find their associated patients")
             
+        # Log comprehensive patients migration summary
+        total_processed = migrated_count + skipped_count
+        self.database_id._log_migration_summary(
+            'Sports Patients', 
+            total_processed, 
+            skipped_count, 
+            skipped_reasons
+        )
+        
         # Verify migration by checking total count in target
         total_in_target = self.env['sports.patient'].search_count([('odoo16_patient_id', '!=', False)])
-        _logger.info(f"📊 PATIENT MIGRATION SUMMARY: Source: {len(source_patients)}, Migrated: {migrated_count}, Failed: {failed_count}, Target total: {total_in_target}")
+        _logger.info(f"📊 PATIENT MIGRATION SUMMARY: Source: {len(source_patients)}, Migrated: {migrated_count}, Skipped: {skipped_count}, Target total: {total_in_target}")
         return migrated_count
 
     def _migrate_patient_contacts(self, cursor):
@@ -244,6 +271,8 @@ class MigrationSportsPatients(models.Model):
         
         _logger.info(f"Found {len(source_contacts)} patient contacts to migrate")
         migrated_count = 0
+        skipped_count = 0
+        skipped_reasons = {}
         
         for contact_data in source_contacts:
             try:
@@ -251,11 +280,14 @@ class MigrationSportsPatients(models.Model):
                  create_date, create_uid, write_date, write_uid) = contact_data
                 
                 # Find corresponding patient in target database using original Odoo 16 patient ID
-                patient = self.env['sports.patient'].search([('odoo16_patient_id', '=', patient_id)], limit=1)
+                patient = self.env['sports.patient'].with_context(active_test=False).search([('odoo16_patient_id', '=', patient_id)], limit=1)
                 if not patient:
-                    _logger.warning(f"Patient with odoo16_patient_id {patient_id} not found for contact {contact_id} (contact name: {name})")
+                    reason = f"Patient with odoo16_patient_id {patient_id} not found"
+                    _logger.warning(f"{reason} for contact {contact_id} (contact name: {name})")
+                    skipped_count += 1
+                    skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                     # Check if any patient exists with this ID to debug the issue
-                    all_patients_with_id = self.env['sports.patient'].search([('odoo16_patient_id', '=', patient_id)])
+                    all_patients_with_id = self.env['sports.patient'].with_context(active_test=False).search([('odoo16_patient_id', '=', patient_id)])
                     if all_patients_with_id:
                         _logger.error(f"Found {len(all_patients_with_id)} patients with odoo16_patient_id {patient_id} - this should not happen!")
                     continue
@@ -282,10 +314,35 @@ class MigrationSportsPatients(models.Model):
                 _logger.info(f"Migrated contact: {name} for patient {patient.first_name} {patient.last_name}")
                 
             except Exception as e:
-                _logger.error(f"Failed to migrate contact {contact_id}: {str(e)}")
+                reason = f"Contact creation failed: {type(e).__name__}: {str(e)}"
+                self.database_id._log_skipped_item(
+                    'sports.patient.contact', 
+                    contact_id, 
+                    reason,
+                    {
+                        'contact_name': name,
+                        'patient_id': patient_id,
+                        'contact_type': contact_type,
+                        'error': str(e)
+                    }
+                )
+                skipped_count += 1
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                 continue
         
         _logger.info(f"Successfully migrated {migrated_count} patient contacts")
+        
+        # Log comprehensive patient contacts migration summary
+        total_processed = migrated_count + skipped_count
+        self.database_id._log_migration_summary(
+            'Patient Contacts', 
+            total_processed, 
+            skipped_count, 
+            skipped_reasons
+        )
+        
+        _logger.info(f"Patient contacts migration completed: {migrated_count} contacts migrated, {skipped_count} skipped")
+            
         return migrated_count
 
     def _migrate_team_patient_relations(self, cursor):
@@ -332,7 +389,7 @@ class MigrationSportsPatients(models.Model):
                 # Teams are looked up by name since they don't have an odoo16_team_id field
                 team_name = self._get_team_name_by_id(cursor, team_id)
                 team = self.env['sports.team'].search([('name', '=', team_name)], limit=1) if team_name else None
-                patient = self.env['sports.patient'].search([('odoo16_patient_id', '=', patient_id)], limit=1)
+                patient = self.env['sports.patient'].with_context(active_test=False).search([('odoo16_patient_id', '=', patient_id)], limit=1)
                 
                 if not team:
                     _logger.warning(f"Team {team_id} not found for relation")
