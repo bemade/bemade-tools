@@ -24,9 +24,10 @@
                             <group name="connection" string="Database Connection">
                                 <field name="database_host"/>
                                 <field name="database_name"/>
-                                <field name="database_username"/>
-                                <field name="database_password" password="True"/>
                                 <field name="database_port"/>
+                                <field name="use_peer_authentication"/>
+                                <field name="database_username" invisible="use_peer_authentication" required="not use_peer_authentication"/>
+                                <field name="database_password" password="True" invisible="use_peer_authentication"/>
                             </group>
                             <group name="migration_info" string="Migration Information">
                                 <field name="filestore_path"/>
