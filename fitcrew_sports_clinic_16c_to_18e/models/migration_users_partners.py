@@ -35,12 +35,24 @@ class MigrationUsersPartners(models.Model):
         try:
             self._update_migration_status('in_progress', 'Starting users and partners migration')
             
-            # Create a mapping to track Odoo 16 -> Odoo 18 partner ID relationships
+            # Create mappings to track Odoo 16 -> Odoo 18 ID relationships
             partner_id_mapping = {}
+            user_id_mapping = {}
+            
+            # Special case: Marie-Claude Leblanc (user_id 2/partner_id 3) should be imported as new user
+            # to avoid overwriting admin user in target database
+            MARIE_CLAUDE_USER_ID = 2
+            MARIE_CLAUDE_PARTNER_ID = 3
             
             # First, set odoo16_partner_id for existing system partners (IDs 1-5) in target database
-            _logger.info("Setting odoo16_partner_id for existing system partners (IDs 1-5)")
+            # EXCEPT for partner_id 3 (Marie-Claude Leblanc) which will be imported as new
+            _logger.info("Setting odoo16_partner_id for existing system partners (IDs 1-5, excluding 3)")
             for partner_id in range(1, 6):  # IDs 1-5
+                # Skip partner_id 3 (Marie-Claude Leblanc) - will be imported as new
+                if partner_id == MARIE_CLAUDE_PARTNER_ID:
+                    _logger.info(f"⚠️ Skipping partner_id {partner_id} (Marie-Claude Leblanc) - will be imported as new user")
+                    continue
+                    
                 try:
                     existing_partner = self.env['res.partner'].browse(partner_id)
                     if existing_partner.exists():
@@ -102,7 +114,8 @@ class MigrationUsersPartners(models.Model):
                         continue  # Skip partners without names
                     
                     # System partners (IDs 1-5) are handled upfront, skip them here
-                    if source_partner_id and source_partner_id <= 5:
+                    # EXCEPT for partner_id 3 (Marie-Claude Leblanc) which should be imported as new
+                    if source_partner_id and source_partner_id <= 5 and source_partner_id != MARIE_CLAUDE_PARTNER_ID:
                         reason = "System partner - handled upfront"
                         self.database_id._log_skipped_item(
                             'res.partner', 
@@ -157,6 +170,10 @@ class MigrationUsersPartners(models.Model):
                         partner_vals['customer_rank'] = partner_dict['customer_rank']
                     if 'active' in partner_dict:
                         partner_vals['active'] = partner_dict['active']
+                    
+                    # Special handling for Marie-Claude Leblanc (partner_id 3)
+                    if source_partner_id == MARIE_CLAUDE_PARTNER_ID:
+                        _logger.info(f"🔄 Processing Marie-Claude Leblanc (partner_id {MARIE_CLAUDE_PARTNER_ID}) as new partner")
                     
                     # Create partner directly without deduplication (preserve source data as-is)
                     try:
@@ -252,35 +269,41 @@ class MigrationUsersPartners(models.Model):
                         user_skipped_reasons[reason] = user_skipped_reasons.get(reason, 0) + 1
                         continue  # Skip users without login
                     
-                    # Skip system users that shouldn't be migrated (check early to avoid warnings)
-                    system_logins = [
-                        '__system__', 'admin', 'public', 'default', 'portaltemplate',
-                        'demo', 'base.user_demo', 'base.user_admin', 'base.default_user'
-                    ]
-                    if login in system_logins:
-                        # Still need to set odoo16_user_id for existing system user so other migrations can find it
-                        odoo16_user_id = user_dict.get('id')
-                        if odoo16_user_id:
-                            # Find existing system user by login
-                            existing_system_user = self.env['res.users'].with_context(active_test=False).search([
-                                ('login', '=', login)
-                            ], limit=1)
-                            if existing_system_user:
-                                try:
-                                    existing_system_user.write({'odoo16_user_id': odoo16_user_id})
-                                    _logger.info(f"✅ Set odoo16_user_id={odoo16_user_id} for existing system user '{login}' (ID: {existing_system_user.id})")
-                                except Exception as e:
-                                    _logger.warning(f"Failed to set odoo16_user_id for system user '{login}': {e}")
-                        reason = "System user - handled upfront"
-                        self.database_id._log_skipped_item(
-                            'res.users', 
-                            user_dict.get('id'), 
-                            reason,
-                            {'login': login}
-                        )
-                        user_skipped_count += 1
-                        user_skipped_reasons[reason] = user_skipped_reasons.get(reason, 0) + 1
-                        continue
+                    # Check for special case: Marie-Claude Leblanc (user_id 2)
+                    source_user_id = user_dict.get('id')
+                    if source_user_id == MARIE_CLAUDE_USER_ID:
+                        _logger.info(f"🔄 Processing Marie-Claude Leblanc (user_id {MARIE_CLAUDE_USER_ID}) as new user")
+                        # Continue with normal processing - don't skip
+                    else:
+                        # Skip system users that shouldn't be migrated (check early to avoid warnings)
+                        system_logins = [
+                            '__system__', 'admin', 'public', 'default', 'portaltemplate',
+                            'demo', 'base.user_demo', 'base.user_admin', 'base.default_user'
+                        ]
+                        if login in system_logins:
+                            # Still need to set odoo16_user_id for existing system user so other migrations can find it
+                            odoo16_user_id = user_dict.get('id')
+                            if odoo16_user_id:
+                                # Find existing system user by login
+                                existing_system_user = self.env['res.users'].with_context(active_test=False).search([
+                                    ('login', '=', login)
+                                ], limit=1)
+                                if existing_system_user:
+                                    try:
+                                        existing_system_user.write({'odoo16_user_id': odoo16_user_id})
+                                        _logger.info(f"✅ Set odoo16_user_id={odoo16_user_id} for existing system user '{login}' (ID: {existing_system_user.id})")
+                                    except Exception as e:
+                                        _logger.warning(f"Failed to set odoo16_user_id for system user '{login}': {e}")
+                            reason = "System user - handled upfront"
+                            self.database_id._log_skipped_item(
+                                'res.users', 
+                                user_dict.get('id'), 
+                                reason,
+                                {'login': login}
+                            )
+                            user_skipped_count += 1
+                            user_skipped_reasons[reason] = user_skipped_reasons.get(reason, 0) + 1
+                            continue
                     
                     # Migrate both active and inactive users to preserve references in mail system, activities, etc.
                     # Inactive users will be created with active=False to maintain their status
@@ -362,6 +385,12 @@ class MigrationUsersPartners(models.Model):
                             if existing_user:
                                 _logger.info(f"Found existing user '{login}' (ID: {existing_user.id}, active: {existing_user.active})")
                             
+                            # Special handling for Marie-Claude Leblanc - always create as new user
+                            if source_user_id == MARIE_CLAUDE_USER_ID:
+                                # Force creation as new user by using a unique search domain that won't match
+                                search_domain = [('login', '=', f'__NEVER_MATCH__{login}')]
+                                _logger.info(f"🔄 Forcing creation of new user for Marie-Claude Leblanc (original user_id {MARIE_CLAUDE_USER_ID})")
+                            
                             user, action = self.database_id._create_or_update_record(
                                 'res.users',
                                 search_domain,
@@ -371,6 +400,15 @@ class MigrationUsersPartners(models.Model):
                             
                             if action in ('created', 'updated'):
                                 user_count += 1
+                                
+                                # Store user ID mapping for Marie-Claude Leblanc
+                                if source_user_id == MARIE_CLAUDE_USER_ID:
+                                    user_id_mapping[MARIE_CLAUDE_USER_ID] = user.id
+                                    _logger.info(f"✅ Created new user for Marie-Claude Leblanc: source user_id {MARIE_CLAUDE_USER_ID} -> target user_id {user.id}")
+                                
+                                # Store general user ID mapping for other migrations
+                                if source_user_id and source_user_id not in user_id_mapping:
+                                    user_id_mapping[source_user_id] = user.id
                                 
                                 # If the user was originally inactive, mark them as inactive now
                                 # (after successful creation to avoid constraint issues)
@@ -412,11 +450,12 @@ class MigrationUsersPartners(models.Model):
             self._update_migration_status('completed', 
                 f'Users and partners migration completed: {user_count} users, {partner_count} partners migrated')
             
-            _logger.info(f"✅ Users and partners migration completed cleanly with transaction state verified")
+            _logger.info(f"✅ Users and partners migration completed cleanly")
             
+            self._update_migration_status('completed', f'Users and partners migration completed: {partner_count} partners, {user_count} users')
             return self._success_notification(
-                "Users & Partners Migration Successful",
-                f"Successfully migrated {user_count} users and {partner_count} partners from Odoo 16."
+                'Migration Completed',
+                f'Successfully migrated {partner_count} partners and {user_count} users from Odoo 16. Marie-Claude Leblanc imported as new user.'
             )
             
         except Exception as e:

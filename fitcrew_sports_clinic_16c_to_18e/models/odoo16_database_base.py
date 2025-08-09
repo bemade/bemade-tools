@@ -27,7 +27,7 @@ class Odoo16DatabaseBase(models.Model):
     )
     database_username = fields.Char(
         string='Database Username',
-        required=True,
+        required=False,  # Made optional since peer auth doesn't need it
         default=lambda self: os.environ.get('ODOO16_USER', 'odoo')
     )
     database_password = fields.Char(
@@ -38,6 +38,12 @@ class Odoo16DatabaseBase(models.Model):
         string='Database Port',
         required=True,
         default=lambda self: int(os.environ.get('ODOO16_PORT', '5432'))
+    )
+    use_peer_authentication = fields.Boolean(
+        string='Use Peer Authentication',
+        default=False,
+        help='Use peer authentication instead of username/password. '
+             'Requires database server to be configured for peer authentication.'
     )
     filestore_path = fields.Char(
         string='Filestore Path',
@@ -74,13 +80,26 @@ class Odoo16DatabaseBase(models.Model):
         """Get a database cursor for the Odoo 16 database."""
         conn = None
         try:
-            conn = psycopg2.connect(
-                host=self.database_host,
-                database=self.database_name,
-                user=self.database_username,
-                password=self.database_password,
-                port=self.database_port
-            )
+            # Build connection parameters based on authentication method
+            conn_params = {
+                'host': self.database_host,
+                'database': self.database_name,
+                'port': self.database_port
+            }
+            
+            if self.use_peer_authentication:
+                # For peer authentication, don't include user/password
+                # The connection will use the current system user
+                _logger.info("Using peer authentication for database connection")
+            else:
+                # Use traditional username/password authentication
+                conn_params.update({
+                    'user': self.database_username,
+                    'password': self.database_password
+                })
+                _logger.info(f"Using username/password authentication for user: {self.database_username}")
+            
+            conn = psycopg2.connect(**conn_params)
             cursor = conn.cursor()
             yield cursor
             conn.commit()
