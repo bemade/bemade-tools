@@ -44,6 +44,7 @@ class MigrationUsersPartners(models.Model):
             MARIE_CLAUDE_USER_ID = 2
             MARIE_CLAUDE_PARTNER_ID = 3
             
+
             # First, set odoo16_partner_id for existing system partners (IDs 1-5) in target database
             # EXCEPT for partner_id 3 (Marie-Claude Leblanc) which will be imported as new
             _logger.info("Setting odoo16_partner_id for existing system partners (IDs 1-5, excluding 3)")
@@ -273,17 +274,19 @@ class MigrationUsersPartners(models.Model):
                     source_user_id = user_dict.get('id')
                     if source_user_id == MARIE_CLAUDE_USER_ID:
                         _logger.info(f"🔄 Processing Marie-Claude Leblanc (user_id {MARIE_CLAUDE_USER_ID}) as new user")
-                        # Continue with normal processing - don't skip
+                        # Continue with normal processing - don't skip, even if login is 'admin'
                     else:
                         # Skip system users that shouldn't be migrated (check early to avoid warnings)
+                        # NOTE: Marie-Claude is excluded from this check above
                         system_logins = [
                             '__system__', 'admin', 'public', 'default', 'portaltemplate',
                             'demo', 'base.user_demo', 'base.user_admin', 'base.default_user'
                         ]
                         if login in system_logins:
                             # Still need to set odoo16_user_id for existing system user so other migrations can find it
+                            # EXCEPT for Marie-Claude Leblanc (user_id 2) - don't map her to the existing admin user
                             odoo16_user_id = user_dict.get('id')
-                            if odoo16_user_id:
+                            if odoo16_user_id and odoo16_user_id != MARIE_CLAUDE_USER_ID:
                                 # Find existing system user by login
                                 existing_system_user = self.env['res.users'].with_context(active_test=False).search([
                                     ('login', '=', login)
@@ -294,6 +297,8 @@ class MigrationUsersPartners(models.Model):
                                         _logger.info(f"✅ Set odoo16_user_id={odoo16_user_id} for existing system user '{login}' (ID: {existing_system_user.id})")
                                     except Exception as e:
                                         _logger.warning(f"Failed to set odoo16_user_id for system user '{login}': {e}")
+                            elif odoo16_user_id == MARIE_CLAUDE_USER_ID:
+                                _logger.info(f"🚫 Skipping odoo16_user_id assignment for admin user - Marie-Claude Leblanc (user_id {MARIE_CLAUDE_USER_ID}) will be imported as new user")
                             reason = "System user - handled upfront"
                             self.database_id._log_skipped_item(
                                 'res.users', 
@@ -377,6 +382,7 @@ class MigrationUsersPartners(models.Model):
                         # Use savepoint to isolate this operation
                         with self.env.cr.savepoint():
                             # Search for existing user (including archived ones)
+                            login = user_dict.get('login')
                             search_domain = [('login', '=', login)]
                             record_identifier = f"user '{login}'"
                             
@@ -404,7 +410,18 @@ class MigrationUsersPartners(models.Model):
                                 # Store user ID mapping for Marie-Claude Leblanc
                                 if source_user_id == MARIE_CLAUDE_USER_ID:
                                     user_id_mapping[MARIE_CLAUDE_USER_ID] = user.id
-                                    _logger.info(f"✅ Created new user for Marie-Claude Leblanc: source user_id {MARIE_CLAUDE_USER_ID} -> target user_id {user.id}")
+                                    # Log to skip files for visibility
+                                    self.database_id._log_skipped_item(
+                                        'DEBUG_USER_CREATION',
+                                        MARIE_CLAUDE_USER_ID,
+                                        f"SUCCESS: Created new user for Marie-Claude Leblanc: source user_id {MARIE_CLAUDE_USER_ID} -> target user_id {user.id}",
+                                        {
+                                            'login': user.login,
+                                            'odoo16_user_id': user.odoo16_user_id,
+                                            'active': user.active,
+                                            'target_user_id': user.id
+                                        }
+                                    )
                                 
                                 # Store general user ID mapping for other migrations
                                 if source_user_id and source_user_id not in user_id_mapping:

@@ -196,6 +196,8 @@ class MigrationMailSystem(models.Model):
                         members_skipped = 0
                         skipped_reasons = {}
                         
+                        _logger.info(f"🔍 DEBUG: Channel '{channel.name}' (ID: {channel.id}) - Processing {len(source_members)} members from source")
+                        
                         for member_data in source_members:
                             source_partner_id = member_data[1]
                             
@@ -203,6 +205,27 @@ class MigrationMailSystem(models.Model):
                             target_partner = self.env['res.partner'].with_context(active_test=False).search([
                                 ('odoo16_partner_id', '=', source_partner_id)
                             ], limit=1)
+                            
+                            # Debug logging for Marie-Claude's partner (source partner_id 3) - log to skip files
+                            if source_partner_id == 3:
+                                if target_partner:
+                                    self.database_id._log_skipped_item(
+                                        'DEBUG_PARTNER_MAPPING',
+                                        3,
+                                        f"SUCCESS: Found partner for source_partner_id=3: '{target_partner.name}' (ID: {target_partner.id}, odoo16_partner_id: {target_partner.odoo16_partner_id})",
+                                        {'channel_id': source_channel_id, 'target_partner_name': target_partner.name}
+                                    )
+                                else:
+                                    # Check if there are any partners with odoo16_partner_id=3
+                                    all_partners_with_id_3 = self.env['res.partner'].with_context(active_test=False).search([
+                                        ('odoo16_partner_id', '=', 3)
+                                    ])
+                                    self.database_id._log_skipped_item(
+                                        'DEBUG_PARTNER_MAPPING',
+                                        3,
+                                        f"FAILURE: No partner found for source_partner_id=3. Found {len(all_partners_with_id_3)} partners with odoo16_partner_id=3: {[p.name for p in all_partners_with_id_3]}",
+                                        {'channel_id': source_channel_id, 'all_partners_count': len(all_partners_with_id_3)}
+                                    )
                             
                             if target_partner:
                                 # Check if member already exists (shouldn't happen but safety check)
@@ -242,6 +265,13 @@ class MigrationMailSystem(models.Model):
                                         skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                                         members_skipped += 1
                                         _logger.warning(f"Failed to add member {target_partner.name} to channel {channel.name}: {str(e)}")
+                                        # Log to skip file for visibility
+                                        self.database_id._log_skipped_item(
+                                            'discuss.channel.member',
+                                            member_data[0],
+                                            f"Failed to create member: {str(e)}",
+                                            {'channel_name': channel.name, 'partner_name': target_partner.name}
+                                        )
                                 else:
                                     _logger.debug(f"Member {target_partner.name} already exists in channel {channel.name}")
                                     members_added += 1  # Count as successful
@@ -250,6 +280,13 @@ class MigrationMailSystem(models.Model):
                                 skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                                 members_skipped += 1
                                 _logger.warning(f"Could not find partner for odoo16_partner_id {source_partner_id}")
+                                # Log to skip file for visibility
+                                self.database_id._log_skipped_item(
+                                    'discuss.channel.member',
+                                    member_data[0],
+                                    f"Partner not found for odoo16_partner_id {source_partner_id}",
+                                    {'channel_name': channel.name, 'source_partner_id': source_partner_id}
+                                )
                         
                         # Step 3: Remove OdooBot if it was auto-added (shouldn't happen with group type, but safety check)
                         odoobot_partner = self.env.ref('base.partner_root', raise_if_not_found=False)
@@ -542,7 +579,14 @@ class MigrationMailSystem(models.Model):
                                 ], limit=1)
                                 
                                 if migrated_user:
+                                    # Debug logging for Marie-Claude Leblanc (source user_id 2)
+                                    if source_user_id == 2:
+                                        _logger.info(f"🔍 DEBUG: Found user for source_user_id=2: '{migrated_user.login}' (ID: {migrated_user.id}, odoo16_user_id: {migrated_user.odoo16_user_id})")
                                     message_vals['create_uid'] = migrated_user.id
+                                else:
+                                    # Debug logging when no user found
+                                    if source_user_id == 2:
+                                        _logger.warning(f"🔍 DEBUG: No user found for source_user_id=2")
                                 # If no migrated user found, let Odoo use current user as default
                             # Skip parent_id in Pass 1 - will be handled in Pass 2
                             elif col == 'res_id' and message_data[i]:
@@ -586,6 +630,9 @@ class MigrationMailSystem(models.Model):
                             elif col not in ['model', 'parent_id']:  # Skip model and parent_id - they have special handling
                                 message_vals[col] = message_data[i]
                         
+                        # CRITICAL: Set odoo16_message_id for proper mapping in parent update pass
+                        message_vals['odoo16_message_id'] = message_data[0]
+                        
                         # Use merge functionality to create or update message
                         search_domain = [('odoo16_message_id', '=', message_data[0])]  # Use odoo16_message_id for proper mapping
                         
@@ -599,6 +646,16 @@ class MigrationMailSystem(models.Model):
                         
                         if action in ['created', 'updated']:
                             count += 1
+                            # Debug: Verify odoo16_message_id was set correctly
+                            if message_data[0] in [867, 13937, 13938, 13939]:  # Sample problematic IDs
+                                _logger.info(f"🔍 DEBUG: Message {message_data[0]} {action} - Target ID: {message.id}, odoo16_message_id: {message.odoo16_message_id}")
+                                # Log to skip file for visibility
+                                self.database_id._log_skipped_item(
+                                    'DEBUG_MESSAGE_CREATION',
+                                    message_data[0],
+                                    f"Message {action} - Target ID: {message.id}, odoo16_message_id: {message.odoo16_message_id}",
+                                    {'action': action, 'target_id': message.id}
+                                )
                             
                     except Exception as e:
                         # Log detailed error information
@@ -766,6 +823,28 @@ class MigrationMailSystem(models.Model):
                     ('odoo16_partner_id', '=', source_res_id)
                 ], limit=1)
                 result = target_record.id if target_record else None
+                
+                # Enhanced debugging for Marie-Claude's partner (source partner_id 3) - log to skip files
+                if source_res_id == 3:
+                    if target_record:
+                        self.database_id._log_skipped_item(
+                            'DEBUG_PARTNER_MAP_RECORD_ID',
+                            3,
+                            f"SUCCESS: _map_record_id found partner for source_res_id=3: '{target_record.name}' (ID: {target_record.id}, odoo16_partner_id: {target_record.odoo16_partner_id})",
+                            {'model_name': model_name, 'target_record_id': target_record.id}
+                        )
+                    else:
+                        # Check all partners with odoo16_partner_id=3
+                        all_partners_3 = self.env['res.partner'].with_context(active_test=False).search([
+                            ('odoo16_partner_id', '=', 3)
+                        ])
+                        self.database_id._log_skipped_item(
+                            'DEBUG_PARTNER_MAP_RECORD_ID',
+                            3,
+                            f"FAILURE: _map_record_id found NO partner for source_res_id=3. All partners with odoo16_partner_id=3: {len(all_partners_3)} found - {[f'{p.name}(ID:{p.id})' for p in all_partners_3]}",
+                            {'model_name': model_name, 'all_partners_count': len(all_partners_3)}
+                        )
+                
                 _logger.debug(f"Partner mapping: {source_res_id} -> {result}")
                 return result
                 
@@ -928,9 +1007,24 @@ class MigrationMailSystem(models.Model):
                         _logger.warning(f"Could not find migrated partner for partner_id {source_partner_id} in mail notification - skipping")
                         continue
                     
+                    # Find the migrated mail.message using odoo16_message_id FIRST
+                    source_message_id = notification_data[1]
+                    referenced_message = self.env['mail.message'].search([
+                        ('odoo16_message_id', '=', source_message_id)
+                    ], limit=1)
+                    if not referenced_message:
+                        # Skip notifications for non-migrated messages (legitimately skipped due to missing parent objects)
+                        self.database_id._log_skipped_item(
+                            'mail.notification',
+                            notification_data[0],
+                            f"Referenced message {source_message_id} not found in migrated messages",
+                            {'source_message_id': source_message_id, 'source_partner_id': source_partner_id}
+                        )
+                        continue
+                    
                     notification_vals = {
-                        'mail_message_id': notification_data[1],
-                        'res_partner_id': migrated_partner.id,  # Use migrated partner ID
+                        'mail_message_id': referenced_message.id,  # ✅ CORRECT: Use migrated message ID
+                        'res_partner_id': migrated_partner.id,     # ✅ CORRECT: Use migrated partner ID
                         'notification_type': notification_data[3],
                         'notification_status': notification_data[4],
                     }
@@ -949,15 +1043,6 @@ class MigrationMailSystem(models.Model):
                     if 'failure_reason' in available_columns:
                         notification_vals['failure_reason'] = notification_data[col_index]
                         col_index += 1
-                    
-                    # Find the migrated mail.message using odoo16_message_id
-                    source_message_id = notification_data[1]
-                    referenced_message = self.env['mail.message'].search([
-                        ('odoo16_message_id', '=', source_message_id)
-                    ], limit=1)
-                    if not referenced_message:
-                        # Skip notifications for non-migrated messages
-                        continue
                     
                     # Use merge functionality to create or update notification
                     search_domain = [
