@@ -16,3 +16,4 @@ from . import res_partner
 from . import res_users
 from . import sports_patient
 from . import sports_patient_injury
+from . import base_partner_merge

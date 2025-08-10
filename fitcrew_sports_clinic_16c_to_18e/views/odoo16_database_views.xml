@@ -54,6 +54,14 @@
                                 </div>
                             </div>
                         </group>
+                        <group name="post_migration_fixes" string="Post-Migration Fixes">
+                            <div class="row">
+                                <div class="col-md-12">
+                                    <button name="action_fix_partner_parent_ids" string="Fix Partner Parent IDs" type="object" class="btn-outline-warning btn-block"
+                                            help="Query source database to restore missing parent_id relationships for partners"/>
+                                </div>
+                            </div>
+                        </group>
                         <notebook>
                             <page string="Migration Log" name="migration_log">
                                 <field name="migration_log" widget="text" readonly="1"/>

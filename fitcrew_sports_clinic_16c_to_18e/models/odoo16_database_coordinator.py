@@ -131,6 +131,10 @@ class Odoo16Database(models.Model):
         """Delegate to users & partners migration."""
         return self.users_partners_migration_id.action_migrate_users_partners()
     
+    def action_fix_partner_parent_ids(self):
+        """Delegate to users & partners migration to fix parent IDs."""
+        return self.users_partners_migration_id.action_fix_partner_parent_ids()
+    
     def action_migrate_mail_system(self):
         """Delegate to mail system migration."""
         return self.mail_system_migration_id.action_migrate_mail_system()
