@@ -489,3 +489,107 @@ class MigrationUsersPartners(models.Model):
                 # Continue with the original error even if status update fails
             
             raise UserError(_(error_msg))
+    
+    def action_fix_partner_parent_ids(self):
+        """
+        Fix missing parent_id relationships by querying the source database
+        for original parent_id values and mapping them to migrated partners.
+        """
+        try:
+            self._update_migration_status('in_progress', 'Fixing partner parent IDs...')
+            
+            # Use source database cursor with context manager
+            with self.get_cursor() as source_cr:
+                # Query source database for all partners with parent_id
+                source_cr.execute("""
+                    SELECT id, parent_id, name
+                    FROM res_partner 
+                    WHERE parent_id IS NOT NULL
+                    ORDER BY id
+                """)
+                source_partners = source_cr.fetchall()
+                
+                if not source_partners:
+                    self._update_migration_status('completed', 'No partners with parent_id found in source database')
+                    return self.database_id._success_notification(
+                        'Fix Complete', 
+                        'No partners with parent_id relationships found in source database'
+                    )
+                
+                _logger.info(f"Found {len(source_partners)} partners with parent_id in source database")
+            
+            # Process each partner with parent_id (outside the cursor context)
+            fixed_count = 0
+            skipped_count = 0
+            error_count = 0
+            
+            for source_id, source_parent_id, partner_name in source_partners:
+                try:
+                    # Only process migrated partners (those with odoo16_partner_id)
+                    # This ensures we don't touch partners that were already in the target database
+                    migrated_partner = self.env['res.partner'].search([
+                        ('odoo16_partner_id', '=', source_id)
+                    ], limit=1)
+                    
+                    if not migrated_partner:
+                        # This partner wasn't migrated, skip it
+                        skipped_count += 1
+                        continue
+                    
+                    # Skip if source parent_id = 1 (company partner, already correctly mapped)
+                    if source_parent_id == 1:
+                        # Check if current parent_id is already 1 (correct)
+                        if migrated_partner.parent_id and migrated_partner.parent_id.id == 1:
+                            skipped_count += 1
+                            continue
+                        else:
+                            # Set parent_id to 1 (company partner)
+                            migrated_partner.write({'parent_id': 1})
+                            _logger.info(f"Fixed parent_id for partner '{partner_name}' (ID: {migrated_partner.id}): parent_id=1 (company)")
+                            fixed_count += 1
+                            continue
+                    
+                    # For other parent_ids, find the parent partner by odoo16_partner_id
+                    parent_partner = self.env['res.partner'].search([
+                        ('odoo16_partner_id', '=', source_parent_id)
+                    ], limit=1)
+                    
+                    if not parent_partner:
+                        _logger.warning(f"Parent partner with odoo16_partner_id={source_parent_id} not found in target database for partner '{partner_name}' (ID: {source_id})")
+                        skipped_count += 1
+                        continue
+                    
+                    # Update the parent_id if it's different
+                    current_parent_id = migrated_partner.parent_id.id if migrated_partner.parent_id else None
+                    if current_parent_id != parent_partner.id:
+                        migrated_partner.write({'parent_id': parent_partner.id})
+                        _logger.info(f"Fixed parent_id for partner '{partner_name}' (ID: {migrated_partner.id}): parent_id={parent_partner.id}")
+                        fixed_count += 1
+                    else:
+                        # Parent is already correct
+                        skipped_count += 1
+                        
+                except Exception as e:
+                    _logger.error(f"Error fixing parent_id for partner ID {source_id}: {str(e)}")
+                    error_count += 1
+                    continue
+            
+            # Prepare summary message
+            summary_msg = f"Fixed {fixed_count} partner parent relationships. Skipped: {skipped_count}, Errors: {error_count}"
+            _logger.info(f"Partner parent ID fix complete: {summary_msg}")
+            
+            self._update_migration_status('completed', summary_msg)
+            return self.database_id._success_notification(
+                'Partner Parent IDs Fixed', 
+                summary_msg
+            )
+            
+        except Exception as e:
+            error_msg = f"Failed to fix partner parent IDs: {str(e)}"
+            _logger.error(error_msg, exc_info=True)
+            
+            self._update_migration_status('failed', error_msg)
+            return self.database_id._error_notification(
+                'Fix Failed', 
+                error_msg
+            )
