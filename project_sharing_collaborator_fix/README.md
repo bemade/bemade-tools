@@ -1,29 +1,45 @@
-# Project Sharing Collaborator Fix
+# Project Sharing Collaborator & Security Fix
 
 ## Overview
 
-This module fixes a critical bug in Odoo's core project sharing functionality where collaborators were not being created when using the project sharing UI wizard.
+This module fixes critical bugs in Odoo's core project sharing functionality affecting both collaborator creation and portal user security.
 
 ## Problem Description
 
 ### Symptoms
-- Portal users could see **all project tasks** on public projects instead of only shared ones
+- Portal users could see **ALL project tasks** regardless of sharing status
 - Project sharing UI **appeared to work** but silently failed to create collaborator records
 - Sharing security rules remained **inactive** due to missing collaborators
+- Even with collaborators created, portal users still had unauthorized access
 - Issue affected **all user types**, including administrators
 
-### Root Cause
+### Root Causes
+
+#### 1. Collaborator Creation Bug
 The original `project.share.wizard` had a fundamental architectural flaw:
 - **Collaborator creation logic was in `create()` method** where `wizard.collaborator_ids` is empty
 - **Should have been in `action_send_mail()` method** where collaborators are actually processed
 - **Timing issue**: Logic ran before collaborator wizard records were created
 
+#### 2. Portal Security Bug
+The project module had an overly permissive Access Control List (ACL) rule:
+- **ACL Rule**: `access_task_portal` granted portal users direct read access to ALL project tasks
+- **Security Bypass**: This ACL overrode record rules that should enforce collaborator-based restrictions
+- **Critical Flaw**: Portal access was not properly controlled by sharing settings
+
 ## Solution
 
 ### What This Module Does
+
+#### 1. Wizard Fix
 1. **Overrides `ProjectShareWizard.create()`** - Removes premature collaborator creation logic
 2. **Overrides `ProjectShareWizard.action_send_mail()`** - Adds collaborator creation at correct timing
 3. **Preserves all original functionality** - Email sending, follower management, etc.
+
+#### 2. Security Fix
+1. **Removes overly permissive ACL rule** - Disables `access_task_portal` that granted blanket access
+2. **Forces proper record rule enforcement** - Portal access now goes through collaborator-based restrictions
+3. **Maintains intended security model** - Only shared project tasks are accessible to portal users
 
 ### Technical Details
 - **Method**: Uses Odoo inheritance (`_inherit`) to override core wizard methods
