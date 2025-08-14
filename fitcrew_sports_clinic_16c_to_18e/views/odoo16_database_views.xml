@@ -60,6 +60,15 @@
                                     <button name="action_fix_partner_parent_ids" string="Fix Partner Parent IDs" type="object" class="btn-outline-warning btn-block"
                                             help="Query source database to restore missing parent_id relationships for partners"/>
                                 </div>
+                                <div class="col-md-12"/>
+                                <div class="col-md-12">
+                                    <button name="action_fix_followers_and_assignments"
+                                            string="Fix Followers and Assignments"
+                                            type="object"
+                                            class="btn-outline-danger btn-block"
+                                            confirm="This will: 1) Remap followers from partner 3 to 254 on sports models (dedupe), 2) Remap injury treatment professional assignments from user 2 to 9 (dedupe), and 3) Remove followers for all archived users. Proceed?"
+                                            help="Remap followers (partner 3→254), remap injury treatment professional assignments (user 2→9), and remove followers for archived users."/>
+                                </div>
                             </div>
                         </group>
                         <notebook>

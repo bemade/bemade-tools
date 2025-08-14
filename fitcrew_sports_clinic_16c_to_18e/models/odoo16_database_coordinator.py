@@ -179,6 +179,152 @@ class Odoo16Database(models.Model):
     def action_migrate_injuries(self):
         """Migrate injuries - delegates to sports injuries migration component."""
         return self.action_migrate_sports_injuries()
+
+    def action_fix_followers_and_assignments(self):
+        """Post-migration fix:
+        - Remap mail.followers on sports models from partner 3 -> 254 (dedupe-safe)
+        - Remap treatment professional assignments on injuries from user 2 -> 9 (dedupe-safe)
+        - Remove all followers for archived users (inactive) across all models
+
+        Returns a success notification with affected row counts.
+        """
+        self.ensure_one()
+        cr = self.env.cr
+
+        # Counters
+        remapped_followers = 0
+        deleted_dupe_followers = 0
+        remapped_injury_assigns = 0
+        deleted_dupe_assigns = 0
+        deleted_archived_followers_rel = 0
+        deleted_archived_followers = 0
+
+        # 1) Followers remap partner 3 -> 254 on sports models
+        # First, update those that won't become duplicates
+        cr.execute(
+            """
+            WITH upd AS (
+                UPDATE mail_followers mf
+                SET partner_id = 254
+                WHERE mf.partner_id = 3
+                  AND mf.res_model IN ('sports.patient','sports.patient.injury','sports.team')
+                  AND NOT EXISTS (
+                        SELECT 1 FROM mail_followers mf2
+                        WHERE mf2.res_model = mf.res_model
+                          AND mf2.res_id = mf.res_id
+                          AND mf2.partner_id = 254
+                  )
+                RETURNING 1
+            )
+            SELECT count(*) FROM upd
+            """
+        )
+        remapped_followers = cr.fetchone()[0]
+
+        # Then, delete any remaining followers with partner 3 for those models (these are duplicates now)
+        # Also clean subtype rels first
+        cr.execute(
+            """
+            WITH victims AS (
+                SELECT id FROM mail_followers
+                WHERE partner_id = 3
+                  AND res_model IN ('sports.patient','sports.patient.injury','sports.team')
+            )
+            DELETE FROM mail_followers_mail_message_subtype_rel r
+            USING victims v
+            WHERE r.mail_followers_id = v.id
+            """
+        )
+        deleted_archived_followers_rel += cr.rowcount  # reuse counter for rel deletes
+
+        cr.execute(
+            """
+            WITH delmf AS (
+                DELETE FROM mail_followers mf
+                WHERE mf.partner_id = 3
+                  AND mf.res_model IN ('sports.patient','sports.patient.injury','sports.team')
+                RETURNING 1
+            )
+            SELECT count(*) FROM delmf
+            """
+        )
+        deleted_dupe_followers = cr.fetchone()[0]
+
+        # 2) Remap injury treatment professional assignments user 2 -> 9
+        # Update non-duplicate rows
+        cr.execute(
+            """
+            WITH upd AS (
+                UPDATE patient_injury_treatment_pro_rel rel
+                SET treatment_pro_id = 9
+                WHERE rel.treatment_pro_id = 2
+                  AND NOT EXISTS (
+                        SELECT 1 FROM patient_injury_treatment_pro_rel r2
+                        WHERE r2.patient_injury_id = rel.patient_injury_id
+                          AND r2.treatment_pro_id = 9
+                  )
+                RETURNING 1
+            )
+            SELECT count(*) FROM upd
+            """
+        )
+        remapped_injury_assigns = cr.fetchone()[0]
+
+        # Delete remaining rows with user 2 (duplicates)
+        cr.execute(
+            """
+            WITH delrel AS (
+                DELETE FROM patient_injury_treatment_pro_rel rel
+                WHERE rel.treatment_pro_id = 2
+                RETURNING 1
+            )
+            SELECT count(*) FROM delrel
+            """
+        )
+        deleted_dupe_assigns = cr.fetchone()[0]
+
+        # 3) Remove all followers for archived users (inactive) across all models
+        # Clean subtype rels first for those followers
+        cr.execute(
+            """
+            WITH archived_followers AS (
+                SELECT mf.id
+                FROM mail_followers mf
+                JOIN res_users u ON u.partner_id = mf.partner_id
+                WHERE u.active = false
+            )
+            DELETE FROM mail_followers_mail_message_subtype_rel r
+            USING archived_followers af
+            WHERE r.mail_followers_id = af.id
+            """
+        )
+        deleted_archived_followers_rel += cr.rowcount
+
+        cr.execute(
+            """
+            WITH delmf AS (
+                DELETE FROM mail_followers mf
+                USING res_users u
+                WHERE u.partner_id = mf.partner_id
+                  AND u.active = false
+                RETURNING 1
+            )
+            SELECT count(*) FROM delmf
+            """
+        )
+        deleted_archived_followers = cr.fetchone()[0]
+
+        msg = (
+            f"Remapped followers (3→254) on sports models: {remapped_followers}. "
+            f"Deleted duplicate followers (partner 3): {deleted_dupe_followers}. "
+            f"Remapped injury assignments (user 2→9): {remapped_injury_assigns}. "
+            f"Deleted duplicate injury assignments (user 2): {deleted_dupe_assigns}. "
+            f"Removed archived users' followers: {deleted_archived_followers}. "
+            f"Subtype links removed: {deleted_archived_followers_rel}."
+        )
+
+        _logger.info("Post-migration fixes completed: %s", msg)
+        return self._success_notification("Post-Migration Fixes Completed", msg)
     
     def action_migrate_all(self):
         """Perform complete migration from Odoo 16 to Odoo 18."""
