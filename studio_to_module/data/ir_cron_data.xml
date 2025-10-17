@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+
+        <!-- Cron Job for Automatic Studio View Cleanup -->
+        <record id="ir_cron_cleanup_studio_views" model="ir.cron">
+            <field name="name">Studio Views: Automatic Cleanup</field>
+            <field name="model_id" ref="base.model_ir_ui_view"/>
+            <field name="state">code</field>
+            <field name="code">model.cleanup_converted_views()</field>
+            <field name="interval_number">1</field>
+            <field name="interval_type">days</field>
+            <field name="active" eval="False"/>
+        </record>
+
+    </data>
+</odoo>
