@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Studio to Module Converter</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+            color: #333;
+        }
+        h1 {
+            color: #714B67;
+            border-bottom: 3px solid #714B67;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #875A7B;
+            margin-top: 30px;
+        }
+        .feature {
+            background: #f8f9fa;
+            padding: 15px;
+            margin: 10px 0;
+            border-left: 4px solid #875A7B;
+        }
+        .workflow {
+            display: flex;
+            justify-content: space-between;
+            margin: 20px 0;
+        }
+        .workflow-step {
+            flex: 1;
+            text-align: center;
+            padding: 15px;
+            background: #e9ecef;
+            margin: 0 5px;
+            border-radius: 5px;
+        }
+        .workflow-step h3 {
+            color: #714B67;
+            margin-top: 0;
+        }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        .warning {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔄 Studio to Module Converter</h1>
+    
+    <p><strong>Transform your Odoo Studio customizations into version-controlled module code!</strong></p>
+    
+    <h2>✨ Key Features</h2>
+    
+    <div class="feature">
+        <strong>📋 List Studio Views</strong><br>
+        Browse and manage all views created through Odoo Studio in one place.
+    </div>
+    
+    <div class="feature">
+        <strong>🔄 Batch Conversion</strong><br>
+        Convert multiple Studio views to module code at once.
+    </div>
+    
+    <div class="feature">
+        <strong>📝 Smart XML Generation</strong><br>
+        Automatically generates proper, well-formatted XML view files.
+    </div>
+    
+    <div class="feature">
+        <strong>🔧 Module Integration</strong><br>
+        Automatically updates your module's <code>__manifest__.py</code> file.
+    </div>
+    
+    <div class="feature">
+        <strong>🗑️ Auto Cleanup</strong><br>
+        Optionally removes Studio views after successful module upgrade.
+    </div>
+    
+    <div class="feature">
+        <strong>👁️ Preview</strong><br>
+        See the generated XML before committing to conversion.
+    </div>
+    
+    <h2>🔄 Workflow</h2>
+    
+    <div class="workflow">
+        <div class="workflow-step">
+            <h3>1. Create</h3>
+            <p>Build customizations in Studio</p>
+        </div>
+        <div class="workflow-step">
+            <h3>2. Convert</h3>
+            <p>Use this tool to generate XML</p>
+        </div>
+        <div class="workflow-step">
+            <h3>3. Review</h3>
+            <p>Check generated files</p>
+        </div>
+        <div class="workflow-step">
+            <h3>4. Deploy</h3>
+            <p>Upgrade module</p>
+        </div>
+    </div>
+    
+    <h2>🚀 Quick Start</h2>
+    
+    <ol>
+        <li>Go to <strong>Studio to Module > Studio Views</strong></li>
+        <li>Select the views you want to convert</li>
+        <li>Click <strong>Action > Convert Studio Views</strong></li>
+        <li>Choose your target module</li>
+        <li>Click <strong>Convert Views</strong></li>
+        <li>Upgrade the target module</li>
+    </ol>
+    
+    <div class="warning">
+        <strong>⚠️ Important:</strong> Always test conversions on a development server first. 
+        Make sure you have write access to the target module directory and that the module 
+        is in your addons path.
+    </div>
+    
+    <h2>💡 Use Cases</h2>
+    
+    <ul>
+        <li><strong>Development Workflow:</strong> Prototype in Studio, deploy as code</li>
+        <li><strong>Version Control:</strong> Track view changes in Git</li>
+        <li><strong>Multi-Environment:</strong> Easily deploy customizations across servers</li>
+        <li><strong>Code Review:</strong> Review customizations as code before production</li>
+        <li><strong>Backup:</strong> Keep customizations safe in version control</li>
+    </ul>
+    
+    <h2>📚 Documentation</h2>
+    
+    <p>For detailed documentation, see the <code>README.md</code> file in the module directory.</p>
+    
+    <h2>🛠️ Requirements</h2>
+    
+    <ul>
+        <li>Odoo 18.0+</li>
+        <li><code>web_studio</code> module installed</li>
+        <li>Write access to target module directory</li>
+        <li>System Administrator rights</li>
+    </ul>
+    
+    <h2>📞 Support</h2>
+    
+    <p>For issues or questions, contact the Durpro development team.</p>
+    
+    <hr>
+    
+    <p style="text-align: center; color: #666; margin-top: 40px;">
+        <small>Studio to Module Converter v18.0.1.0.0 | © Durpro | LGPL-3 License</small>
+    </p>
+</body>
+</html>

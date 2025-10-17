@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+        <record id="view_ir_ui_view_list_studio" model="ir.ui.view">
+            <field name="name">ir.ui.view.list.studio</field>
+            <field name="model">ir.ui.view</field>
+            <field name="inherit_id" ref="base.view_view_tree"/>
+            <field name="arch" type="xml">
+                <xpath expr="//list" position="attributes">
+                    <attribute name="decoration-info">is_studio_view and not converted_to_module</attribute>
+                    <attribute name="decoration-success">converted_to_module</attribute>
+                </xpath>
+                <field name="name" position="after">
+                    <field name="is_studio_view" optional="show" widget="boolean_toggle"/>
+                    <field name="converted_to_module" optional="show" widget="boolean_toggle"/>
+                    <field name="target_module_id" optional="show"/>
+                    <field name="pending_cleanup" optional="hide" widget="boolean_toggle"/>
+                </field>
+            </field>
+        </record>
+
+        <!-- Studio Views Filter -->
+        <record id="view_ir_ui_view_search_studio" model="ir.ui.view">
+            <field name="name">ir.ui.view.search.studio</field>
+            <field name="model">ir.ui.view</field>
+            <field name="inherit_id" ref="base.view_view_search"/>
+            <field name="arch" type="xml">
+                <xpath expr="//search" position="inside">
+                    <filter string="Studio Views" name="studio_views" 
+                            domain="[('is_studio_view', '=', True)]"/>
+                    <filter string="Not Converted" name="not_converted" 
+                            domain="[('is_studio_view', '=', True), ('converted_to_module', '=', False)]"/>
+                    <filter string="Converted" name="converted" 
+                            domain="[('converted_to_module', '=', True)]"/>
+                    <filter string="Pending Cleanup" name="pending_cleanup" 
+                            domain="[('pending_cleanup', '=', True)]"/>
+                    <separator/>
+                    <group expand="0" string="Group By">
+                        <filter string="Studio" name="group_studio" 
+                                context="{'group_by': 'is_studio_view'}"/>
+                        <filter string="Target Module" name="group_target_module" 
+                                context="{'group_by': 'target_module_id'}"/>
+                    </group>
+                </xpath>
+            </field>
+        </record>
+
+        <record id="action_studio_views_manager" model="ir.actions.act_window">
+            <field name="name">Studio Views Manager</field>
+            <field name="res_model">ir.ui.view</field>
+            <field name="view_mode">list,form</field>
+            <field name="context">{'search_default_studio_views': 1, 'search_default_not_converted': 1}</field>
+            <field name="help" type="html">
+                <p class="o_view_nocontent_smiling_face">
+                    No Studio views found
+                </p>
+                <p>
+                    Studio views are customizations created through Odoo Studio.
+                    Use this tool to convert them into module code.
+                </p>
+            </field>
+        </record>
+
+        <!-- Action: Convert Studio Views (Contextual) -->
+        <record id="action_convert_studio_views" model="ir.actions.act_window">
+            <field name="name">Convert Studio Views to Module</field>
+            <field name="res_model">studio.view.converter</field>
+            <field name="view_mode">form</field>
+            <field name="target">new</field>
+            <field name="binding_model_id" ref="base.model_ir_ui_view"/>
+            <field name="binding_view_types">list,form</field>
+        </record>
+
+    </data>
+</odoo>

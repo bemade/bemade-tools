@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+        <menuitem id="menu_studio_to_module_root"
+                  name="Studio to Module"
+                  parent="base.menu_administration"
+                  sequence="100"
+                  groups="base.group_system"/>
+
+        <menuitem id="menu_studio_views_manager"
+                  name="Studio Views"
+                  parent="menu_studio_to_module_root"
+                  action="action_studio_views_manager"
+                  sequence="10"/>
+
+        <menuitem id="menu_studio_view_converter"
+                  name="Convert to Module"
+                  parent="menu_studio_to_module_root"
+                  action="action_studio_view_converter"
+                  sequence="20"/>
+
+    </data>
+</odoo>

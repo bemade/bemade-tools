@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+        <!-- Wizard Form View -->
+        <record id="view_studio_view_converter_form" model="ir.ui.view">
+            <field name="name">studio.view.converter.form</field>
+            <field name="model">studio.view.converter</field>
+            <field name="arch" type="xml">
+                <form string="Convert Studio Views to Module">
+                    <sheet>
+                        <group>
+                            <group name="selection">
+                                <field name="studio_view_ids" widget="many2many_tags" 
+                                       options="{'no_create': True}"/>
+                                <field name="module_author" placeholder="Select an author to filter modules..."/>
+                                <field name="target_module_id" 
+                                       options="{'no_create': True, 'no_open': True}"/>
+                            </group>
+                            <group name="options">
+                                <field name="view_folder"/>
+                                <field name="auto_cleanup" widget="boolean_toggle"/>
+                                <field name="module_path" readonly="1" class="text-muted"/>
+                            </group>
+                        </group>
+                        
+                        <notebook>
+                            <page string="Preview XML" name="preview">
+                                <field name="preview_xml" widget="text" readonly="1"/>
+                            </page>
+                            <page string="Instructions" name="instructions">
+                                <div class="alert alert-info" role="alert">
+                                    <h4>How to use this tool:</h4>
+                                    <ol>
+                                        <li><strong>Select Studio Views:</strong> Choose one or more Studio views you want to convert to code</li>
+                                        <li><strong>Filter by Author (Optional):</strong> Select a module author to filter the list of available target modules</li>
+                                        <li><strong>Select Target Module:</strong> Choose the custom module where the views will be added (filtered by author if selected)</li>
+                                        <li><strong>Views Folder:</strong> Specify the folder name (default: 'views') where XML files will be created</li>
+                                        <li><strong>Auto Cleanup:</strong> If enabled, Studio views will be automatically deleted after the module is upgraded</li>
+                                        <li><strong>Click Convert:</strong> The tool will:
+                                            <ul>
+                                                <li>Generate XML files for each model</li>
+                                                <li>Update the module's __manifest__.py</li>
+                                                <li>Mark Studio views for cleanup</li>
+                                            </ul>
+                                        </li>
+                                        <li><strong>Upgrade Module:</strong> After conversion, upgrade the target module to apply changes</li>
+                                        <li><strong>Automatic Cleanup:</strong> Studio views will be deleted automatically after upgrade</li>
+                                    </ol>
+                                    <p><strong>Note:</strong> Make sure the target module is in your addons path and you have write access to its directory.</p>
+                                </div>
+                            </page>
+                        </notebook>
+                    </sheet>
+                    <footer>
+                        <button string="Convert Views" name="action_convert_views" 
+                                type="object" class="btn-primary"/>
+                        <button string="Cancel" class="btn-secondary" special="cancel"/>
+                    </footer>
+                </form>
+            </field>
+        </record>
+
+        <!-- Wizard Action -->
+        <record id="action_studio_view_converter" model="ir.actions.act_window">
+            <field name="name">Convert Studio Views</field>
+            <field name="res_model">studio.view.converter</field>
+            <field name="view_mode">form</field>
+            <field name="target">new</field>
+            <field name="binding_model_id" ref="base.model_ir_ui_view"/>
+            <field name="binding_view_types">list</field>
+        </record>
+
+    </data>
+</odoo>
