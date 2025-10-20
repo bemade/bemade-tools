@@ -64,30 +64,51 @@ odoo shell -d your_database
 ```
 
 ```python
-# Find all Studio views
-studio_views = env['ir.ui.view'].search([('studio', '=', True)])
+# Find all Studio views tracked by the module
+studio_views = env['ir.ui.view'].search([('is_studio_view', '=', True)])
 print(f"Found {len(studio_views)} Studio views")
 
-# Find not converted views
+# Find views not yet converted
 pending = env['ir.ui.view'].search([
-    ('studio', '=', True),
+    ('is_studio_view', '=', True),
     ('converted_to_module', '=', False)
 ])
 print(f"Pending conversion: {len(pending)}")
 
-# Convert a view
-from odoo.addons.studio_to_module.examples import example_usage
-example_usage.convert_model_views(env, 'res.partner', 'durpro_base')
+# Convert a batch of views to a given module
+target_module = env['ir.module.module'].search([
+    ('state', '=', 'installed'),
+    ('name', '=', 'your_target_module')
+], limit=1)
 
-# Check conversion status
-example_usage.check_conversion_status(env)
+views_to_convert = env['ir.ui.view'].search([
+    ('is_studio_view', '=', True),
+    ('converted_to_module', '=', False),
+    ('model', '=', 'res.partner')
+])
+
+if target_module and views_to_convert:
+    wizard = env['studio.view.converter'].create({
+        'target_module_id': target_module.id,
+        'studio_view_ids': [(6, 0, views_to_convert.ids)],
+    })
+    wizard.action_convert_views()
+    env.cr.commit()
+
+# Check conversion status per module
+status = env['ir.ui.view'].read_group(
+    domain=[('is_studio_view', '=', True)],
+    fields=['converted_to_module'],
+    groupby=['converted_to_module']
+)
+print(status)
 
 # Manual cleanup
 env['ir.ui.view'].cleanup_converted_views()
 env.cr.commit()
 
 # Preview XML for a view
-view = env['ir.ui.view'].search([('studio', '=', True)], limit=1)
+view = env['ir.ui.view'].search([('is_studio_view', '=', True)], limit=1)
 wizard = env['studio.view.converter'].create({
     'target_module_id': env['ir.module.module'].search([('state', '=', 'installed')], limit=1).id
 })
@@ -106,8 +127,8 @@ psql your_database < backup_file.sql
 # Check module installation
 psql your_database -c "SELECT name, state FROM ir_module_module WHERE name = 'studio_to_module';"
 
-# Check Studio views count
-psql your_database -c "SELECT COUNT(*) FROM ir_ui_view WHERE studio = true;"
+# Count Studio views tracked by the module
+psql your_database -c "SELECT COUNT(*) FROM ir_ui_view WHERE converted_to_module IS NOT NULL OR pending_cleanup = true;"
 
 # Check converted views
 psql your_database -c "SELECT COUNT(*) FROM ir_ui_view WHERE converted_to_module = true;"
@@ -312,12 +333,19 @@ odoo -d your_database -u studio_to_module --stop-after-init
 ## Batch Operations
 
 ```bash
-# Convert all Studio views for multiple databases
+# Convert Studio views for multiple databases (example)
 for db in db1 db2 db3; do
     echo "Processing $db..."
     odoo shell -d "$db" -c "
-from odoo.addons.studio_to_module.examples import example_usage
-example_usage.check_conversion_status(env)
+target_module = env['ir.module.module'].search([('name', '=', 'your_target_module'), ('state', '=', 'installed')], limit=1)
+views = env['ir.ui.view'].search([('is_studio_view', '=', True), ('converted_to_module', '=', False)])
+if target_module and views:
+    wizard = env['studio.view.converter'].create({
+        'target_module_id': target_module.id,
+        'studio_view_ids': [(6, 0, views.ids)],
+    })
+    wizard.action_convert_views()
+    env.cr.commit()
 "
 done
 
@@ -398,17 +426,17 @@ alias odoo-test='odoo -d $1 --test-enable --stop-after-init'
 # Studio to Module aliases
 alias stm-install='odoo -d $1 -i studio_to_module --stop-after-init'
 alias stm-test='./addons/studio_to_module/scripts/test_module.sh'
-alias stm-status='odoo shell -d $1 -c "from odoo.addons.studio_to_module.examples import example_usage; example_usage.check_conversion_status(env)"'
+alias stm-status="odoo shell -d $1 -c \"print(env['ir.ui.view'].search_count([('is_studio_view', '=', True), ('converted_to_module', '=', False)]))\""
 ```
 
 ## One-Liners
 
 ```bash
 # Count Studio views
-odoo shell -d DB -c "print(env['ir.ui.view'].search_count([('studio', '=', True)]))"
+odoo shell -d DB -c "print(env['ir.ui.view'].search_count([('is_studio_view', '=', True)]))"
 
 # List Studio views
-odoo shell -d DB -c "for v in env['ir.ui.view'].search([('studio', '=', True)]): print(v.name)"
+odoo shell -d DB -c "for v in env['ir.ui.view'].search([('is_studio_view', '=', True)]): print(v.name)"
 
 # Convert all pending views
 odoo shell -d DB -c "from odoo.addons.studio_to_module.examples import example_usage; example_usage.batch_convert_with_filter(env, 'target_module'); env.cr.commit()"

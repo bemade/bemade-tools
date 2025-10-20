@@ -23,17 +23,18 @@ class StudioViewConverter(models.TransientModel):
         required=True,
         help="Select the Studio views to convert",
     )
-    module_author = fields.Selection(
-        selection='_get_module_authors',
-        string='Module Author',
-        help="Filter modules by author",
-    )
     target_module_id = fields.Many2one(
         comodel_name='ir.module.module',
         string='Target Module',
         required=True,
         domain=[('state', '=', 'installed')],
         help="Select the custom module where views will be added",
+    )
+    allowed_module_info = fields.Text(
+        compute='_compute_allowed_module_info',
+        string='Eligible Modules',
+        compute_sudo=True,
+        help="List of modules located under the addons/ directory (non-symlink)",
     )
     module_path = fields.Char(
         compute='_compute_module_path',
@@ -57,41 +58,57 @@ class StudioViewConverter(models.TransientModel):
         help="Preview of the XML that will be generated",
     )
 
-    @api.model
-    def _get_module_authors(self):
-        """Get list of unique module authors from installed modules.
-        
-        :return: List of tuples (author, author)
-        :rtype: list
-        """
-        authors = self.env['ir.module.module'].search([
-            ('state', '=', 'installed'),
-            ('author', '!=', False),
-        ]).mapped('author')
-        
-        # Remove duplicates and sort
-        unique_authors = sorted(set(authors))
-        return [(author, author) for author in unique_authors]
+    def _get_allowed_modules(self):
+        try:
+            from odoo.modules.module import get_module_path
+        except Exception:
+            get_module_path = None
 
-    @api.onchange('module_author')
-    def _onchange_module_author(self):
-        """Clear target_module_id when author changes and return filtered domain."""
-        if self.module_author:
-            self.target_module_id = False
-            return {
-                'domain': {
-                    'target_module_id': [
-                        ('state', '=', 'installed'),
-                        ('author', '=', self.module_author)
-                    ]
-                }
-            }
-        else:
-            return {
-                'domain': {
-                    'target_module_id': [('state', '=', 'installed')]
-                }
-            }
+        modules = self.env['ir.module.module'].search([('state', '=', 'installed')])
+        allowed_modules = self.env['ir.module.module']
+        allowed_info = []
+
+        for module in modules:
+            module_path = None
+            if get_module_path:
+                try:
+                    module_path = get_module_path(module.name)
+                except Exception:
+                    module_path = None
+            if not module_path:
+                continue
+
+            module_path = os.path.abspath(module_path)
+            if os.path.islink(module_path):
+                continue
+
+            parent_dir = os.path.basename(os.path.dirname(module_path.rstrip(os.sep)))
+            if parent_dir == 'addons':
+                allowed_modules |= module
+                allowed_info.append((module.name, module_path))
+
+        allowed_modules = allowed_modules.sorted('name') if allowed_modules else allowed_modules
+        allowed_info.sort(key=lambda item: item[0])
+        return allowed_modules, allowed_info
+
+    @api.depends_context('uid')
+    def _compute_allowed_module_info(self):
+        allowed_modules, allowed_info = self._get_allowed_modules()
+        info_lines = [f"{name}: {path}" for name, path in allowed_info]
+        info_text = '\n'.join(info_lines) if info_lines else _('No eligible modules found in addons/ directory.')
+
+        for wizard in self:
+            wizard.allowed_module_info = info_text
+
+    @api.constrains('target_module_id')
+    def _check_target_module_id_location(self):
+        allowed_modules, _info = self._get_allowed_modules()
+        for wizard in self:
+            if wizard.target_module_id and allowed_modules:
+                if wizard.target_module_id not in allowed_modules:
+                    raise ValidationError(_(
+                        'Only modules located directly under an addons/ directory (non-symlink) can be selected.'
+                    ))
 
     @api.depends('target_module_id')
     def _compute_module_path(self):
@@ -214,19 +231,15 @@ class StudioViewConverter(models.TransientModel):
                     data_element = etree.SubElement(root, 'data')
                 
                 # Get existing view IDs to avoid duplicates
-                existing_ids = set()
+                existing_records = {}
                 for record in data_element.findall('.//record[@model="ir.ui.view"]'):
                     record_id = record.get('id')
                     if record_id:
-                        existing_ids.add(record_id)
-                
+                        existing_records[record_id] = record
+
                 # Add new views
                 for view in views:
                     xml_id = self._sanitize_xml_id(view.name)
-                    
-                    # Skip if already exists
-                    if xml_id in existing_ids:
-                        continue
                     
                     # Generate view XML and parse it
                     view_xml = self._generate_view_xml(view)
@@ -234,8 +247,16 @@ class StudioViewConverter(models.TransientModel):
                     view_xml_clean = '\n'.join([line.strip() for line in view_xml.split('\n') if line.strip()])
                     view_element = etree.fromstring(view_xml_clean)
                     
-                    # Add to data element with proper indentation
-                    data_element.append(view_element)
+                    existing_record = existing_records.get(xml_id)
+                    if existing_record is not None:
+                        parent = existing_record.getparent()
+                        position = parent.index(existing_record)
+                        parent.remove(existing_record)
+                        parent.insert(position, view_element)
+                        existing_records[xml_id] = view_element
+                    else:
+                        data_element.append(view_element)
+                        existing_records[xml_id] = view_element
                 
                 # Write back with pretty print
                 tree.write(file_path, encoding='utf-8', xml_declaration=True, pretty_print=True)
