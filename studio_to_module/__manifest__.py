@@ -72,7 +72,7 @@ Views Added
     """,
     'author': 'Durpro',
     'website': 'https://www.durpro.com',
-    'depends': ['base', 'studio_cleanup'],
+    'depends': ['base', 'studio_cleanup', 'web_studio'],
     'data': [
         'security/ir.model.access.csv',
         'data/ir_cron_data.xml',
