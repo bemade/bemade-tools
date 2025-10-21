@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 {
     'name': 'Studio to Module Converter',
-    'version': '18.0.1.0.0',
+    'version': '18.0.1.2.0',
     'category': 'Technical Settings',
-    'summary': 'Convert Studio views to custom module code',
+    'summary': 'Convert Studio views and custom fields to module code',
     'description': """
 Studio to Module Converter
 ===========================
@@ -78,6 +78,7 @@ Views Added
         'data/ir_cron_data.xml',
         'views/studio_view_manager_views.xml',
         'wizard/studio_view_converter_views.xml',
+        'wizard/studio_view_converter_preview_views.xml',
         'wizard/studio_view_converter_confirm_views.xml',
         'views/menu_views.xml',
     ],

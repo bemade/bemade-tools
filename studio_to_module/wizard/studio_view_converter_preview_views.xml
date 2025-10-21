@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+        <!-- Preview Wizard Form View -->
+        <record id="view_studio_view_converter_preview_form" model="ir.ui.view">
+            <field name="name">studio.view.converter.preview.form</field>
+            <field name="model">studio.view.converter.preview</field>
+            <field name="arch" type="xml">
+                <form string="Conversion Preview">
+                    <sheet>
+                        <field name="preview_html" widget="html" nolabel="1"/>
+                    </sheet>
+                    <footer>
+                        <button string="Confirm &amp; Convert" name="action_confirm_conversion"
+                            type="object" class="btn-primary" />
+                        <button string="Cancel" name="action_cancel"
+                            type="object" class="btn-secondary" special="cancel" />
+                    </footer>
+                </form>
+            </field>
+        </record>
+
+    </data>
+</odoo>
