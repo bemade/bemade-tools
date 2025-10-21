@@ -4,10 +4,12 @@ __pycache__/
 *$py.class
 *.so
 .Python
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Odoo
-*.pyc
-*.pyo
+# Backup files created during conversion
+.studio_backups/pyo
 *.swp
 *.swo
 *~

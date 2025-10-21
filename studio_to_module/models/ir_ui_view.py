@@ -102,7 +102,14 @@ class IrUiView(models.Model):
         })
 
     def cleanup_converted_views(self):
-        """Delete Studio views that have been converted and their module is updated."""
+        """Delete Studio views that have been converted and their module is updated.
+        
+        This method handles views with inheritance by:
+        1. Deleting child views (that inherit from Studio views) first
+        2. Then deleting the parent Studio views
+        
+        Uses savepoints to prevent transaction abortion on failure.
+        """
         views_to_delete = self.search([
             ('pending_cleanup', '=', True),
             ('converted_to_module', '=', True),
@@ -110,10 +117,50 @@ class IrUiView(models.Model):
         
         for view in views_to_delete:
             if view.target_module_id and view.target_module_id.state == 'installed':
+                # Use a savepoint to isolate each deletion attempt
                 try:
-                    view.unlink()
+                    with self.env.cr.savepoint():
+                        # Find and delete child views that inherit from this Studio view
+                        child_views = self.search([('inherit_id', '=', view.id)])
+                        if child_views:
+                            _logger.info(
+                                'Deleting %d child view(s) that inherit from Studio view %s (ID: %s)',
+                                len(child_views), view.name, view.id
+                            )
+                            # Recursively delete child views (they might have their own children)
+                            for child in child_views:
+                                try:
+                                    with self.env.cr.savepoint():
+                                        # Recursively handle grandchildren
+                                        grandchildren = self.search([('inherit_id', '=', child.id)])
+                                        for grandchild in grandchildren:
+                                            grandchild.write({'inherit_id': False})
+                                        child.unlink()
+                                except Exception as e:
+                                    _logger.warning(
+                                        'Failed to delete child view %s (ID: %s): %s. Setting inherit_id to False.',
+                                        child.name, child.id, str(e)
+                                    )
+                                    # If we can't delete, at least unlink the inheritance
+                                    try:
+                                        with self.env.cr.savepoint():
+                                            child.write({'inherit_id': False})
+                                    except Exception:
+                                        pass
+                        
+                        # Now try to delete the parent Studio view
+                        view.unlink()
+                        _logger.info('Successfully deleted Studio view %s (ID: %s)', view.name, view.id)
+                        
                 except Exception as e:
                     _logger.warning(
                         'Failed to delete Studio view %s (ID: %s): %s',
                         view.name, view.id, str(e)
                     )
+                    # Mark as not pending cleanup if we can't delete it
+                    try:
+                        with self.env.cr.savepoint():
+                            view.write({'pending_cleanup': False})
+                            _logger.info('Unmarked view %s (ID: %s) from pending cleanup', view.name, view.id)
+                    except Exception:
+                        pass

@@ -14,6 +14,9 @@ This module provides a tool to convert Odoo Studio customizations into proper mo
 - **Module Integration**: Automatically updates target module's `__manifest__.py`
 - **Auto Cleanup**: Optionally removes Studio views after successful module upgrade
 - **Preview**: See the generated XML before conversion
+- **🆕 Automatic Backup**: Creates timestamped backups before any conversion
+- **🆕 Rollback on Error**: Automatically restores from backup if conversion fails
+- **🆕 Organized by Model**: Creates separate files per model with "studio" identifier
 
 ## Usage
 
@@ -58,9 +61,22 @@ This module provides a tool to convert Odoo Studio customizations into proper mo
 ### Generated Files
 
 The tool creates XML files following this pattern:
-- File name: `{model_name}_views.xml` (e.g., `sale_order_views.xml`)
+- File name: `{model_name}_studio_views.xml` (e.g., `sale_order_studio_views.xml`)
 - Location: `{module_path}/{views_folder}/`
 - Format: Standard Odoo XML data files with proper structure
+- Organization: One file per model for better maintainability
+
+### Backup System
+
+Before each conversion, the tool automatically creates a backup:
+- Location: `{module_path}/.studio_backups/{timestamp}/`
+- Contents:
+  - `studio_views_backup.json`: Complete view data export
+  - `__manifest__.py`: Original manifest file
+  - `__init__.py`: Original init file
+  - `hooks.py`: Original hooks (if exists)
+  - `views/`: Complete views folder backup
+- Retention: Backups are kept indefinitely for manual recovery
 
 ### Manifest Update
 
@@ -84,9 +100,12 @@ When auto cleanup is enabled:
 ## Safety Features
 
 - **Validation**: Ensures XML is valid before writing files
-- **Backup**: Original Studio views remain until module is upgraded
+- **Automatic Backup**: Creates timestamped backups before any modification
+- **Rollback on Error**: Automatically restores from backup if conversion fails
+- **Manual Recovery**: Backups retained indefinitely for manual intervention
+- **Original Views Preserved**: Studio views remain until module is upgraded
 - **Error Handling**: Graceful error handling with informative messages
-- **Logging**: Failed cleanups are logged for review
+- **Detailed Logging**: All operations logged with success/failure status
 
 ## Best Practices
 

@@ -51,6 +51,7 @@
             <field name="res_model">ir.ui.view</field>
             <field name="view_mode">list,form</field>
             <field name="context">{'search_default_studio_views': 1, 'search_default_not_converted': 1}</field>
+            <field name="groups_id" eval="[(4, ref('base.group_system'))]"/>
             <field name="help" type="html">
                 <p class="o_view_nocontent_smiling_face">
                     No Studio views found
@@ -70,6 +71,7 @@
             <field name="target">new</field>
             <field name="binding_model_id" ref="base.model_ir_ui_view"/>
             <field name="binding_view_types">list,form</field>
+            <field name="groups_id" eval="[(4, ref('base.group_system'))]"/>
         </record>
 
     </data>

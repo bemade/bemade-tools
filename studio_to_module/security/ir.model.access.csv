@@ -1,3 +1,4 @@
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_studio_view_converter,access_studio_view_converter,model_studio_view_converter,base.group_system,1,1,1,1
+access_studio_view_converter_preview,access_studio_view_converter_preview,model_studio_view_converter_preview,base.group_system,1,1,1,1
 access_studio_view_converter_confirm,access_studio_view_converter_confirm,model_studio_view_converter_confirm,base.group_system,1,1,1,1
