@@ -72,7 +72,6 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
         SELECT
             T0.CardCode,
             T0.ShipType,
-            T0.u_fcsdk_shipviaacct,
             T1.TrnspName
         FROM
             OCRD T0
@@ -82,7 +81,6 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
             T0.shiptype = T1.trnspcode
         WHERE
             T0.shiptype is not null
-            OR T0.u_fcsdk_shipviaacct is not null
         """
         cr.execute(SQL(sql))
         data = cr.dictfetchall()
@@ -92,7 +90,6 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
         for row in data:
             cardcode = row["cardcode"]
             trnspname = row.get("trnspname", "")
-            u_fcsdk_shipviaacct = row.get("u_fcsdk_shipviaacct", "")
             shiptype = row["shiptype"]
 
             # Extract unique delivery carriers and link the unique name to its matching
@@ -107,7 +104,7 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
 
             # Extract account numbers
             accounts = set()
-            for account_string in [u_fcsdk_shipviaacct, trnspname]:
+            for account_string in [trnspname]:
                 account = self._extract_account(account_string)
                 if account:
                     accounts.add(account)

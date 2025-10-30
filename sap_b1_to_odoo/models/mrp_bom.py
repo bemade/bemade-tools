@@ -52,11 +52,15 @@ class SapBomImporter(models.AbstractModel):
         component_vals = []
         _logger.info(f"Importing {len(sap_bom_lines)} BOM lines...")
         for line in sap_bom_lines:
-            if not line["code"]:
+            if (
+                not line["code"]
+                or line["code"] not in odoo_products
+                or line["quantity"] <= 0
+            ):
                 continue
             component_vals.append(
                 {
-                    "product_id": odoo_products[line["code"]].product_variant_id.id,
+                    "product_id": odoo_products[line["code"]].id,
                     "product_qty": line["quantity"],
                     "sequence": line["childnum"],
                     "bom_id": boms_by_code[line["father"]].id,

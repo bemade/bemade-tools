@@ -65,11 +65,11 @@ class SapProductImporter(models.AbstractModel):
                 env = api.Environment(cr, uid, context)
                 product_vals = []
                 for sap_product in chunk:
-                    country_of_origin = sap_product["u_fcsdk_coo"]
-                    if country_of_origin:
-                        country_of_origin = env["res.country"].search(
-                            [("code", "=", country_of_origin)]
-                        )
+                    # # country_of_origin = sap_product["u_fcsdk_coo"]
+                    # if country_of_origin:
+                    #     country_of_origin = env["res.country"].search(
+                    #         [("code", "=", country_of_origin)]
+                    #     )
                     categ = (
                         categories_map[sap_product["itmsgrpcod"]]
                         if sap_product["itmsgrpcod"]
@@ -87,10 +87,10 @@ class SapProductImporter(models.AbstractModel):
                         "type": "consu",
                         "is_storable": True,
                         "company_id": env.company.id,
-                        "hs_code": sap_product["u_fcsdk_hst"] or None,
-                        "country_of_origin": country_of_origin
-                        and country_of_origin.id
-                        or None,
+                        # "hs_code": sap_product["u_fcsdk_hst"] or None,
+                        # "country_of_origin": country_of_origin
+                        # and country_of_origin.id
+                        # or None,
                     }
                     if categ:
                         vals["categ_id"] = categ

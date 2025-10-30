@@ -9,15 +9,17 @@ _logger = logging.getLogger(__name__)
 class PurchaseOrder(models.Model):
     _inherit = "purchase.order"
 
-    sap_docentry = fields.Integer(index="btree", string="SAP Document Entry", copy=False)
+    sap_docentry = fields.Integer(
+        index="btree", string="SAP Document Entry", copy=False
+    )
     sap_docnum = fields.Integer(index="btree", string="SAP Document Number", copy=False)
     sap_atcentry = fields.Integer(index="btree", copy=False)
 
     _sql_constraints = [
         (
-            "sap_docnum_unique",
-            "EXCLUDE USING btree (sap_docnum WITH =) WHERE (sap_docnum != 0)",
-            "SAP docnum must be unique when set!",
+            "sap_docentry_unique",
+            "EXCLUDE USING btree (sap_docentry WITH =) WHERE (sap_docentry != 0)",
+            "SAP docentry must be unique when set!",
         )
     ]
 

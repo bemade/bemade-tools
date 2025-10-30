@@ -66,7 +66,15 @@ class SapResPartnerImporter(models.AbstractModel):
 
     def _import_octg(self, cr):
         """Import payment terms."""
-        cr.execute("SELECT * from octg")
+        existing_groupnums = tuple(
+            self.env["account.payment.term"]
+            .search([("sap_groupnum", "!=", False)])
+            .mapped("sap_groupnum")
+        )
+        if existing_groupnums:
+            cr.execute(f"SELECT * from octg where groupnum not in {existing_groupnums}")
+        else:
+            cr.execute("SELECT * from octg")
         sap_terms = cr.dictfetchall()
         vals = []
         for term in sap_terms:
@@ -421,7 +429,16 @@ class SapResPartnerImporter(models.AbstractModel):
 
     @api.model
     def _get_sap_partners_crd1(self, cr):
-        cr.execute(f"SELECT * FROM crd1")
+        self.env.cr.execute(
+            "SELECT sap_parent_card FROM res_partner WHERE sap_parent_card is not null"
+        )
+        existing_partners = self.env.cr.fetchall()
+        names = tuple([partner[0] for partner in existing_partners])
+
+        if names:
+            cr.execute(SQL("SELECT * FROM crd1 WHERE cardcode not in %s", names))
+        else:
+            cr.execute("SELECT * FROM crd1")
         sap_addresses = cr.dictfetchall()
         return sap_addresses
 

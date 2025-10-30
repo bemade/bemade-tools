@@ -218,6 +218,8 @@ class SapDatabase(models.Model):
         self.env.cr.commit()
         self.action_import_products()
         self.env.cr.commit()
+        self.action_import_customer_product_codes()
+        self.env.cr.commit()
         self.action_import_boms()
         self.env.cr.commit()
         self.action_import_carrier_accounts()
@@ -230,8 +232,19 @@ class SapDatabase(models.Model):
         self.env.cr.commit()
         self.action_import_sales_orders()
         self.env.cr.commit()
+        self.action_import_quotations()
+        self.env.cr.commit()
         self.action_import_purchase_orders()
         self.env.cr.commit()
+        self.action_import_orderpoints()
+        self.env.cr.commit()
+        self.action_import_invoices()
+        self.env.cr.commit()
+        self.action_import_bills()
+        self.env.cr.commit()
+        # self.action_import_attachments()
+        # self.env.cr.commit()
+
         _logger.info("Successfully completed SAP record import.")
 
     def action_delete_all(self):

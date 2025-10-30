@@ -22,9 +22,9 @@ class SalesOrder(models.Model):
 
     _sql_constraints = [
         (
-            "sap_docnum_unique",
-            "EXCLUDE USING btree (sap_docnum WITH =) WHERE (sap_docnum != 0)",
-            "Another sale order with this docnum already exists when set",
+            "sap_docentry_unique",
+            "EXCLUDE USING btree (sap_docentry WITH =) WHERE (sap_docentry != 0)",
+            "Another sale order with this docentry already exists when set",
         )
     ]
 
@@ -102,7 +102,7 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     def import_sales_orders(self, cr):
         self._uppercase_all_cardcodes(cr)
-        self._import_utm_sources(cr)
+        # self._import_utm_sources(cr)
         self._import_all(cr)
 
     @api.model
@@ -210,69 +210,42 @@ class SapSaleOrderImporter(models.AbstractModel):
 
     @api.model
     def init_pricelists(self):
-        cad_pricelist = self.env["product.pricelist"].search(
-            [
-                ("currency_id.name", "=", "CAD"),
-                ("company_id", "=", self.env.company.id),
-                ("name", "=", "Default CAD Pricelist"),
-            ]
-        )
-        usd_pricelist = self.env["product.pricelist"].search(
-            [
-                ("currency_id.name", "=", "USD"),
-                ("company_id", "=", self.env.company.id),
-                ("name", "=", "Default USD Pricelist"),
-            ]
-        )
-        if not cad_pricelist:
-            self.env["product.pricelist"].create(
-                {
-                    "name": "Default CAD Pricelist",
-                    "currency_id": self.env["res.currency"]
-                    .search([("name", "=", "CAD")])
-                    .id,
-                }
-            )
-        if not usd_pricelist:
-            self.env["product.pricelist"].create(
-                {
-                    "name": "Default USD Pricelist",
-                    "currency_id": self.env["res.currency"]
-                    .search([("name", "=", "USD")])
-                    .id,
-                }
-            )
+        currencies = self.env["res.currency"].search([])
+        for currency in currencies:
+            curr_name = currency.name
+            pricelist_name = f"Default {curr_name} Pricelist"
+            if not self.env["product.pricelist"].search(
+                [("name", "=", pricelist_name)]
+            ):
+                self.env["product.pricelist"].create(
+                    {
+                        "name": pricelist_name,
+                        "currency_id": currency.id,
+                        "company_id": self.env.company.id,
+                    }
+                )
 
     @api.model
     def _get_order_vals(self, sap_order_rows, sap_orders, sap_table):
         def _get_pricelists_dict():
-            cad_pricelist = self.env["product.pricelist"].search(
-                [
-                    ("currency_id.name", "=", "CAD"),
-                    ("company_id", "=", self.env.company.id),
-                    ("name", "=", "Default CAD Pricelist"),
-                ]
+            pricelists_dict = {}
+            pricelists = self.env["product.pricelist"].search(
+                [("name", "ilike", "Default%Pricelist")]
             )
-            usd_pricelist = self.env["product.pricelist"].search(
-                [
-                    ("currency_id.name", "=", "USD"),
-                    ("company_id", "=", self.env.company.id),
-                    ("name", "=", "Default USD Pricelist"),
-                ]
-            )
-            pricelists_dict = {
-                "CAD": cad_pricelist,
-                "USD": usd_pricelist,
-            }
+            for pricelist in pricelists:
+                pricelists_dict[pricelist.currency_id.name] = pricelist
             self.env["product.pricelist"].flush_model()
             self.env.cr.commit()
             return pricelists_dict
 
         def _get_pricelist(pricelists, doccur):
-            if doccur == "USD":
-                return pricelists["USD"]
-            else:
-                return pricelists["CAD"]
+            # if doccur == "USD":
+            #     return pricelists["USD"]
+            # else:
+            #     return pricelists["CAD"]
+            if doccur in pricelists:
+                return pricelists[doccur]
+            return pricelists["USD"]
 
         def _get_carriers_dict():
             return {
@@ -317,12 +290,13 @@ class SapSaleOrderImporter(models.AbstractModel):
             )
             terms = terms_dict.get(order["groupnum"])
             user = sap_users_dict.get(order["slpcode"], False)
-            source = sources_dict.get(order["u_fcsdk_source"], False)
+            # source = sources_dict.get(order["u_fcsdk_source"], False)
             carrier = carriers_dict.get(order["trnspcode"])
             rows = order_rows_dict.get(order["docentry"])
             row_vals = [
                 Command.create(self._get_row_vals(row, products_dict, sap_table))
                 for row in (rows or [])
+                if row.get("itemcode") or row.get("linetext")
             ]
             vals = {
                 "sap_docnum": order["docnum"],
@@ -339,7 +313,7 @@ class SapSaleOrderImporter(models.AbstractModel):
                 "picking_policy": self._get_picking_policy(order),
                 "carrier_id": carrier and carrier.id,
                 "order_line": row_vals,
-                "source_id": source,
+                # "source_id": source,
                 "user_id": user,
             }
             if order["docstatus"] == "C":

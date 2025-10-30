@@ -17,6 +17,9 @@ class SapCustomerProductCodeImporter(models.AbstractModel):
             "SELECT * FROM OSCN WHERE substitute is not null AND substitute <> ''"
         )
         sap_codes = cr.dictfetchall()
+        if not sap_codes:
+            _logger.info("No customer product codes to import.")
+            return
         _logger.info(f"Importing {len(sap_codes)} customer product codes...")
         product_dict = self._get_products_dict(sap_codes)
         partners_dict = self._get_partners_dict(sap_codes)
