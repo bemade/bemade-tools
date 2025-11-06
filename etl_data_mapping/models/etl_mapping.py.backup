@@ -1,0 +1,362 @@
+"""ETL Mapping - Abstract model for ETL data mappings
+
+This module provides the base functionality for ETL mappings between
+external databases and Odoo models.
+"""
+
+from odoo import models, api, fields
+from# -*- coding: utf-8 -*-
+import logging
+from abc import ABC, abstractmethod
+from odoo.tools.sql import SQL
+
+_logger = logging.getLogger(__name__)
+
+
+class ETLMapping(ABC):
+    """Abstract base class for ETL mappings (Pure Python, not an Odoo model)
+
+    This class provides the base functionality for ETL (Extract, Transform, Load)
+    operations. Subclasses should define:
+        - _source_table: name of the source table
+        - _target_model: name of the target Odoo model
+        - _source_schema: optional schema name for source table
+        - _external_database_xmlid: XML ID of the external database config
+        And ETLField attributes for field mappings
+    
+    Usage:
+        class SAPProductMapping(ETLMapping):
+            _source_table = 'oitm'
+            _external_database_xmlid = 'sap.external_db'
+            _target_model = 'product.product'
+            
+            itemcode = ETLField(source='itemcode', target='default_code')
+        
+        # Run migration
+        SAPProductMapping.run_migration(env)
+        
+        # Or run all mappings in dependency order
+        ETLMapping.run_all_migrations(env)
+    """
+
+    # Required class attributes (subclasses must override)
+    _source_table: str = None
+    _target_model: str = None
+    _external_database_xmlid: str = None
+    
+    # Optional class attributes
+    _source_schema: str = None
+
+    @classmethod
+    def _get_external_database(cls):
+        """Get the external database record
+
+        Returns:
+            etl.external.database record
+        """
+        if not self._external_database_xmlid:
+            raise ValueError(
+                f"No _external_database_xmlid defined on {self._name}. "
+                f"Set _external_database_xmlid class attribute."
+            )
+
+        return self.env.ref(self._external_database_xmlid)
+
+    @api.model
+    def _get_external_cursor(self):
+        """Get a cursor to the external database
+
+        Returns:
+            Database cursor for external database
+        """
+        external_db = self._get_external_database()
+        return external_db.get_cursor()
+
+    @api.model
+    def _get_etl_fields(self):
+        """Get all ETLField fields defined on this model
+
+        Returns:
+            dict: {field_name: field_object} for all ETLFields
+        """
+        etl_fields = {}
+        for field_name, field in self._fields.items():
+            if field.type == "etl_field":
+                etl_fields[field_name] = field
+        return etl_fields
+
+    @api.model
+    def _build_select_query(self, context=None):
+        """Build SELECT query from ETLField definitions
+
+        Args:
+            context (dict): Optional context with query modifiers:
+                - source_filter: WHERE clause condition
+                - order_by: ORDER BY clause
+                - limit: LIMIT clause value
+                - offset: OFFSET clause value
+
+        Returns:
+            str: SQL SELECT query
+        """
+        if not self._source_table:
+            raise ValueError(f"No _source_table defined on {self._name}")
+
+        etl_fields = self._get_etl_fields()
+        if not etl_fields:
+            raise ValueError(f"No ETLField fields defined on {self._name}")
+
+        # Build column list from source attributes
+        columns = []
+        for field_name, field in etl_fields.items():
+            if field.source:
+                columns.append(field.source)
+
+        if not columns:
+            raise ValueError(f"No source columns defined in ETLFields on {self._name}")
+
+        # Build query
+        column_list = ", ".join(columns)
+
+        # Add schema prefix if specified
+        if self._source_schema:
+            table_name = f"{self._source_schema}.{self._source_table}"
+        else:
+            table_name = self._source_table
+
+        # Build base query as SQL object
+        from odoo.tools.sql import SQL
+        query = SQL(
+            "SELECT %s FROM %s",
+            SQL(column_list),
+            SQL.identifier(table_name) if '.' not in table_name else SQL(table_name)
+        )
+
+        # Add WHERE clause from context
+        ctx = context or self.env.context
+        if ctx.get('source_filter'):
+            filter_clause = ctx['source_filter']
+            if isinstance(filter_clause, SQL):
+                # SQL object - safe and composable
+                query = SQL("%s WHERE %s", query, filter_clause)
+            else:
+                # String - for backward compatibility (but not recommended)
+                query = SQL("%s WHERE %s", query, SQL(filter_clause))
+
+        # Add ORDER BY clause from context
+        if ctx.get('order_by'):
+            order_clause = ctx['order_by']
+            if isinstance(order_clause, SQL):
+                query = SQL("%s ORDER BY %s", query, order_clause)
+            else:
+                query = SQL("%s ORDER BY %s", query, SQL(order_clause))
+
+        # Add LIMIT clause from context
+        if ctx.get('limit'):
+            query = SQL("%s LIMIT %s", query, int(ctx['limit']))
+
+        # Add OFFSET clause from context
+        if ctx.get('offset'):
+            query = SQL("%s OFFSET %s", query, int(ctx['offset']))
+
+        _logger.debug(f"Generated query: {query.code}")
+        return query
+
+    def extract(self):
+        """Extract data from external database
+
+        This method:
+        1. Builds a SELECT query from ETLField definitions
+        2. Executes the query on the external database
+        3. Returns the results as a list of dictionaries
+
+        Context parameters:
+            - source_filter: WHERE clause condition
+            - order_by: ORDER BY clause
+            - limit: LIMIT clause value
+            - offset: OFFSET clause value
+
+        Returns:
+            list: List of dictionaries with extracted data
+        """
+        # Build the query with context parameters
+        query = self._build_select_query(context=self.env.context)
+
+        # Execute on external database
+        with self._get_external_cursor() as cr:
+            _logger.info(f"Extracting data from {self._source_table}")
+            # SQL object provides .code and .params
+            cr.execute(query.code, query.params)
+            results = cr.dictfetchall()
+            _logger.info(f"Extracted {len(results)} records")
+
+        return results
+
+    def transform(self, extracted_data):
+        """Transform extracted data using ETLField transformations
+
+        This method:
+        1. Applies transformation functions defined in ETLFields
+        2. Maps source field names to target field names
+        3. Returns transformed data ready for loading
+
+        Args:
+            extracted_data (list): List of dictionaries from extract()
+
+        Returns:
+            list: List of dictionaries with transformed data
+        """
+        self.ensure_one()
+
+        etl_fields = self._get_etl_fields()
+        transformed_data = []
+
+        for source_record in extracted_data:
+            target_record = {}
+
+            # Process each ETL field
+            for field_name, field in etl_fields.items():
+                if not field.source or not field.target:
+                    continue
+
+                # Get source value
+                source_value = source_record.get(field.source)
+
+                # Apply transformation if defined
+                if field.transform and callable(field.transform):
+                    try:
+                        transformed_value = field.transform(source_value)
+                    except Exception as e:
+                        _logger.warning(
+                            f"Transform failed for {field_name}: {e}. "
+                            f"Using original value."
+                        )
+                        transformed_value = source_value
+                else:
+                    transformed_value = source_value
+
+                # Map to target field name
+                target_record[field.target] = transformed_value
+
+            transformed_data.append(target_record)
+
+        _logger.info(f"Transformed {len(transformed_data)} records")
+        return transformed_data
+
+    def extract_and_transform(self):
+        """Convenience method to extract and transform in one call
+
+        Returns:
+            list: List of dictionaries with transformed data
+        """
+        self.ensure_one()
+        extracted_data = self.extract()
+        return self.transform(extracted_data)
+
+    def load(self, transformed_data):
+        """Load transformed data into target Odoo model
+
+        This method:
+        1. Creates records in the target model
+        2. Handles duplicates by checking for existing records
+        3. Returns the created/found recordset
+
+        Args:
+            transformed_data (list): List of dictionaries with transformed data
+
+        Context parameters:
+            - batch_size: Number of records to create per batch (default: 100)
+            - update_existing: Update existing records instead of skipping (default: False)
+
+        Returns:
+            recordset: Created/found records in target model
+        """
+        self.ensure_one()
+
+        if not self._target_model:
+            raise ValueError(f"No _target_model defined on {self._name}")
+
+        if not transformed_data:
+            # Return empty recordset
+            return self.env[self._target_model]
+
+        # Get batch size from context
+        batch_size = self.env.context.get('batch_size', 100)
+        update_existing = self.env.context.get('update_existing', False)
+
+        target_model = self.env[self._target_model]
+        created_records = target_model
+
+        # Process in batches
+        for i in range(0, len(transformed_data), batch_size):
+            batch = transformed_data[i:i + batch_size]
+            
+            for record_data in batch:
+                # Check for existing record
+                # Use default_code as unique identifier for products
+                # TODO: Make this configurable per mapping
+                existing = None
+                if 'default_code' in record_data and record_data['default_code']:
+                    existing = target_model.search([
+                        ('default_code', '=', record_data['default_code'])
+                    ], limit=1)
+
+                if existing:
+                    if update_existing:
+                        existing.write(record_data)
+                        created_records |= existing
+                    else:
+                        # Skip duplicate
+                        created_records |= existing
+                else:
+                    # Create new record
+                    new_record = target_model.create(record_data)
+                    created_records |= new_record
+
+            _logger.info(f"Loaded batch {i // batch_size + 1}: {len(batch)} records")
+
+        _logger.info(f"Load complete: {len(created_records)} records")
+        return created_records
+
+    def run_migration(self):
+        """Run the complete ETL pipeline: extract, transform, and load
+
+        Returns:
+            dict: Migration statistics with keys:
+                - created: Number of records created
+                - updated: Number of records updated
+                - skipped: Number of records skipped
+                - total: Total records processed
+        """
+        self.ensure_one()
+
+        _logger.info(f"Starting migration for {self._name}")
+
+        # Track counts
+        initial_count = self.env[self._target_model].search_count([])
+
+        # Extract and transform
+        transformed_data = self.extract_and_transform()
+
+        # Load
+        result_records = self.load(transformed_data)
+
+        # Calculate statistics
+        final_count = self.env[self._target_model].search_count([])
+        created = final_count - initial_count
+        total = len(transformed_data)
+        skipped = total - created
+
+        stats = {
+            'created': created,
+            'updated': 0,  # TODO: Track updates separately
+            'skipped': skipped,
+            'total': total,
+        }
+
+        _logger.info(
+            f"Migration complete: {stats['created']} created, "
+            f"{stats['skipped']} skipped, {stats['total']} total"
+        )
+
+        return stats
