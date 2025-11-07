@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional
 from fuzzywuzzy import fuzz, process
 from odoo import api, Command, fields, models
 from odoo.addons.sap_b1_to_odoo.tools import PagingIterator, fix_tz
+from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
 from odoo.modules.registry import Registry
 from odoo.tools.sql import SQL
 

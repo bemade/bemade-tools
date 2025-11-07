@@ -1,0 +1,979 @@
+"""Sales Order ETL Pipelines
+
+This module contains 4 ETL pipelines for importing sales orders from SAP B1:
+1. Sale Order Headers (ORDR) - Creates sale.order records without lines
+2. Product Lines (RDR1) - Creates sale.order.line records for products
+3. Text Lines (RDR10) - Creates sale.order.line records for text/notes
+4. Post-Processor - Confirms orders, sets quantities, validates pickings, etc.
+
+This replaces the legacy SapSaleOrderImporter with a declarative ETL approach.
+"""
+import logging
+from typing import Dict, List, Any
+from fuzzywuzzy import process
+
+from odoo import api, models
+from odoo.tools.sql import SQL
+
+from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
+from odoo.addons.sap_b1_to_odoo.tools import fix_tz
+
+_logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Pipeline 1: Sale Order Headers (ORDR)
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="sale.order",
+    importer_name="sale.order.header.importer",
+    sap_source="ordr",
+    depends_on=[
+        "res.partner.company.importer",
+        "account.payment.term.importer",
+        "res.users.importer",
+    ],
+    multiprocessing_threshold=500,
+    chunk_size=500,
+    max_workers=8,
+)
+class SaleOrderHeaderImporter(models.AbstractModel):
+    _name = "sale.order.header.importer"
+    _description = "SAP Sales Order Header Importer (ORDR)"
+
+    _lookup_cache = {}
+
+    @ETL.extract("ordr")
+    def extract_headers(self, ctx: ETLContext) -> List[Dict]:
+        """Extract sales order headers from SAP ORDR table."""
+        # Uppercase cardcodes for consistency
+        ctx.cr.execute("UPDATE ordr SET cardcode = UPPER(cardcode)")
+
+        # Get existing orders (idempotence)
+        ctx.env.cr.execute(
+            "SELECT DISTINCT sap_docnum FROM sale_order WHERE sap_docnum IS NOT NULL"
+        )
+        existing_docnums = tuple(row[0] for row in ctx.env.cr.fetchall())
+        _logger.info(f"Found {len(existing_docnums)} existing sales orders.")
+
+        # Extract new order headers
+        sql = "SELECT * FROM ordr"
+        if existing_docnums:
+            sql += " WHERE docnum NOT IN %s"
+            ctx.cr.execute(SQL(sql, existing_docnums))
+        else:
+            ctx.cr.execute(sql)
+
+        headers = ctx.cr.dictfetchall()
+        _logger.info(f"Extracted {len(headers)} new order headers from ORDR.")
+
+        if not headers:
+            # Initialize empty cache for transform phase
+            SaleOrderHeaderImporter._lookup_cache = {
+                "partners_map": {},
+                "partner_addresses_map": {},
+                "contacts_map": {},
+                "users_map": {},
+                "terms_map": {},
+                "pricelists_map": {},
+                "carriers_map": {},
+                "company_id": ctx.env.company.id,
+            }
+            return []
+
+        # Pre-compute lookups
+        _logger.info("Pre-computing lookup dictionaries...")
+
+        # Partners, contacts, users, terms, pricelists, carriers
+        cardcodes = [h["cardcode"] for h in headers]
+        partners = ctx.env["res.partner"].search(
+            [("sap_card_code", "in", cardcodes), ("active", "in", [True, False])]
+        )
+        partners_map = {partner.sap_card_code: partner.id for partner in partners}
+        
+        # Pre-compute partner addresses (delivery and invoice) for all partners
+        partner_addresses_map = {}
+        for partner in partners:
+            # Get all potential address partners (commercial + children)
+            all_partners = partner.commercial_partner_id | partner.commercial_partner_id.child_ids
+            
+            # Find delivery addresses
+            delivery_partners = all_partners.filtered(lambda p: p.type == "delivery")
+            invoice_partners = all_partners.filtered(lambda p: p.type == "invoice")
+            
+            # Store as dict of address type -> list of (id, address_string)
+            partner_addresses_map[partner.id] = {
+                "delivery": [
+                    (p.id, self._extract_address_string(p)) 
+                    for p in delivery_partners
+                ],
+                "invoice": [
+                    (p.id, self._extract_address_string(p)) 
+                    for p in invoice_partners
+                ],
+                "commercial_id": partner.commercial_partner_id.id,
+            }
+
+        cntctcodes = [h["cntctcode"] for h in headers if h.get("cntctcode")]
+        contacts = ctx.env["res.partner"].search(
+            [("sap_cntct_code", "in", cntctcodes), ("active", "in", [True, False])]
+        )
+        contacts_map = {contact.sap_cntct_code: contact.parent_id.id if contact.parent_id else contact.id for contact in contacts}
+
+        slpcodes = [h["slpcode"] for h in headers if h.get("slpcode")]
+        users = ctx.env["res.users"].search(
+            [("sap_slpcode", "in", slpcodes), ("active", "in", [False, True])]
+        )
+        users_map = {user.sap_slpcode: user.id for user in users}
+
+        groupnums = [h["groupnum"] for h in headers if h.get("groupnum")]
+        terms = ctx.env["account.payment.term"].search(
+            [("sap_groupnum", "in", groupnums)]
+        )
+        terms_map = {term.sap_groupnum: term.id for term in terms}
+
+        cad_pricelist = ctx.env["product.pricelist"].search(
+            [
+                ("currency_id.name", "=", "CAD"),
+                ("company_id", "=", ctx.env.company.id),
+                ("name", "=", "Default CAD Pricelist"),
+            ],
+            limit=1,
+        )
+        usd_pricelist = ctx.env["product.pricelist"].search(
+            [
+                ("currency_id.name", "=", "USD"),
+                ("company_id", "=", ctx.env.company.id),
+                ("name", "=", "Default USD Pricelist"),
+            ],
+            limit=1,
+        )
+        pricelists_map = {
+            "CAD": cad_pricelist.id if cad_pricelist else False,
+            "USD": usd_pricelist.id if usd_pricelist else False,
+        }
+
+        carriers = ctx.env["sap.transporter"].search([])
+        carriers_map = {
+            tpt.sap_trnspcode: tpt.delivery_carrier_id.id
+            for tpt in carriers
+            if tpt.delivery_carrier_id
+        }
+
+        # Store in cache
+        SaleOrderHeaderImporter._lookup_cache = {
+            "partners_map": partners_map,
+            "partner_addresses_map": partner_addresses_map,
+            "contacts_map": contacts_map,
+            "users_map": users_map,
+            "terms_map": terms_map,
+            "pricelists_map": pricelists_map,
+            "carriers_map": carriers_map,
+            "company_id": ctx.env.company.id,
+        }
+        _logger.info("Lookup dictionaries ready.")
+
+        return headers
+    
+    @staticmethod
+    def _extract_address_string(partner_record) -> str:
+        """Extract address string from partner record."""
+        parts = ["street", "street2", "city", "state", "zip", "country"]
+        address = " ".join(
+            [
+                str(getattr(partner_record, part, "") or "").strip()
+                for part in parts
+                if getattr(partner_record, part, False)
+            ]
+        )
+        return address
+
+    @ETL.transform()
+    def transform_headers(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform SAP order headers into Odoo sale.order values."""
+        headers = extracted["extract_headers"]
+        cache = SaleOrderHeaderImporter._lookup_cache
+
+        if not headers:
+            _logger.info("No headers to transform.")
+            return []
+
+        order_vals = []
+        for header in headers:
+            # Get partner ID (contact or company)
+            partner_id = self._get_partner_id(header, cache)
+            if not partner_id:
+                _logger.warning(
+                    f"Skipping order {header['docnum']}: partner not found "
+                    f"(cardcode={header['cardcode']}, cntctcode={header.get('cntctcode')})"
+                )
+                continue
+
+            # Get shipping and invoice addresses
+            partner_shipping_id = self._find_partner_address_id(
+                header, partner_id, "delivery", cache
+            )
+            partner_invoice_id = self._find_partner_address_id(
+                header, partner_id, "invoice", cache
+            )
+
+            # Get pricelist based on currency
+            pricelist_id = cache["pricelists_map"].get(
+                header["doccur"], cache["pricelists_map"].get("CAD")
+            )
+
+            # Build order values (WITHOUT order_line field)
+            vals = {
+                "sap_docnum": header["docnum"],
+                "sap_docentry": header["docentry"],
+                "sap_atcentry": header["atcentry"],
+                "partner_id": partner_id,
+                "pricelist_id": pricelist_id,
+                "partner_invoice_id": partner_invoice_id,
+                "partner_shipping_id": partner_shipping_id,
+                "payment_term_id": cache["terms_map"].get(header["groupnum"]),
+                "date_order": fix_tz(header["docdate"]),
+                "commitment_date": fix_tz(header["docduedate"]),
+                "client_order_ref": header["numatcard"] or "N/A",
+                "picking_policy": "direct" if header["partsupply"] == "Y" else "direct",
+                "user_id": cache["users_map"].get(header["slpcode"]),
+                "carrier_id": cache["carriers_map"].get(header["trnspcode"]),
+            }
+
+            # Set invoice status for closed orders
+            if header["docstatus"] == "C":
+                vals["invoice_status"] = "invoiced"
+
+            order_vals.append(vals)
+
+        _logger.info(f"Transformed {len(order_vals)} order headers.")
+        return order_vals
+
+    @ETL.load()
+    def load_headers(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load order headers into Odoo."""
+        order_vals = transformed["transform_headers"]
+
+        if order_vals:
+            orders = ctx.env["sale.order"].create(order_vals)
+            _logger.info(f"Created {len(orders)} order headers.")
+        else:
+            _logger.info("No new order headers to create.")
+
+    # Helper methods
+
+    @staticmethod
+    def _get_partner_id(header: Dict, cache: Dict) -> int:
+        """Get partner ID from header, preferring contact's parent over company."""
+        # If there's a contact set, use its parent (the company)
+        if header.get("cntctcode"):
+            contact_parent_id = cache["contacts_map"].get(header["cntctcode"])
+            if contact_parent_id:
+                return contact_parent_id
+
+        # Otherwise use company directly
+        cardcode = header["cardcode"]
+        return (
+            cache["partners_map"].get(cardcode)
+            or cache["partners_map"].get(cardcode.upper())
+            or cache["partners_map"].get(cardcode.lower())
+        )
+
+    @staticmethod
+    def _find_partner_address_id(header: Dict, partner_id: int, address_type: str, cache: Dict) -> int:
+        """Find partner address ID by type using fuzzy matching on pre-computed data."""
+        # Get SAP address
+        sap_address = header["address2"] if address_type == "delivery" else header["address"]
+        if sap_address:
+            sap_address = sap_address.replace("\r\n", " ")
+
+        # Get pre-computed addresses for this partner
+        partner_addresses_data = cache["partner_addresses_map"].get(partner_id, {})
+        potential_addresses = partner_addresses_data.get(address_type, [])
+        commercial_id = partner_addresses_data.get("commercial_id", partner_id)
+
+        # Use fuzzy matching if multiple addresses and SAP address provided
+        if len(potential_addresses) > 1 and sap_address:
+            # Build dict of address_string -> partner_id
+            address_to_id = {addr_str: pid for pid, addr_str in potential_addresses}
+            match_result = process.extractOne(sap_address, address_to_id.keys())
+            if match_result:
+                matched_address = match_result[0]
+                return address_to_id[matched_address]
+        
+        # Return first address of this type if available
+        if len(potential_addresses) >= 1:
+            return potential_addresses[0][0]  # Return the ID from (id, address_string) tuple
+        
+        # Fallback to commercial partner
+        return commercial_id
+
+
+# =============================================================================
+# Pipeline 2: Sale Order Product Lines (RDR1)
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="sale.order.line",
+    importer_name="sale.order.line.importer",
+    sap_source="rdr1",
+    depends_on=[
+        "sale.order.header.importer",
+        "product.product.importer",
+    ],
+    multiprocessing_threshold=1000,
+    chunk_size=500,
+    max_workers=8,
+)
+class SaleOrderLineImporter(models.AbstractModel):
+    _name = "sale.order.line.importer"
+    _description = "SAP Sales Order Product Line Importer (RDR1)"
+
+    _lookup_cache = {}
+
+    @ETL.extract("rdr1")
+    def extract_lines(self, ctx: ETLContext) -> List[Dict]:
+        """Extract product lines from SAP RDR1 table."""
+        # Get existing lines (idempotence)
+        ctx.env.cr.execute(
+            """
+            SELECT DISTINCT sap_docentry, sap_line_num 
+            FROM sale_order_line 
+            WHERE sap_docentry IS NOT NULL 
+            AND sap_line_num != 0
+            AND sap_table = 'rdr1'
+        """
+        )
+        existing_lines = set(ctx.env.cr.fetchall())
+        _logger.info(f"Found {len(existing_lines)} existing product lines.")
+
+        # Get orders that exist in Odoo
+        ctx.env.cr.execute(
+            "SELECT DISTINCT sap_docentry FROM sale_order WHERE sap_docentry IS NOT NULL"
+        )
+        existing_docentries = tuple(row[0] for row in ctx.env.cr.fetchall())
+
+        if not existing_docentries:
+            _logger.info("No orders found in Odoo. Skipping line import.")
+            return []
+
+        # Extract lines for existing orders
+        ctx.cr.execute(
+            SQL(
+                "SELECT * FROM rdr1 WHERE docentry IN %s ORDER BY docentry, linenum",
+                existing_docentries,
+            )
+        )
+        all_lines = ctx.cr.dictfetchall()
+
+        # Filter out existing lines
+        lines = [
+            line
+            for line in all_lines
+            if (line["docentry"], (line["linenum"] or 0) + 2) not in existing_lines
+        ]
+
+        _logger.info(
+            f"Extracted {len(lines)} new product lines from RDR1 "
+            f"(filtered from {len(all_lines)} total)."
+        )
+
+        if not lines:
+            # Initialize empty cache for transform phase
+            SaleOrderLineImporter._lookup_cache = {
+                "products_map": {},
+                "orders_map": {},
+                "uom_unit_id": ctx.env.ref("uom.product_uom_unit").id,
+            }
+            return []
+
+        # Group lines by order to prevent concurrent updates
+        lines_by_order = {}
+        for line in lines:
+            docentry = line["docentry"]
+            if docentry not in lines_by_order:
+                lines_by_order[docentry] = []
+            lines_by_order[docentry].append(line)
+        
+        _logger.info(f"Grouped into {len(lines_by_order)} orders.")
+
+        # Pre-compute lookups
+        _logger.info("Pre-computing lookup dictionaries...")
+
+        itemcodes = [line["itemcode"] for line in lines]
+        products = ctx.env["product.product"].search(
+            [("sap_item_code", "in", itemcodes), ("active", "in", [False, True])]
+        )
+        products_map = {product.sap_item_code: product.id for product in products}
+
+        docentries = list(lines_by_order.keys())
+        orders = ctx.env["sale.order"].search([("sap_docentry", "in", docentries)])
+        orders_map = {order.sap_docentry: order.id for order in orders}
+
+        SaleOrderLineImporter._lookup_cache = {
+            "products_map": products_map,
+            "orders_map": orders_map,
+            "uom_unit_id": ctx.env.ref("uom.product_uom_unit").id,
+        }
+        _logger.info("Lookup dictionaries ready.")
+
+        # Return list of orders with their lines
+        return [
+            {"docentry": docentry, "lines": order_lines}
+            for docentry, order_lines in lines_by_order.items()
+        ]
+
+    @ETL.transform()
+    def transform_lines(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform SAP product lines into Odoo sale.order.line values."""
+        orders_with_lines = extracted["extract_lines"]
+        cache = SaleOrderLineImporter._lookup_cache
+
+        if not cache:
+            raise RuntimeError("Cache is empty in transform!")
+
+        line_vals = []
+        for order_data in orders_with_lines:
+            docentry = order_data["docentry"]
+            lines = order_data["lines"]
+            
+            order_id = cache["orders_map"].get(docentry)
+            if not order_id:
+                _logger.warning(
+                    f"Skipping {len(lines)} lines: order not found for docentry={docentry}"
+                )
+                continue
+
+            for line in lines:
+                product_id = cache["products_map"].get(line["itemcode"])
+
+                vals = {
+                    "order_id": order_id,
+                    "product_id": product_id if product_id else False,
+                    "product_uom_qty": line["quantity"] if line["quantity"] else 0.0,
+                    "price_unit": line["price"],
+                    "discount": line["discprcnt"],
+                    "sap_line_num": (line["linenum"] or 0) + 2,
+                    "sap_aftlinenum": 0,
+                    "sap_lineseq": 0,
+                    "sap_docentry": line["docentry"],
+                    "sap_table": "rdr1",
+                    "sequence": line["linenum"] * 100 if line["linenum"] else 0,
+                }
+
+                if not product_id:
+                    vals["name"] = line["dscription"] or ""
+                    vals["product_uom_id"] = cache["uom_unit_id"]
+
+                line_vals.append(vals)
+
+        _logger.info(f"Transformed {len(line_vals)} product lines.")
+        return line_vals
+
+    @ETL.load()
+    def load_lines(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load product lines into Odoo."""
+        line_vals = transformed["transform_lines"]
+
+        if line_vals:
+            lines = ctx.env["sale.order.line"].create(line_vals)
+            _logger.info(f"Created {len(lines)} product lines.")
+        else:
+            _logger.info("No new product lines to create.")
+
+
+# =============================================================================
+# Pipeline 3: Sale Order Text Lines (RDR10)
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="sale.order.line",
+    importer_name="sale.order.text.line.importer",
+    sap_source="rdr10",
+    depends_on=["sale.order.header.importer"],
+    multiprocessing_threshold=1000,
+    chunk_size=500,
+    max_workers=8,
+)
+class SaleOrderTextLineImporter(models.AbstractModel):
+    _name = "sale.order.text.line.importer"
+    _description = "SAP Sales Order Text Line Importer (RDR10)"
+
+    _lookup_cache = {}
+
+    @ETL.extract("rdr10")
+    def extract_text_lines(self, ctx: ETLContext) -> List[Dict]:
+        """Extract text lines from SAP RDR10 table."""
+        # Get existing text lines (idempotence)
+        ctx.env.cr.execute(
+            """
+            SELECT DISTINCT sap_docentry, sap_aftlinenum, sap_lineseq 
+            FROM sale_order_line 
+            WHERE sap_docentry IS NOT NULL 
+            AND sap_aftlinenum != 0
+            AND sap_lineseq != 0
+            AND sap_table = 'rdr10'
+        """
+        )
+        existing_lines = set(ctx.env.cr.fetchall())
+        _logger.info(f"Found {len(existing_lines)} existing text lines.")
+
+        # Get orders that exist in Odoo
+        ctx.env.cr.execute(
+            "SELECT DISTINCT sap_docentry FROM sale_order WHERE sap_docentry IS NOT NULL"
+        )
+        existing_docentries = tuple(row[0] for row in ctx.env.cr.fetchall())
+
+        if not existing_docentries:
+            _logger.info("No orders found in Odoo. Skipping text line import.")
+            return []
+
+        # Extract text lines for existing orders
+        ctx.cr.execute(
+            SQL(
+                """
+                SELECT * FROM rdr10 
+                WHERE docentry IN %s 
+                AND linetext IS NOT NULL 
+                AND linetext <> ''
+                ORDER BY docentry, aftlinenum, lineseq
+                """,
+                existing_docentries,
+            )
+        )
+        all_lines = ctx.cr.dictfetchall()
+
+        # Filter out existing lines
+        lines = [
+            line
+            for line in all_lines
+            if (
+                line["docentry"],
+                (line["aftlinenum"] or 0) + 2,
+                (line["lineseq"] or 0) + 2,
+            )
+            not in existing_lines
+        ]
+
+        _logger.info(
+            f"Extracted {len(lines)} new text lines from RDR10 "
+            f"(filtered from {len(all_lines)} total)."
+        )
+
+        if not lines:
+            # Initialize empty cache for transform phase
+            SaleOrderTextLineImporter._lookup_cache = {
+                "orders_map": {},
+            }
+            return []
+
+        # Group lines by order to prevent concurrent updates
+        lines_by_order = {}
+        for line in lines:
+            docentry = line["docentry"]
+            if docentry not in lines_by_order:
+                lines_by_order[docentry] = []
+            lines_by_order[docentry].append(line)
+        
+        _logger.info(f"Grouped into {len(lines_by_order)} orders.")
+
+        # Pre-compute lookups
+        _logger.info("Pre-computing lookup dictionaries...")
+
+        docentries = list(lines_by_order.keys())
+        orders = ctx.env["sale.order"].search([("sap_docentry", "in", docentries)])
+        orders_map = {order.sap_docentry: order.id for order in orders}
+
+        SaleOrderTextLineImporter._lookup_cache = {
+            "orders_map": orders_map,
+        }
+        _logger.info("Lookup dictionaries ready.")
+
+        # Return list of orders with their lines
+        return [
+            {"docentry": docentry, "lines": order_lines}
+            for docentry, order_lines in lines_by_order.items()
+        ]
+
+    @ETL.transform()
+    def transform_text_lines(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform SAP text lines into Odoo sale.order.line values."""
+        orders_with_lines = extracted["extract_text_lines"]
+        cache = SaleOrderTextLineImporter._lookup_cache
+
+        if not cache:
+            raise RuntimeError("Cache is empty in transform!")
+
+        line_vals = []
+        for order_data in orders_with_lines:
+            docentry = order_data["docentry"]
+            lines = order_data["lines"]
+            
+            order_id = cache["orders_map"].get(docentry)
+            if not order_id:
+                _logger.warning(
+                    f"Skipping {len(lines)} text lines: order not found for docentry={docentry}"
+                )
+                continue
+
+            for line in lines:
+                vals = {
+                    "order_id": order_id,
+                    "display_type": "line_note",
+                    "name": line["linetext"] or " ",
+                    "product_id": False,
+                    "product_uom_qty": 0.0,
+                    "price_unit": 0.0,
+                    "sap_line_num": 0,
+                    "sap_aftlinenum": (line["aftlinenum"] or 0) + 2,
+                    "sap_lineseq": (line["lineseq"] or 0) + 2,
+                    "sap_docentry": line["docentry"],
+                    "sap_table": "rdr10",
+                    "sequence": (
+                        line["aftlinenum"] * 100 + line["lineseq"]
+                        if line["aftlinenum"] and line["lineseq"]
+                        else 0
+                    ),
+                }
+
+                line_vals.append(vals)
+
+        _logger.info(f"Transformed {len(line_vals)} text lines.")
+        return line_vals
+
+    @ETL.load()
+    def load_text_lines(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load text lines into Odoo."""
+        line_vals = transformed["transform_text_lines"]
+
+        if line_vals:
+            lines = ctx.env["sale.order.line"].create(line_vals)
+            _logger.info(f"Created {len(lines)} text lines.")
+        else:
+            _logger.info("No new text lines to create.")
+
+
+# =============================================================================
+# Pipeline 4: Sale Order Post-Processor
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="sale.order",
+    importer_name="sale.order.post.processor",
+    sap_source="ordr",
+    depends_on=[
+        "sale.order.line.importer",
+        "sale.order.text.line.importer",
+    ],
+    allow_multiprocessing=False,
+)
+class SaleOrderPostProcessor(models.AbstractModel):
+    _name = "sale.order.post.processor"
+    _description = "SAP Sales Order Post-Processor"
+
+    @ETL.extract("ordr")
+    def extract_sap_order_data(self, ctx: ETLContext) -> Dict[str, Any]:
+        """Extract SAP order status data needed for post-processing."""
+        _logger.info("Extracting SAP order data for post-processing...")
+        
+        # Get closed orders (confirmed and closed, no delivery)
+        ctx.cr.execute(
+            """
+            SELECT docnum FROM ordr 
+            WHERE docstatus = 'C' 
+            AND invntsttus = 'C' 
+            AND canceled = 'N'
+            """
+        )
+        closed_orders = [row[0] for row in ctx.cr.fetchall()]
+        
+        # Get open orders (to confirm)
+        ctx.cr.execute(
+            """
+            SELECT docnum FROM ordr 
+            WHERE canceled='N' AND confirmed='Y' 
+            AND (
+                (docstatus='O' AND invntsttus='O')
+                OR docstatus='C'
+            )
+            """
+        )
+        open_orders = [row[0] for row in ctx.cr.fetchall()]
+        
+        # Get canceled orders
+        ctx.cr.execute(
+            """
+            SELECT docnum FROM ordr
+            WHERE canceled = 'Y' 
+            OR (confirmed='N' AND (docstatus='C' OR invntsttus='C'))
+            """
+        )
+        canceled_orders = [row[0] for row in ctx.cr.fetchall()]
+        
+        # Get SAP line quantities for pickings validation
+        ctx.cr.execute(
+            """
+            SELECT o.docnum, l.itemcode, l.linenum, 
+                   (l.quantity - l.openqty) as quantity
+            FROM ordr o
+            JOIN rdr1 l ON l.docentry = o.docentry
+            WHERE o.docstatus = 'O'
+              AND o.canceled = 'N'
+              AND o.confirmed = 'Y'
+            ORDER BY o.docnum, l.linenum
+            """
+        )
+        sap_line_quantities = ctx.cr.dictfetchall()
+        
+        # Get order dates
+        ctx.cr.execute("SELECT docnum, docdate, createdate FROM ordr")
+        order_dates = ctx.cr.fetchall()
+        
+        _logger.info(
+            f"Extracted: {len(closed_orders)} closed, {len(open_orders)} open, "
+            f"{len(canceled_orders)} canceled, {len(sap_line_quantities)} line quantities, "
+            f"{len(order_dates)} order dates"
+        )
+        
+        return {
+            "closed_orders": closed_orders,
+            "open_orders": open_orders,
+            "canceled_orders": canceled_orders,
+            "sap_line_quantities": sap_line_quantities,
+            "order_dates": order_dates,
+        }
+
+    @ETL.load()
+    def post_process_orders(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Post-process all sales orders using extracted SAP data."""
+        # Get extracted SAP data (no transform phase, so it's in transformed dict)
+        sap_data = transformed.get("extract_sap_order_data", {})
+        
+        _logger.info("Starting post-processing of sales orders...")
+
+        _logger.info("Confirming closed orders (no delivery order)...")
+        self._confirm_closed_orders(sap_data.get("closed_orders", []))
+
+        _logger.info("Setting delivered quantities for closed orders...")
+        self._set_delivered_qty_for_closed_orders(sap_data.get("closed_orders", []))
+
+        _logger.info("Confirming open orders...")
+        self._confirm_open_orders(sap_data.get("open_orders", []))
+
+        _logger.info("Canceling canceled orders...")
+        self._cancel_canceled_orders(sap_data.get("canceled_orders", []))
+
+        _logger.info("Recomputing delivery status for all orders...")
+        self._recompute_delivery_status()
+
+        _logger.info("Validating pickings with SAP quantities...")
+        self._validate_pickings_with_sap_quantities(sap_data.get("sap_line_quantities", []))
+
+        _logger.info("Setting order dates...")
+        self._set_order_dates(sap_data.get("order_dates", []))
+
+        _logger.info("Post-processing complete.")
+
+    @api.model
+    def _confirm_closed_orders(self, closed_orders):
+        """Mark orders as confirmed and closed (no delivery order)."""
+        if closed_orders:
+            _logger.info(
+                f"Marking {len(closed_orders)} orders as confirmed and closed."
+            )
+            self.env.flush_all()
+            self.env.cr.commit()
+            self.env.cr.execute(
+                SQL(
+                    "UPDATE sale_order SET state = 'sale' WHERE sap_docnum IN %s",
+                    tuple(closed_orders),
+                )
+            )
+
+    @api.model
+    def _set_delivered_qty_for_closed_orders(self, closed_orders):
+        """Set delivered quantities equal to ordered quantities for closed orders."""
+        if not closed_orders:
+            return
+
+        _logger.info(f"Setting delivered quantities for {len(closed_orders)} orders")
+
+        orders = self.env["sale.order"].search([("sap_docnum", "in", closed_orders)])
+
+        for order in orders:
+            for line in order.order_line:
+                if line.product_id:
+                    line.write(
+                        {
+                            "qty_delivered": line.product_uom_qty,
+                            "qty_delivered_method": "manual",
+                        }
+                    )
+
+        self.env.cr.commit()
+
+    @api.model
+    def _confirm_open_orders(self, open_orders):
+        """Confirm open orders (creates delivery orders)."""
+
+        # Disable automations during confirmation
+        active_automations = self.env["base.automation"].search([("active", "=", True)])
+        active_automations.active = False
+        self.env["base.automation"].flush_model()
+
+        if open_orders:
+            _logger.info(f"Confirming {len(open_orders)} open orders")
+            orders = self.env["sale.order"].search(
+                [("sap_docnum", "in", open_orders), ("state", "in", ["draft", "sent"])]
+            )
+            for order in orders:
+                try:
+                    order.action_confirm()
+                except Exception as e:
+                    _logger.error(
+                        f"Failed to confirm order {order.name} "
+                        f"(sap_docnum={order.sap_docnum}): {e}"
+                    )
+            self.env.cr.commit()
+
+        active_automations.active = True
+
+    @api.model
+    def _cancel_canceled_orders(self, canceled_orders):
+        """Mark canceled orders as cancelled."""
+        if canceled_orders:
+            _logger.info(f"Cancelling {len(canceled_orders)} cancelled orders")
+            self.env.cr.execute(
+                SQL(
+                    "UPDATE sale_order SET state='cancel' WHERE sap_docnum IN %s",
+                    tuple(canceled_orders),
+                )
+            )
+
+    @api.model
+    def _recompute_delivery_status(self):
+        """Recompute delivery status for all orders."""
+        self.env.flush_all()
+        self.env.cr.execute(
+            """
+            UPDATE sale_order
+            SET delivery_status = CASE
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM sale_order_line
+                    WHERE sale_order_line.order_id = sale_order.id
+                      AND sale_order_line.product_uom_qty != sale_order_line.qty_delivered
+                )
+                THEN 'full'
+                WHEN EXISTS (
+                    SELECT 1 FROM sale_order_line
+                    WHERE sale_order_line.order_id = sale_order.id
+                      AND sale_order_line.qty_delivered > 0
+                )
+                THEN 'partial'
+                ELSE 'pending'
+            END
+            WHERE sap_docentry IS NOT NULL
+        """
+        )
+        self.env.cr.commit()
+
+    @api.model
+    def _validate_pickings_with_sap_quantities(self, sap_lines):
+        """Validate stock pickings based on SAP delivered quantities."""
+        if not sap_lines:
+            return
+
+        # Group lines by order
+        order_lines = {}
+        for line in sap_lines:
+            if line["docnum"] not in order_lines:
+                order_lines[line["docnum"]] = []
+            order_lines[line["docnum"]].append(line)
+
+        # Get corresponding Odoo orders
+        orders = self.env["sale.order"].search(
+            [
+                ("sap_docnum", "in", list(order_lines.keys())),
+                ("state", "=", "sale"),
+            ]
+        )
+
+        # Process each order's pickings
+        for order in orders:
+            pickings = order.picking_ids.filtered(
+                lambda p: p.state in ["waiting", "confirmed", "assigned"]
+            )
+            if not pickings:
+                continue
+
+            sap_lines = order_lines[order.sap_docnum]
+            for picking in pickings:
+                for move in picking.move_ids:
+                    order_line = move.sale_line_id
+                    if not order_line:
+                        move.quantity = 0
+                        continue
+
+                    # Find corresponding SAP line
+                    sap_line = next(
+                        (
+                            l
+                            for l in sap_lines
+                            if l["linenum"] + 2 == order_line.sap_line_num
+                        ),
+                        None,
+                    )
+                    if sap_line:
+                        move.quantity = sap_line["quantity"]
+
+                # Validate picking if any moves have quantities
+                if any(move.quantity > 0 for move in picking.move_ids):
+                    picking.with_context(skip_backorder=True).button_validate()
+
+        _logger.info(
+            f"Validated pickings for {len(orders)} orders based on SAP quantities"
+        )
+
+    @api.model
+    def _set_order_dates(self, sap_orders):
+        """Set order dates from SAP."""
+        if not sap_orders:
+            return
+
+        # Create temp table
+        self.env.cr.execute("DROP TABLE IF EXISTS sap_order_dates")
+        self.env.cr.execute(
+            "CREATE TEMP TABLE sap_order_dates (docnum INT, docdate TIMESTAMP, createdate TIMESTAMP)"
+        )
+
+        # Insert values
+        values = [
+            (
+                order[0],
+                fix_tz(order[1]) if order[1] else None,
+                fix_tz(order[2]) if order[2] else None,
+            )
+            for order in sap_orders
+        ]
+        insert_query = b",".join(
+            self.env.cr.mogrify("(%s, %s, %s)", value) for value in values
+        ).decode("utf-8")
+        self.env.cr.execute(
+            f"INSERT INTO sap_order_dates (docnum, docdate, createdate) VALUES {insert_query}"
+        )
+
+        # Update orders
+        self.env.cr.execute(
+            """
+            UPDATE sale_order orders
+            SET create_date=temp.createdate, date_order=temp.docdate
+            FROM sap_order_dates temp
+            WHERE orders.sap_docnum=temp.docnum
+            """
+        )
+        self.env.cr.commit()
