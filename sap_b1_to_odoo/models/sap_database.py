@@ -6,6 +6,8 @@ from odoo import _, api, fields, models
 from odoo.exceptions import UserError, ValidationError
 from odoo.sql_db import db_connect
 
+from odoo.addons.sap_b1_to_odoo.etl_framework import ETLContext, PipelineOrchestrator
+
 _logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 1000
@@ -139,11 +141,26 @@ class SapDatabase(models.Model):
         ).init_pricelists()
 
     def action_import_users(self) -> dict:
-        """Import SAP salespeople as Odoo users."""
+        """Import SAP salespeople as Odoo users using ETL framework."""
         with self.get_cursor() as cr:
-            self.env["res.users.importer"].with_company(
-                self.env.company
-            ).import_salespeople(cr)
+            from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLExecutor, ETLContext
+            
+            # Get the registered pipeline
+            pipeline = ETL.get_pipeline('res.users')
+            if not pipeline:
+                raise UserError(_("res.users ETL pipeline not found"))
+            
+            # Get importer instance
+            importer = self.env["res.users.importer"].with_company(self.env.company)
+            
+            # Create context and executor
+            ctx = ETLContext(cr=cr, env=self.env)
+            executor = ETLExecutor(pipeline, ctx, importer)
+            
+            # Execute pipeline
+            executor.execute()
+            self.env.cr.commit()
+        
         return self._success_notification()
 
     def action_import_partners(self) -> dict:
@@ -177,11 +194,26 @@ class SapDatabase(models.Model):
         return self._success_notification()
 
     def action_import_payment_terms(self) -> dict:
-        """Import SAP payment terms."""
+        """Import SAP payment terms using ETL framework."""
         with self.get_cursor() as cr:
-            self.env["sap.res.partner.importer"].with_company(
-                self.env.company
-            ).import_payment_terms(cr)
+            from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLExecutor, ETLContext
+            
+            # Get the registered pipeline
+            pipeline = ETL.get_pipeline('account.payment.term')
+            if not pipeline:
+                raise UserError(_("account.payment.term ETL pipeline not found"))
+            
+            # Get importer instance
+            importer = self.env["account.payment.term.importer"].with_company(self.env.company)
+            
+            # Create context and executor
+            ctx = ETLContext(cr=cr, env=self.env)
+            executor = ETLExecutor(pipeline, ctx, importer)
+            
+            # Execute pipeline
+            executor.execute()
+            self.env.cr.commit()
+        
         return self._success_notification()
 
     def action_import_sales_orders(self) -> dict:
@@ -330,32 +362,53 @@ class SapDatabase(models.Model):
         }
 
     def _import_all(self) -> None:
-        """Internal method to import all SAP data in the correct sequence."""
+        """Internal method to import all SAP data using ETL framework.
+        
+        This method uses the PipelineOrchestrator to automatically:
+        1. Resolve dependencies between models
+        2. Execute pipelines in the correct order
+        3. Handle multiprocessing based on data volume
+        4. Commit after each pipeline
+        """
         self.ensure_one()
-        _logger.info("Beginning SAP record import.")
-        self.action_import_users()
-        self.env.cr.commit()
-        self.action_init_pricelists()
-        self.env.cr.commit()
-        self.action_import_partners()
-        self.env.cr.commit()
-        self.action_import_products()
-        self.env.cr.commit()
-        self.action_import_boms()
-        self.env.cr.commit()
-        self.action_import_carrier_accounts()
-        self.env.cr.commit()
-        self.action_import_inventory()
-        self.env.cr.commit()
-        self.action_import_product_pricelist()
-        self.env.cr.commit()
-        self.action_import_payment_terms()
-        self.env.cr.commit()
-        self.action_import_sales_orders()
-        self.env.cr.commit()
-        self.action_import_purchase_orders()
-        self.env.cr.commit()
-        _logger.info("Successfully completed SAP record import.")
+        _logger.info("Beginning SAP record import using ETL framework.")
+        
+        with self.get_cursor() as cr:
+            # Create orchestrator
+            orchestrator = PipelineOrchestrator(self.env)
+            
+            # Execute all registered pipelines
+            # Note: Only res.users is migrated so far, others will use old methods
+            try:
+                orchestrator.execute_all(cr)
+            except Exception as e:
+                _logger.error(f"ETL pipeline execution failed: {e}", exc_info=True)
+                raise
+        
+        # TODO: Remove these as models are migrated to ETL framework
+        # Commented out to allow iterative testing of ETL framework migrations
+        _logger.info("Legacy import methods (commented out during ETL migration)...")
+        # self.action_init_pricelists()
+        # self.env.cr.commit()
+        # self.action_import_partners()
+        # self.env.cr.commit()
+        # self.action_import_products()
+        # self.env.cr.commit()
+        # self.action_import_boms()
+        # self.env.cr.commit()
+        # self.action_import_carrier_accounts()
+        # self.env.cr.commit()
+        # self.action_import_inventory()
+        # self.env.cr.commit()
+        # self.action_import_product_pricelist()
+        # self.env.cr.commit()
+        # NOTE: action_import_payment_terms is now handled by ETL framework
+        # self.action_import_sales_orders()
+        # self.env.cr.commit()
+        # self.action_import_purchase_orders()
+        # self.env.cr.commit()
+        
+        _logger.info("Successfully completed SAP record import (ETL framework only).")
 
     def _delete_all(self) -> None:
         """Internal method to delete all SAP-imported records.

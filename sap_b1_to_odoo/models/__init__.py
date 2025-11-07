@@ -10,6 +10,7 @@ from . import carrier_account
 from . import product_pricelist
 from . import stock_picking
 from . import res_users
+from . import account_payment_term
 from . import customer_product_code
 from . import ir_attachment
 from . import account_move
