@@ -17,6 +17,7 @@ class ResPartner(models.Model):
 
     sap_card_code = fields.Char(index="btree", copy=False)
     sap_parent_card = fields.Char(index="btree", copy=False)
+    sap_address_linenum = fields.Integer(index="btree", copy=False)  # CRD1 linenum for addresses
     sap_cntct_code = fields.Integer(index="btree", copy=False)
     sap_atcentry = fields.Integer(index="btree", copy=False)
     sap_partner_type = fields.Char(index="btree", copy=False)
@@ -369,9 +370,32 @@ class ResPartnerAddressImporter(models.AbstractModel):
         Returns:
             List of address dictionaries from SAP.
         """
+        # Get existing addresses to avoid duplicates
+        # Addresses are uniquely identified by parent cardcode + linenum
+        ctx.env.cr.execute(
+            """
+            SELECT DISTINCT sap_parent_card, sap_address_linenum
+            FROM res_partner 
+            WHERE sap_parent_card IS NOT NULL 
+            AND sap_address_linenum IS NOT NULL
+            """
+        )
+        existing_addresses = set(
+            (row[0], row[1]) for row in ctx.env.cr.fetchall()
+        )
+        _logger.info(f"Found {len(existing_addresses)} existing addresses.")
+
+        # Query SAP
         ctx.cr.execute("SELECT * FROM crd1")
-        sap_addresses = ctx.cr.dictfetchall()
-        _logger.info(f"Extracted {len(sap_addresses)} addresses from SAP CRD1.")
+        all_addresses = ctx.cr.dictfetchall()
+        
+        # Filter out existing addresses based on cardcode + linenum
+        sap_addresses = [
+            addr for addr in all_addresses
+            if (addr["cardcode"], addr["linenum"]) not in existing_addresses
+        ]
+        
+        _logger.info(f"Extracted {len(sap_addresses)} new addresses from SAP CRD1 (filtered from {len(all_addresses)} total).")
 
         # Pre-compute lookup dictionaries in main process (before multiprocessing)
         # Store in class-level cache so they're available to worker processes
@@ -463,6 +487,7 @@ class ResPartnerAddressImporter(models.AbstractModel):
                     "country_id": country_id or False,
                     "state_id": state_id or False,
                     "sap_parent_card": sap_address["cardcode"],
+                    "sap_address_linenum": sap_address["linenum"],
                     "type": address_type,
                     "is_company": False,
                     "user_id": False,
