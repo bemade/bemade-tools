@@ -590,9 +590,7 @@ class ETLExecutor:
             for method in pipeline.load_methods:
                 method.func(importer, ctx, transformed_data)
             
-            print(f"[PID {os.getpid()}] Committing...")
             cr.commit()
-            print(f"[PID {os.getpid()}] Commit complete")
 
 
 # =============================================================================
