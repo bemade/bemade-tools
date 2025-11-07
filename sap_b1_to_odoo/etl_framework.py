@@ -38,6 +38,7 @@ Usage Example:
 import logging
 import multiprocessing
 import os
+import warnings
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -495,31 +496,37 @@ class ETLExecutor:
         )
         
         start_method = multiprocessing.get_start_method()
-        multiprocessing.set_start_method("fork", force=True)
         
-        try:
-            with ProcessPoolExecutor(max_workers=workers) as executor:
-                futures = [
-                    executor.submit(
-                        self._process_chunk_static,
-                        self.ctx.env.cr.dbname,
-                        self.ctx.env.uid,
-                        dict(self.ctx.env.context),
-                        self.importer._name,
-                        chunk,
-                        self.pipeline.target_model,
-                    )
-                    for chunk in chunks
-                ]
-                
-                for i, future in enumerate(futures, 1):
-                    future.result()
-                    _logger.info(f"Completed chunk {i}/{len(chunks)}")
-        except Exception:
-            _logger.error("Multiprocessing execution failed", exc_info=True)
-            raise
-        finally:
-            multiprocessing.set_start_method(start_method, force=True)
+        # Suppress fork warnings from debugpy and other tools
+        # These warnings occur when forking in a multi-threaded process
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=DeprecationWarning)
+            warnings.filterwarnings('ignore', message='.*multi-threaded.*fork.*')
+            multiprocessing.set_start_method("fork", force=True)
+            
+            try:
+                with ProcessPoolExecutor(max_workers=workers) as executor:
+                    futures = [
+                        executor.submit(
+                            self._process_chunk_static,
+                            self.ctx.env.cr.dbname,
+                            self.ctx.env.uid,
+                            dict(self.ctx.env.context),
+                            self.importer._name,
+                            chunk,
+                            self.pipeline.target_model,
+                        )
+                        for chunk in chunks
+                    ]
+                    
+                    for i, future in enumerate(futures, 1):
+                        future.result()
+                        _logger.info(f"Completed chunk {i}/{len(chunks)}")
+            except Exception:
+                _logger.error("Multiprocessing execution failed", exc_info=True)
+                raise
+            finally:
+                multiprocessing.set_start_method(start_method, force=True)
     
     def _create_chunks(self, extracted_data: Dict[str, Any]) -> List[Any]:
         """Split extracted data into chunks for parallel processing.

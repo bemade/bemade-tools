@@ -1,11 +1,17 @@
 import logging
 from typing import Dict, List
 
-from odoo import Command, api, models
+from odoo import Command, api, models, fields
 
 from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
+
+
+class AccountPaymentTerm(models.Model):
+    _inherit = "account.payment.term"
+
+    sap_groupnum = fields.Integer(index="btree", copy=False)
 
 
 @ETL.pipeline(
