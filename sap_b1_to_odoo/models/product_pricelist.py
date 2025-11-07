@@ -1,7 +1,11 @@
-from odoo import models, fields, api, Command
-from odoo.tools.sql import SQL
 import logging
 from datetime import datetime, timezone
+from typing import Dict, List
+
+from odoo import Command, api, fields, models
+from odoo.tools.sql import SQL
+
+from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
 from odoo.addons.sap_b1_to_odoo.tools import fix_tz
 
 utc = timezone.utc
@@ -373,3 +377,82 @@ class ProductPricelistImporter(models.AbstractModel):
                 }
             )
         return vals
+
+
+@ETL.pipeline(
+    target_model="product.pricelist",
+    importer_name="product.pricelist.importer",
+    depends_on=[],
+    allow_multiprocessing=False,  # Small dataset, always single-process
+)
+class ProductPricelistInitImporter(models.AbstractModel):
+    _description = "Initialize Default Pricelists for Active Currencies"
+
+    @ETL.extract("res.currency")
+    def extract_active_currencies(self, ctx: ETLContext) -> List:
+        """Extract active currencies from Odoo (not SAP).
+
+        Args:
+            ctx: ETL context.
+
+        Returns:
+            List of active currency records.
+        """
+        active_currencies = ctx.env["res.currency"].search([("active", "=", True)])
+        _logger.info(f"Found {len(active_currencies)} active currencies.")
+        return active_currencies
+
+    @ETL.transform()
+    def transform_pricelist_vals(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform currencies into pricelist values.
+
+        Args:
+            ctx: ETL context.
+            extracted: Dictionary containing extracted data.
+
+        Returns:
+            List of pricelist value dictionaries for creation.
+        """
+        currencies = extracted["extract_active_currencies"]
+        company = ctx.env.company
+
+        pricelist_vals = []
+        for currency in currencies:
+            pricelist_name = f"Default {currency.name} Pricelist"
+
+            # Check if pricelist already exists
+            existing_pricelist = ctx.env["product.pricelist"].search(
+                [
+                    ("currency_id", "=", currency.id),
+                    ("company_id", "=", company.id),
+                    ("name", "=", pricelist_name),
+                ],
+                limit=1,
+            )
+
+            if not existing_pricelist:
+                pricelist_vals.append(
+                    {
+                        "name": pricelist_name,
+                        "currency_id": currency.id,
+                        "company_id": company.id,
+                    }
+                )
+
+        return pricelist_vals
+
+    @ETL.load()
+    def load_pricelists(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load pricelists into Odoo.
+
+        Args:
+            ctx: ETL context.
+            transformed: Dictionary containing transformed data.
+        """
+        pricelist_vals = transformed["transform_pricelist_vals"]
+
+        if pricelist_vals:
+            pricelists = ctx.env["product.pricelist"].create(pricelist_vals)
+            _logger.info(f"Created {len(pricelists)} default pricelists.")
+        else:
+            _logger.info("No new pricelists to create (all already exist).")

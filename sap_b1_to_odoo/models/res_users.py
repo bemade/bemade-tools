@@ -20,6 +20,7 @@ class Users(models.Model):
 
 @ETL.pipeline(
     target_model="res.users",
+    importer_name="res.users.importer",
     sap_source="oslp",
     depends_on=[],
     allow_multiprocessing=False,  # Small dataset, always single-process

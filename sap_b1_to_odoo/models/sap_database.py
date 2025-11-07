@@ -134,11 +134,28 @@ class SapDatabase(models.Model):
     # Public Action Methods (Called from UI)
     ##################################################################
 
-    def action_init_pricelists(self) -> None:
-        """Initialize default pricelists for all active currencies."""
-        self.env["sap.sale.order.importer"].with_company(
-            self.env.company
-        ).init_pricelists()
+    def action_init_pricelists(self) -> dict:
+        """Initialize default pricelists for all active currencies using ETL framework."""
+        # Note: This doesn't use SAP cursor, just Odoo data
+        from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLExecutor, ETLContext
+        
+        # Get the registered pipeline
+        pipeline = ETL.get_pipeline('product.pricelist.importer')
+        if not pipeline:
+            raise UserError(_("product.pricelist.importer ETL pipeline not found"))
+        
+        # Get importer instance
+        importer = self.env["product.pricelist.importer"].with_company(self.env.company)
+        
+        # Create context (no SAP cursor needed for this one)
+        ctx = ETLContext(cr=None, env=self.env)
+        executor = ETLExecutor(pipeline, ctx, importer)
+        
+        # Execute pipeline
+        executor.execute()
+        self.env.cr.commit()
+        
+        return self._success_notification()
 
     def action_import_users(self) -> dict:
         """Import SAP salespeople as Odoo users using ETL framework."""
@@ -146,9 +163,9 @@ class SapDatabase(models.Model):
             from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLExecutor, ETLContext
             
             # Get the registered pipeline
-            pipeline = ETL.get_pipeline('res.users')
+            pipeline = ETL.get_pipeline('res.users.importer')
             if not pipeline:
-                raise UserError(_("res.users ETL pipeline not found"))
+                raise UserError(_("res.users.importer ETL pipeline not found"))
             
             # Get importer instance
             importer = self.env["res.users.importer"].with_company(self.env.company)
@@ -172,11 +189,26 @@ class SapDatabase(models.Model):
         return self._success_notification()
 
     def action_import_carrier_accounts(self) -> dict:
-        """Import SAP delivery carriers and carrier accounts."""
+        """Import SAP delivery carriers and carrier accounts using ETL framework."""
         with self.get_cursor() as cr:
-            self.env["delivery.carrier.account.importer"].with_company(
-                self.env.company
-            ).import_all(cr)
+            from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLExecutor, ETLContext
+            
+            # Get the registered pipeline
+            pipeline = ETL.get_pipeline('delivery.carrier.importer')
+            if not pipeline:
+                raise UserError(_("delivery.carrier.importer ETL pipeline not found"))
+            
+            # Get importer instance
+            importer = self.env["delivery.carrier.importer"].with_company(self.env.company)
+            
+            # Create context and executor
+            ctx = ETLContext(cr=cr, env=self.env)
+            executor = ETLExecutor(pipeline, ctx, importer)
+            
+            # Execute pipeline
+            executor.execute()
+            self.env.cr.commit()
+        
         return self._success_notification()
 
     def action_import_products(self) -> dict:
@@ -199,9 +231,9 @@ class SapDatabase(models.Model):
             from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLExecutor, ETLContext
             
             # Get the registered pipeline
-            pipeline = ETL.get_pipeline('account.payment.term')
+            pipeline = ETL.get_pipeline('account.payment.term.importer')
             if not pipeline:
-                raise UserError(_("account.payment.term ETL pipeline not found"))
+                raise UserError(_("account.payment.term.importer ETL pipeline not found"))
             
             # Get importer instance
             importer = self.env["account.payment.term.importer"].with_company(self.env.company)

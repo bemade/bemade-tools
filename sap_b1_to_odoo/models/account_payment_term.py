@@ -10,6 +10,7 @@ _logger = logging.getLogger(__name__)
 
 @ETL.pipeline(
     target_model="account.payment.term",
+    importer_name="account.payment.term.importer",
     sap_source="octg",
     depends_on=[],
     allow_multiprocessing=False,  # Small dataset, always single-process
@@ -47,8 +48,18 @@ class AccountPaymentTermImporter(models.AbstractModel):
         """
         sap_terms = extracted["extract_payment_terms"]
 
+        # Get existing payment terms to avoid duplicates
+        existing_terms = ctx.env["account.payment.term"].search([
+            ("sap_groupnum", "!=", False)
+        ])
+        existing_groupnums = set(existing_terms.mapped("sap_groupnum"))
+
         term_vals = []
         for term in sap_terms:
+            # Skip if already exists
+            if term["groupnum"] in existing_groupnums:
+                continue
+
             term_vals.append(
                 {
                     "name": term["pymntgroup"],
@@ -66,6 +77,7 @@ class AccountPaymentTermImporter(models.AbstractModel):
                 }
             )
 
+        _logger.info(f"Skipped {len(sap_terms) - len(term_vals)} existing payment terms.")
         return term_vals
 
     @ETL.load()

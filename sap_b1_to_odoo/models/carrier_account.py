@@ -1,10 +1,12 @@
 import logging
 import re
-from typing import Dict, List, Set, Tuple, Optional, Any
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fuzzywuzzy import process
-from odoo import api, Command, fields, models
+from odoo import Command, api, fields, models
 from odoo.tools.sql import SQL
+
+from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
 
@@ -29,48 +31,42 @@ class SapTransporter(models.Model):
     delivery_carrier_id = fields.Many2one("delivery.carrier")
 
 
+@ETL.pipeline(
+    target_model="delivery.carrier",
+    importer_name="delivery.carrier.importer",
+    sap_source="ocrd,oshp",
+    depends_on=[],
+    allow_multiprocessing=False,  # Small dataset, always single-process
+)
 class DeliveryCarrierAccountImporter(models.AbstractModel):
-    _name = "delivery.carrier.account.importer"
     _description = "Delivery Carrier Account Importer"
 
     # Class-level storage for unique carrier names during import
     _unique_carrier_names: Set[str] = set()
 
     ##################################################################
-    # Public Interface and Main Entry Point Methods
-    ##################################################################
-
-    @api.model
-    def import_all(self, cr) -> None:
-        """Import all delivery carriers and carrier accounts from SAP.
-        
-        Args:
-            cr: Database cursor for the SAP database.
-        """
-        if self.env["delivery.carrier"].search_count([]) != 1:
-            _logger.info("More than 1 carrier already found, skipping carrier import.")
-            return
-        
-        carriers, accounts = self._extract_all(cr)
-        self._load_carriers(carriers)
-        self._load_carrier_accounts(accounts)
-
-    ##################################################################
     # Extraction Methods
     ##################################################################
 
-    @api.model
-    def _extract_all(self, cr: Any) -> Tuple[Dict[str, Set[int]], List[Dict[str, Any]]]:
+    @ETL.extract("ocrd,oshp")
+    def extract_carriers_and_accounts(
+        self, ctx: ETLContext
+    ) -> Tuple[Dict[str, Set[int]], List[Dict[str, Any]]]:
         """Extract delivery carriers and carrier accounts from SAP OCRD and OSHP tables.
         
         Args:
-            cr: Database cursor for the SAP database.
+            ctx: ETL context with SAP cursor and Odoo environment.
             
         Returns:
             Tuple containing:
                 - Dictionary mapping carrier names to sets of SAP transport codes
                 - List of carrier account dictionaries with cardcode, carrier_name, and account_number
         """
+        # Skip if carriers already exist
+        if ctx.env["delivery.carrier"].search_count([]) != 1:
+            _logger.info("More than 1 carrier already found, skipping carrier import.")
+            return {}, []
+        
         cls = self.__class__
         sql = """
         SELECT
@@ -86,8 +82,8 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
         WHERE
             T0.shiptype is not null
         """
-        cr.execute(SQL(sql))
-        data = cr.dictfetchall()
+        ctx.cr.execute(SQL(sql))
+        data = ctx.cr.dictfetchall()
         delivery_carriers: Dict[str, Set[int]] = {}
         carrier_accounts: List[Dict[str, Any]] = []
 
@@ -172,20 +168,59 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
         return account_str
 
     ##################################################################
+    # Transformation Methods
+    ##################################################################
+
+    @ETL.transform()
+    def transform_carriers_and_accounts(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> Tuple[Dict[str, Set[int]], List[Dict[str, Any]]]:
+        """Pass through extracted data (no transformation needed).
+        
+        Args:
+            ctx: ETL context.
+            extracted: Dictionary containing extracted data.
+            
+        Returns:
+            Tuple of carriers and accounts (unchanged from extraction).
+        """
+        carriers, accounts = extracted["extract_carriers_and_accounts"]
+        _logger.info(f"Found {len(carriers)} carriers and {len(accounts)} accounts.")
+        return carriers, accounts
+
+    ##################################################################
     # Loading Methods
     ##################################################################
 
+    @ETL.load()
+    def load_carriers_and_accounts(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load carriers and accounts into Odoo.
+        
+        Args:
+            ctx: ETL context.
+            transformed: Dictionary containing transformed data.
+        """
+        carriers, accounts = transformed["transform_carriers_and_accounts"]
+        
+        if not carriers and not accounts:
+            _logger.info("No carriers or accounts to import.")
+            return
+        
+        self._load_carriers(ctx, carriers)
+        self._load_carrier_accounts(ctx, accounts)
+
     @api.model
-    def _load_carriers(self, carriers: Dict[str, Set[int]]) -> None:
+    def _load_carriers(self, ctx: ETLContext, carriers: Dict[str, Set[int]]) -> None:
         """Create delivery carrier records in Odoo.
         
         Args:
+            ctx: ETL context.
             carriers: Dictionary mapping carrier names to sets of SAP transport codes.
         """
         # Get or create delivery product
-        product = self.env["product.product"].search([("name", "=", "Delivery")], limit=1)
+        product = ctx.env["product.product"].search([("name", "=", "Delivery")], limit=1)
         if not product:
-            product = self.env["product.product"].create(
+            product = ctx.env["product.product"].create(
                 {
                     "name": "Delivery",
                     "type": "service",
@@ -193,7 +228,7 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
                     "default_code": "DELIVERY",
                     "sale_ok": True,
                     "purchase_ok": True,
-                    "company_id": self.env.company.id,
+                    "company_id": ctx.env.company.id,
                 }
             )
         
@@ -203,7 +238,7 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
             vals = {
                 "name": name,
                 "active": True,
-                "company_id": self.env.company.id,
+                "company_id": ctx.env.company.id,
                 "sap_transporter_ids": [
                     Command.create({"sap_trnspcode": trnspcode})
                     for trnspcode in trnspcodes
@@ -213,27 +248,28 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
             carrier_vals.append(vals)
         
         _logger.info(f"Creating {len(carrier_vals)} delivery carriers.")
-        self.env["delivery.carrier"].create(carrier_vals)
+        ctx.env["delivery.carrier"].create(carrier_vals)
 
     @api.model
-    def _load_carrier_accounts(self, accounts: List[Dict[str, Any]]) -> None:
+    def _load_carrier_accounts(self, ctx: ETLContext, accounts: List[Dict[str, Any]]) -> None:
         """Create delivery carrier account records in Odoo.
         
         Args:
+            ctx: ETL context.
             accounts: List of account dictionaries with cardcode, carrier_name, and account_number.
         """
         if not accounts:
             return
         
         # Build lookup dictionaries
-        carriers = self.env["delivery.carrier"].search([])
+        carriers = ctx.env["delivery.carrier"].search([])
         carriers_dict = {carrier.name: carrier for carrier in carriers}
         
-        partners = self.env["res.partner"].search(
+        partners = ctx.env["res.partner"].search(
             [("sap_card_code", "in", [account["cardcode"] for account in accounts])]
         )
         partners_dict = {partner.sap_card_code: partner for partner in partners}
-        company_partner = self.env.company.partner_id
+        company_partner = ctx.env.company.partner_id
         
         # Create account records
         account_vals = []
@@ -260,4 +296,4 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
             account_vals.append(vals)
         
         _logger.info(f"Creating {len(account_vals)} carrier accounts.")
-        self.env["delivery.carrier.account"].create(account_vals)
+        ctx.env["delivery.carrier.account"].create(account_vals)

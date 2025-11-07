@@ -193,6 +193,7 @@ class ETL:
     def pipeline(
         cls,
         target_model: str,
+        importer_name: str,
         sap_source: Optional[str] = None,
         depends_on: Optional[List[str]] = None,
         multiprocessing_threshold: int = 1000,
@@ -204,6 +205,8 @@ class ETL:
         
         Args:
             target_model: Odoo model name (e.g., 'product.product').
+            importer_name: Unique Odoo model name for the importer (e.g., 'res.users.importer').
+                          Must be unique across all pipelines.
             sap_source: Primary SAP table name (optional, for documentation).
             depends_on: List of model names this pipeline depends on.
             multiprocessing_threshold: Min records to trigger multiprocessing.
@@ -217,17 +220,24 @@ class ETL:
         Example:
             @ETL.pipeline(
                 target_model='product.product',
+                importer_name='sap.product.importer',
                 sap_source='oitm',
                 depends_on=['product.category'],
                 multiprocessing_threshold=1000,
             )
             class SapProductImporter(models.AbstractModel):
-                # _name will be auto-generated as 'product.product.importer'
+                _name = 'sap.product.importer'  # Must match importer_name
                 ...
         """
         def decorator(importer_class):
-            # Auto-generate importer model name
-            importer_name = f"{target_model}.importer"
+            # Check for duplicate importer names
+            for existing_pipeline in cls._pipelines.values():
+                if existing_pipeline.importer_model_name == importer_name:
+                    raise ValueError(
+                        f"Duplicate importer name '{importer_name}' detected. "
+                        f"Each pipeline must have a unique importer_name. "
+                        f"Existing pipeline: target_model='{existing_pipeline.target_model}'"
+                    )
             
             mp_config = MultiprocessingConfig(
                 enabled=allow_multiprocessing,
@@ -248,8 +258,8 @@ class ETL:
             # Store importer model name for later lookup
             pipeline.importer_model_name = importer_name
             
-            # Register pipeline
-            cls._pipelines[target_model] = pipeline
+            # Register pipeline by importer name (not target model)
+            cls._pipelines[importer_name] = pipeline
             importer_class._etl_pipeline = pipeline
             
             # Scan class for decorated methods and register them
@@ -268,11 +278,11 @@ class ETL:
         return decorator
     
     @classmethod
-    def extract(cls, source_table: str):
+    def extract(cls, source_table: str = ""):
         """Method decorator for extraction methods.
         
         Args:
-            source_table: SAP table name being extracted from.
+            source_table: SAP table name being extracted from (optional).
             
         Returns:
             Decorator function that marks the method as an extractor.
@@ -333,16 +343,16 @@ class ETL:
         return decorator
     
     @classmethod
-    def get_pipeline(cls, target_model: str) -> Optional[ETLPipeline]:
-        """Get a registered pipeline by target model name.
+    def get_pipeline(cls, importer_name: str) -> Optional[ETLPipeline]:
+        """Get a registered pipeline by importer name.
         
         Args:
-            target_model: Odoo model name.
+            importer_name: Importer model name (e.g., 'res.users.importer').
             
         Returns:
             ETLPipeline if found, None otherwise.
         """
-        return cls._pipelines.get(target_model)
+        return cls._pipelines.get(importer_name)
     
     @classmethod
     def get_all_pipelines(cls) -> Dict[str, ETLPipeline]:
@@ -557,30 +567,32 @@ class ETLExecutor:
             chunk: Data chunk to process.
             target_model: Target Odoo model name.
         """
-        try:
-            with Registry(dbname).cursor() as cr:
-                env = api.Environment(cr, uid, context)
-                importer = env[importer_name]
-                pipeline = importer._etl_pipeline  # type: ignore[attr-defined]
-                
-                # Create context (note: cr here is Odoo cursor, not SAP cursor)
-                # In multiprocessing, we need to handle this differently
-                # For now, this is a placeholder for the actual implementation
-                
-                # Transform
-                transformed_data = {}
-                for method in pipeline.transform_methods:
-                    result = method.func(importer, None, chunk)
-                    transformed_data[method.func.__name__] = result
-                
-                # Load
-                for method in pipeline.load_methods:
-                    method.func(importer, env, transformed_data)
-                
-                cr.commit()
-        except Exception:
-            _logger.error("Chunk processing failed", exc_info=True)
-            raise
+        with Registry(dbname).cursor() as cr:
+            env = api.Environment(cr, uid, context)
+            importer = env[importer_name]
+            pipeline = importer._etl_pipeline  # type: ignore[attr-defined]
+            
+            # Create ETL context with Odoo cursor (no SAP cursor in multiprocessing)
+            ctx = ETLContext(cr=None, env=env)
+            
+            # Transform
+            # Build extracted dict with the chunk data
+            # Assume first extract method name as the key
+            extract_method_name = pipeline.extract_methods[0].func.__name__ if pipeline.extract_methods else "extract"
+            extracted_dict = {extract_method_name: chunk}
+            
+            transformed_data = {}
+            for method in pipeline.transform_methods:
+                result = method.func(importer, ctx, extracted_dict)
+                transformed_data[method.func.__name__] = result
+            
+            # Load
+            for method in pipeline.load_methods:
+                method.func(importer, ctx, transformed_data)
+            
+            print(f"[PID {os.getpid()}] Committing...")
+            cr.commit()
+            print(f"[PID {os.getpid()}] Commit complete")
 
 
 # =============================================================================
@@ -625,28 +637,16 @@ class PipelineOrchestrator:
         # Execute each pipeline
         ctx = ETLContext(cr=cr, env=self.env)
         
-        for model_name in execution_order:
-            pipeline = self.pipelines.get(model_name)
+        for importer_name in execution_order:
+            pipeline = self.pipelines.get(importer_name)
             if not pipeline:
-                _logger.warning(f"Pipeline for {model_name} not found, skipping")
+                _logger.warning(f"Pipeline for {importer_name} not found, skipping")
                 continue
             
-            # Get importer instance using the model name from the decorator
-            if not pipeline.importer_model_name:
-                _logger.error(
-                    f"Pipeline for {model_name} has no importer_model_name. "
-                    f"This should be set by the @ETL.pipeline decorator."
-                )
-                continue
+            # Get importer instance using the importer name
+            importer = self.env[importer_name]
             
-            try:
-                importer = self.env[pipeline.importer_model_name]
-            except KeyError:
-                _logger.error(
-                    f"Importer model '{pipeline.importer_model_name}' not found "
-                    f"for target model '{model_name}'. Make sure the model is registered."
-                )
-                continue
+            _logger.info(f"Starting ETL pipeline for {pipeline.target_model} (importer: {importer_name})")
             
             # Execute pipeline
             executor = ETLExecutor(pipeline, ctx, importer)
@@ -661,33 +661,32 @@ class PipelineOrchestrator:
         """Resolve pipeline dependencies using topological sort.
         
         Returns:
-            List of model names in execution order.
+            List of importer names in execution order.
             
         Raises:
             ValueError: If circular dependencies are detected.
         """
-        # Build dependency graph
-        graph = {model: pipeline.depends_on for model, pipeline in self.pipelines.items()}
+        # Build dependency graph (importer_name -> depends_on list)
+        graph = {importer_name: pipeline.depends_on for importer_name, pipeline in self.pipelines.items()}
         
         # Topological sort (Kahn's algorithm)
-        in_degree = {model: 0 for model in graph}
-        for model, deps in graph.items():
-            for dep in deps:
-                if dep in in_degree:
-                    in_degree[dep] += 1
+        # in_degree[X] = number of dependencies X has (how many nodes must run before X)
+        in_degree = {importer_name: len(deps) for importer_name, deps in graph.items()}
         
-        queue = [model for model, degree in in_degree.items() if degree == 0]
+        # Start with nodes that have no dependencies
+        queue = [importer_name for importer_name, degree in in_degree.items() if degree == 0]
         result = []
         
         while queue:
-            model = queue.pop(0)
-            result.append(model)
+            importer_name = queue.pop(0)
+            result.append(importer_name)
             
-            for other_model, deps in graph.items():
-                if model in deps:
-                    in_degree[other_model] -= 1
-                    if in_degree[other_model] == 0:
-                        queue.append(other_model)
+            # For each node that depends on the current node, decrement its in-degree
+            for other_importer, deps in graph.items():
+                if importer_name in deps:
+                    in_degree[other_importer] -= 1
+                    if in_degree[other_importer] == 0:
+                        queue.append(other_importer)
         
         if len(result) != len(graph):
             raise ValueError("Circular dependency detected in ETL pipelines")

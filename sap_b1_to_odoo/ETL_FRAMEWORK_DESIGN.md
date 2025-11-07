@@ -258,17 +258,17 @@ Recommended thresholds based on existing code analysis:
 - [x] Add execution order validation
 - [x] Test with multiple pipelines (res.users + account.payment.term working!)
 
-### Phase 4: Migration - Simple Models (IN PROGRESS)
+### Phase 4: Migration - Simple Models ✅ COMPLETED
 Migrate models with no multiprocessing:
 - [x] `res.users` ✅
 - [x] `account.payment.term` ✅
-- [ ] `product.pricelist` (init_pricelists)
-- [ ] `delivery.carrier.account`
+- [x] `product.pricelist` (init_pricelists) ✅
+- [x] `delivery.carrier.account` ✅
 
-### Phase 5: Migration - Complex Models
+### Phase 5: Migration - Complex Models (IN PROGRESS)
 Migrate models with multiprocessing:
 - [ ] `product.product` (already has good ETL separation)
-- [ ] `res.partner`
+- [x] `res.partner` (split into 4 pipelines: companies, addresses, contacts, post-process) ✅
 - [ ] `sale.order`
 - [ ] `purchase.order`
 

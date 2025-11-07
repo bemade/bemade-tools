@@ -1,26 +1,15 @@
 # TODO: add a fix_quotes here for contact names
 import logging
-import multiprocessing
-import os
-from concurrent.futures import ProcessPoolExecutor
-from odoo.tools.sql import SQL
+from typing import Dict, List
+
+from odoo import api, fields, models
 from odoo.tools import email_normalize
-from odoo import models, fields, api, Command
-from odoo.modules.registry import Registry
+from odoo.tools.sql import SQL
+
+from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
-from typing import Dict, List, Any
 
 _logger = logging.getLogger(__name__)
-max_workers = os.cpu_count() - 1  # pyright: ignore[reportOptionalOperand]
-
-
-def _create_partners_concurrent(dbname, uid, context, sap_partners, vals_func_name):
-    _logger.info(f"Creating partners from {len(sap_partners)} SAP partners.")
-    with Registry(dbname).cursor() as cr:
-        env = api.Environment(cr, uid, context)
-        vals_func = getattr(env["sap.res.partner.importer"], vals_func_name)
-        partner_vals = vals_func(sap_partners)
-        return env["res.partner"].create(partner_vals).ids
 
 
 class ResPartner(models.Model):
@@ -46,291 +35,387 @@ class ResPartner(models.Model):
     ]
 
 
-class SapResPartnerImporter(models.AbstractModel):
-    _name = "sap.res.partner.importer"
-    _description = "SAP Partner Importer"
+##################################################################
+# ETL Framework Helper Functions
+##################################################################
 
-    _basic_pricelists_dict: Dict[int, Any] = {}
 
-    ##################################################################
-    # Public Interface and Main Entry Point Methods
-    ##################################################################
+def get_countries_dict(env):
+    """Get a dictionary of country IDs by SAP code."""
+    countries = env["res.country"].search([])
+    return {country.code: country.id for country in countries}
 
-    @api.model
-    def import_payment_terms(self, cr):
-        self._import_octg(cr)
 
-    @api.model
-    def _import_octg(self, cr):
-        """Import payment terms."""
-        # TODO: Split into ETL methods
-        cr.execute("SELECT * from octg")
-        sap_terms = cr.dictfetchall()
-        vals = []
-        for term in sap_terms:
-            vals.append(
-                {
-                    "name": term["pymntgroup"],
-                    "sap_groupnum": term["groupnum"],
-                    "line_ids": [
-                        Command.create(
-                            {
-                                "value_amount": 100.0,
-                                "value": "percent",
-                                "nb_days": term["extradays"],
-                                "delay_type": "days_after",
-                            }
-                        )
-                    ],
-                }
-            )
-        return self.env["account.payment.term"].create(vals)
+def get_states_dict(env):
+    """Get a dictionary of state IDs by SAP code."""
+    states = env["res.country.state"].search([])
+    return {state.code: state.id for state in states}
 
-    @api.model
-    def import_partners(self, cr):
-        """Single-process partner import variant."""
-        _logger.info("Starting SAP partner import.")
-        partners = self._import_ocrd(cr)
-        partners |= self._import_crd1(cr)
-        partners |= self._import_ocpr(cr)
-        self.env.cr.commit()
-        self._link_children_parents()
 
-    @api.model
-    def import_partners_concurrent(self, cr):
-        """Multi-process partner import variant."""
-        _logger.info("Starting SAP partner import.")
-        partner_ids = self._import_ocrd_concurrent(cr)
-        partner_ids += self._import_crd1_concurrent(cr)
-        partner_ids += self._import_ocpr_concurrent(cr)
-        self.env.invalidate_all()
-        self._link_children_parents()
-        self._set_payable_receivable_accounts()
-        self._set_partner_ranks()
-
-    @api.model
-    def _import_ocrd(self, cr):
-        """Import business partners (companies), single-process variant."""
-        sap_partners = self._get_sap_partners_ocrd(cr)
-        _logger.info(f"Importing {len(sap_partners)} companies.")
-        partner_vals = self._get_ocrd_partner_vals(sap_partners)
-        return self.env["res.partner"].create(partner_vals)
-
-    @api.model
-    def _import_ocrd_concurrent(self, cr):
-        """Import business partners (companies), multi-process variant."""
-        return self._import_concurrent(
-            cr,
-            self._get_sap_partners_ocrd,
-            self._get_ocrd_partner_vals,
+def get_users_dict(env):
+    """Get a dictionary of Odoo user IDs with their SAP salesperson codes as keys."""
+    return {
+        user.sap_slpcode: user.id
+        for user in env["res.users"].search(
+            [
+                ("sap_slpcode", "!=", False),
+                ("active", "in", [False, True]),
+            ]
         )
+    }
 
-    @api.model
-    def _import_crd1_concurrent(self, cr):
-        """Import addresses, multi-process variant."""
-        return self._import_concurrent(
-            cr,
-            self._get_sap_partners_crd1,
-            self._get_crd1_partner_vals,
-        )
 
-    @api.model
-    def _import_ocpr(self, cr):
-        """Import contacts, single-process variant."""
-        sap_contacts = self._get_sap_partners_ocpr(cr)
-        _logger.info(f"Importing {len(sap_contacts)} contacts.")
-        partner_vals = self._get_ocpr_partner_vals(sap_contacts)
-        return self.env["res.partner"].create(partner_vals)
+def get_payment_terms_dict(env):
+    """Get a dictionary of payment terms by SAP groupnum."""
+    terms = env["account.payment.term"].search([])
+    return {term.sap_groupnum: term.id for term in terms}
 
-    @api.model
-    def _import_ocpr_concurrent(self, cr):
-        """Import contacts, multi-process variant."""
-        return self._import_concurrent(
-            cr,
-            self._get_sap_partners_ocpr,
-            self._get_ocpr_partner_vals,
-        )
 
-    @api.model
-    def _import_crd1(self, cr):
-        """Import addresses, single-process variant."""
-        sap_addresses = self._get_sap_partners_crd1(cr)
-        _logger.info(f"Importing {len(sap_addresses)} addresses.")
-        partner_vals = self._get_crd1_partner_vals(sap_addresses)
-        return self.env["res.partner"].create(partner_vals)
+def extract_sap_state_country(country_code, state_code, countries_dict, states_dict):
+    """Extract country and state IDs from SAP codes.
 
-    def _import_concurrent(self, cr, sap_partners_func, vals_func) -> List[int]:
-        """Import partners using the specified extraction and transformation functions.
+    Returns tuple of (country_id, state_id).
+    """
+    country_id = countries_dict.get(country_code, False)
+    state_id = states_dict.get(state_code, False)
+    return country_id, state_id
+
+
+def extract_sap_street_street2(address, block):
+    """Extract street and street2 from SAP address fields."""
+    street = address or ""
+    street2 = block or ""
+    return street, street2
+
+
+def get_payment_terms(terms_dict, sap_partner):
+    """Get payment terms for a partner.
+
+    Returns tuple of (payment_term_id, supplier_payment_term_id) based on partner type.
+    Only one value is set depending if cardtype matches a customer or vendor entry in SAP.
+    """
+    groupnum = sap_partner.get("groupnum")
+
+    # Customers (C, L) get payment term, vendors get supplier payment term
+    if sap_partner.get("cardtype") in ["C", "L"]:
+        return terms_dict.get(groupnum, False), False
+    else:
+        return False, terms_dict.get(groupnum, False)
+
+
+##################################################################
+# ETL Framework Pipelines
+##################################################################
+
+
+@ETL.pipeline(
+    target_model="res.partner",
+    importer_name="res.partner.company.importer",
+    sap_source="ocrd",
+    depends_on=[],
+    allow_multiprocessing=False,  # Single-process for now due to write contention
+)
+class ResPartnerCompanyImporter(models.AbstractModel):
+    _description = "SAP Partner Companies Importer (OCRD)"
+
+    # Class-level cache for lookup dictionaries (shared across instances)
+    _lookup_cache = {}
+
+    @ETL.extract("ocrd")
+    def extract_companies(self, ctx: ETLContext) -> List[Dict]:
+        """Extract business partner companies from SAP OCRD table.
+
+        Also pre-computes lookup dictionaries for use in transform phase.
 
         Args:
-            cr: Database cursor.
-            sap_partners_func: Function to extract SAP partners.
-            vals_func: Function to transform SAP partners into Odoo partner values.
+            ctx: ETL context with SAP cursor and Odoo environment.
 
         Returns:
-            list: List of created partner IDs.
+            List of company dictionaries from SAP.
         """
-        sap_partners = sap_partners_func(cr)
-        chunk_size = min(500, len(sap_partners) // max_workers + 1)
-        _logger.info(f"Importing {len(sap_partners)} partners.")
-        chunks = [
-            sap_partners[i : i + chunk_size]
-            for i in range(0, len(sap_partners), chunk_size)
-        ]
-        partners = []
-        spawn_method = multiprocessing.get_start_method()
-        multiprocessing.set_start_method("fork", force=True)
-        try:
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(
-                        _create_partners_concurrent,
-                        self.env.cr.dbname,
-                        self.env.uid,
-                        dict(self.env.context),
-                        chunk,
-                        vals_func.__name__,
-                    )
-                    for chunk in chunks
-                ]
-
-                for future in futures:
-                    partners += future.result()
-            return partners
-        finally:
-            multiprocessing.set_start_method(spawn_method, force=True)
-
-    ##################################################################
-    # Extraction Methods
-    ##################################################################
-
-    @api.model
-    def _get_sap_partners_ocrd(self, cr):
-        """Get SAP partners from OCRD table. Exclude partners that already exist in Odoo."""
-        self.env.cr.execute(
+        # Get existing partners to avoid duplicates
+        ctx.env.cr.execute(
             "SELECT distinct sap_card_code FROM res_partner WHERE sap_card_code is not null"
         )
-        existing_cardcodes = tuple([row[0] for row in self.env.cr.fetchall()])
+        existing_cardcodes = tuple(row[0] for row in ctx.env.cr.fetchall())
+
+        # Query SAP
+        sql = "SELECT * FROM ocrd"
         if existing_cardcodes:
-            sql = SQL(
-                "SELECT * from OCRD WHERE cardname is not null and cardname <> ''"
-                "AND cardcode not in %s",
-                existing_cardcodes,
-            )
+            sql += " WHERE cardcode NOT IN %s"
+            ctx.cr.execute(SQL(sql, existing_cardcodes))
         else:
-            sql = SQL(
-                "SELECT * from OCRD WHERE cardname is not null and cardname <> ''"
-            )
-        cr.execute(sql)
-        sap_partners = cr.dictfetchall()
+            ctx.cr.execute(sql)
+
+        sap_partners = ctx.cr.dictfetchall()
+        _logger.info(f"Extracted {len(sap_partners)} companies from SAP OCRD.")
+
+        # Pre-compute lookup dictionaries in main process (before multiprocessing)
+        # Store in class-level cache so they're available to worker processes
+        # IMPORTANT: Store IDs only, not recordsets (recordsets can't be pickled)
+        _logger.info("Pre-computing lookup dictionaries for transform phase...")
+
+        # Get countries as {code: id}
+        countries = ctx.env["res.country"].search([])
+        countries_dict = {country.code: country.id for country in countries}
+
+        # Get states as {code: id}
+        states = ctx.env["res.country.state"].search([])
+        states_dict = {state.code: state.id for state in states}
+
+        # Get users as {sap_code: id}
+        users_dict = get_users_dict(ctx.env)
+
+        # Get payment terms as {sap_groupnum: id}
+        terms_dict = get_payment_terms_dict(ctx.env)
+
+        # Get currencies as {name: id}
+        currencies = ctx.env["res.currency"].search([])
+        currencies_dict = {curr.name: curr.id for curr in currencies}
+        cad_currency_id = ctx.env.ref("base.CAD").id
+
+        # Get company ID
+        company_id = ctx.env.company.id
+
+        ResPartnerCompanyImporter._lookup_cache = {
+            "countries_dict": countries_dict,
+            "states_dict": states_dict,
+            "users_dict": users_dict,
+            "terms_dict": terms_dict,
+            "currencies_dict": currencies_dict,
+            "cad_currency_id": cad_currency_id,
+            "company_id": company_id,
+        }
+        _logger.info("Lookup dictionaries ready.")
+
         return sap_partners
 
-    @api.model
-    def _get_sap_partners_crd1(self, cr):
-        cr.execute(f"SELECT * FROM crd1")
-        sap_addresses = cr.dictfetchall()
-        return sap_addresses
+    @ETL.transform()
+    def transform_companies(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform SAP companies into Odoo partner values.
 
-    @api.model
-    def _get_sap_partners_ocpr(self, cr):
-        self.env.cr.execute(
-            "SELECT sap_cntct_code FROM res_partner WHERE sap_cntct_code is not null"
-        )
-        existing_cntctcodes = tuple([row[0] for row in self.env.cr.fetchall()])
-        if existing_cntctcodes:
-            sql = SQL(
-                "SELECT * from OCPR WHERE cntctcode is not null "
-                "AND cntctcode not in %s",
-                existing_cntctcodes,
-            )
-        else:
-            sql = SQL("SELECT * from OCPR WHERE cntctcode is not null")
-        cr.execute(sql)
-        sap_contacts = cr.dictfetchall()
-        return sap_contacts
-
-    ##################################################################
-    # Transformation Methods
-    ##################################################################
-
-    @api.model
-    def _get_ocrd_partner_vals(self, sap_partners: List[Dict[str, Any]]):
-        """
-        Transforms a list of SAP OCRD partners into a list of Odoo-compatible
-        partner values dicts.
+        Uses pre-computed lookup dictionaries from extract phase.
 
         Args:
-            sap_partners: List of SAP OCRD partners as dicts from the OCRD table.
+            ctx: ETL context.
+            extracted: Dictionary containing extracted data.
 
         Returns:
-            list: List of Odoo-compatible partner values dicts.
+            List of partner value dictionaries ready for creation.
         """
+        import os
+        print(f"[PID {os.getpid()}] Transform START - {len(extracted['extract_companies'])} records")
+        
+        sap_partners = extracted["extract_companies"]
+
+        # Debug: Check if we're in a worker process
+        import multiprocessing
+        current_pid = os.getpid()
+        is_main = current_pid == os.getppid() or multiprocessing.current_process().name == 'MainProcess'
+
+        print(f"[PID {current_pid}] Getting cache...")
+        # Use pre-computed lookup dictionaries from class cache (no database queries in workers)
+        cache = ResPartnerCompanyImporter._lookup_cache
+        if not cache:
+            print(f"[PID {current_pid}] Cache is EMPTY in transform! is_main={is_main}")
+            raise RuntimeError("Cache is empty in transform! This should never happen.")
+        else:
+            print(f"[PID {current_pid}] Cache has {len(cache)} items, is_main={is_main}")
+
+        print(f"[PID {current_pid}] Starting transformation loop...")
+
+        countries_dict = cache["countries_dict"]
+        states_dict = cache["states_dict"]
+        users_dict = cache["users_dict"]
+        terms_dict = cache["terms_dict"]
+        company_id = cache["company_id"]
+        
+        print(f"[PID {current_pid}] Cache contents: countries={len(countries_dict)}, states={len(states_dict)}, users={len(users_dict)}, terms={len(terms_dict)}, company_id={company_id}")
+
         partner_vals = []
-        countries_dict = self._get_countries_dict()
-        states_dict = self._get_states_dict()
-        users_dict = self._get_users_dict()
-        _logger.debug(f"Users dict: {users_dict}")
-        terms_dict = self._get_payment_terms_dict()
-        for sap_partner in sap_partners:
-            # Start with the parent company
-            country = sap_partner["country"]
-            state = sap_partner["state1"]
-            country, state = self._extract_sap_state_country(
-                country, state, countries_dict, states_dict
+        for i, sap_partner in enumerate(sap_partners):
+            if i == 0 or i % 10 == 0:  # Print every 10 records
+                print(f"[PID {current_pid}] Processing record {i+1}/{len(sap_partners)}")
+
+            # Get name and skip if empty
+            name = fix_quotes(sap_partner["cardname"])
+            if not name or not name.strip():
+                _logger.warning(
+                    f"Skipping company with empty name: cardcode={sap_partner['cardcode']}"
+                )
+                continue
+
+            # Extract location data (returns IDs)
+            country_id, state_id = extract_sap_state_country(
+                sap_partner["country"],
+                sap_partner["state1"],
+                countries_dict,
+                states_dict,
             )
-            street, street2 = self._extract_sap_street_street2(
+            street, street2 = extract_sap_street_street2(
                 sap_partner["address"],
                 sap_partner["block"],
             )
-            user = users_dict.get(sap_partner["slpcode"], False)
-            _logger.debug(f"User: {user} for slpcode {sap_partner['slpcode']}")
-            currency = self.env["res.currency"].search(
-                [("name", "=", sap_partner["currency"])]
-            )
-            if not currency:
-                currency = self.env.ref("base.CAD")
+
+            # Get user ID and currency ID
+            user_id = users_dict.get(sap_partner["slpcode"], False)
+
+            # Get currency ID from cache
+            if i == 0:
+                print(f"[PID {current_pid}] Getting currency from cache...")
+            currencies_dict = cache.get("currencies_dict", {})
+            currency_id = currencies_dict.get(sap_partner["currency"])
+            if not currency_id:
+                if i == 0:
+                    print(f"[PID {current_pid}] Currency not in cache, using CAD...")
+                currency_id = cache.get("cad_currency_id")
+            if i == 0:
+                print(f"[PID {current_pid}] Currency resolved")
+
+            # Get payment terms
             property_payment_term_id, property_supplier_payment_term_id = (
-                self._get_payment_terms(terms_dict, sap_partner)
+                get_payment_terms(terms_dict, sap_partner)
             )
+
+            # Other fields
             picking_policy = "one" if sap_partner["partdelivr"] == "Y" else "direct"
             email = fix_quotes(sap_partner["e_mail"])
             email = email_normalize(email)
+
+            if i == 0:
+                print(f"[PID {current_pid}] Building partner dict...")
+            
             partner_vals.append(
                 {
                     "sap_card_code": sap_partner["cardcode"],
                     "sap_atcentry": sap_partner["atcentry"],
-                    "name": fix_quotes(sap_partner["cardname"]),
+                    "name": name,
                     "street": street,
                     "street2": street2,
                     "city": sap_partner["city"] or "",
-                    "country_id": country and country.id or False,
-                    "state_id": state and state.id or False,
+                    "country_id": country_id or False,
+                    "state_id": state_id or False,
                     "zip": sap_partner["zipcode"],
                     "sap_parent_card": sap_partner["fathercard"] or False,
                     "sap_partner_type": sap_partner["cardtype"],
                     "phone": sap_partner["phone1"] or sap_partner["phone2"],
                     "email": email,
                     "is_company": True,
-                    "company_id": self.env.company.id,
+                    "company_id": company_id,
                     "comment": sap_partner["notes"],
-                    "user_id": user,
-                    "property_purchase_currency_id": currency.id,
+                    "user_id": user_id,
+                    "property_purchase_currency_id": currency_id,
                     "property_payment_term_id": property_payment_term_id,
                     "property_supplier_payment_term_id": property_supplier_payment_term_id,
                     "picking_policy": picking_policy,
                 }
             )
+            
+            if i == 0:
+                print(f"[PID {current_pid}] First record complete")
+
+        _logger.info(f"Transformed {len(partner_vals)} company records.")
+        
+        # Debug: Print when transform completes
+        print(f"[PID {os.getpid()}] Transform COMPLETE - {len(partner_vals)} records")
+
         return partner_vals
 
-    @api.model
-    def _get_crd1_partner_vals(self, sap_addresses: List[Dict[str, Any]]):
-        """Get SAP partners from CRD1 table. Exclude partners that already exist in Odoo."""
-        partner_vals = []
+    @ETL.load()
+    def load_companies(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load companies into Odoo.
 
-        def _extract_name_street_street2(address, address2, address3, street, block):
-            """Addresses in SAP have 4 possible lines that would match with street1
-            and street2 from Odoo. Intelligently concatenate depending on which
-            lines are set or not set."""
+        Args:
+            ctx: ETL context.
+            transformed: Dictionary containing transformed data.
+        """
+        import os
+        print(f"[PID {os.getpid()}] Load START")
+        
+        partner_vals = transformed["transform_companies"]
+
+        if partner_vals:
+            print(f"[PID {os.getpid()}] Creating {len(partner_vals)} partners...")
+            partners = ctx.env["res.partner"].create(partner_vals)
+            print(f"[PID {os.getpid()}] Load COMPLETE - created {len(partners)} partners")
+            _logger.info(f"Created {len(partners)} company partners.")
+        else:
+            print(f"[PID {os.getpid()}] Load COMPLETE - no partners to create")
+            _logger.info("No new companies to create.")
+
+
+@ETL.pipeline(
+    target_model="res.partner",
+    importer_name="res.partner.address.importer",
+    sap_source="crd1",
+    depends_on=["res.partner.company.importer"],
+    allow_multiprocessing=False,  # Single-process for now due to write contention
+)
+class ResPartnerAddressImporter(models.AbstractModel):
+    _description = "SAP Partner Addresses Importer (CRD1)"
+
+    # Class-level cache for lookup dictionaries (shared across instances)
+    _lookup_cache = {}
+
+    @ETL.extract("crd1")
+    def extract_addresses(self, ctx: ETLContext) -> List[Dict]:
+        """Extract partner addresses from SAP CRD1 table.
+
+        Also pre-computes lookup dictionaries for use in transform phase.
+
+        Args:
+            ctx: ETL context with SAP cursor and Odoo environment.
+
+        Returns:
+            List of address dictionaries from SAP.
+        """
+        ctx.cr.execute("SELECT * FROM crd1")
+        sap_addresses = ctx.cr.dictfetchall()
+        _logger.info(f"Extracted {len(sap_addresses)} addresses from SAP CRD1.")
+
+        # Pre-compute lookup dictionaries in main process (before multiprocessing)
+        # Store in class-level cache so they're available to worker processes
+        _logger.info("Pre-computing lookup dictionaries for transform phase...")
+        ResPartnerAddressImporter._lookup_cache = {
+            "countries_dict": get_countries_dict(ctx.env),
+            "states_dict": get_states_dict(ctx.env),
+        }
+        _logger.info("Lookup dictionaries ready.")
+
+        return sap_addresses
+
+    @ETL.transform()
+    def transform_addresses(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform SAP addresses into Odoo partner values.
+
+        Uses pre-computed lookup dictionaries from extract phase.
+
+        Args:
+            ctx: ETL context.
+            extracted: Dictionary containing extracted data.
+
+        Returns:
+            List of partner value dictionaries ready for creation.
+        """
+        sap_addresses = extracted["extract_addresses"]
+
+        # Use pre-computed lookup dictionaries from class cache (no database queries in workers)
+        cache = ResPartnerAddressImporter._lookup_cache
+        if not cache:
+            _logger.error(
+                "Cache is empty in transform! This will cause database queries in workers."
+            )
+            # Fallback to querying (will cause contention but better than crashing)
+            cache = {
+                "countries_dict": get_countries_dict(ctx.env),
+                "states_dict": get_states_dict(ctx.env),
+            }
+
+        countries_dict = cache["countries_dict"]
+        states_dict = cache["states_dict"]
+
+        def extract_name_street_street2(address, address2, address3, street, block):
+            """Intelligently concatenate address lines."""
             address_parts = [
                 part for part in [address, street, address2, address3, block] if part
             ]
@@ -340,278 +425,239 @@ class SapResPartnerImporter(models.AbstractModel):
                 address_parts += ["" for _ in range(3 - len(address_parts))]
                 return tuple(address_parts)
 
-        countries_dict = self._get_countries_dict()
-        states_dict = self._get_states_dict()
-
+        partner_vals = []
         for sap_address in sap_addresses:
-            name, street, street2 = _extract_name_street_street2(
+            name, street, street2 = extract_name_street_street2(
                 sap_address["address"],
                 sap_address["address2"],
                 sap_address["address3"],
                 sap_address["street"],
                 sap_address["block"],
             )
-            parent_card = sap_address["cardcode"]
-            country, state = self._extract_sap_state_country(
+
+            # Determine address type first
+            address_type = "delivery" if sap_address["adrestype"] == "S" else "invoice"
+
+            # Validate and fix name - use fallback if empty
+            name = fix_quotes(name)
+            if not name or not name.strip():
+                # Use address type as fallback name
+                name = f"{address_type.title()} Address"
+                _logger.debug(
+                    f"Using fallback name '{name}' for address: cardcode={sap_address['cardcode']}"
+                )
+
+            country_id, state_id = extract_sap_state_country(
                 sap_address["country"],
                 sap_address["state"],
                 countries_dict,
                 states_dict,
             )
-            zip_code = sap_address["zipcode"]
-            address_type = "delivery" if sap_address["adrestype"] == "S" else "invoice"
+
             partner_vals.append(
                 {
-                    "name": fix_quotes(name),
+                    "name": name,
                     "street": street,
                     "street2": street2,
                     "city": sap_address["city"],
-                    "country_id": country and country.id or False,
-                    "state_id": state and state.id or False,
-                    "sap_parent_card": parent_card,
+                    "country_id": country_id or False,
+                    "state_id": state_id or False,
+                    "sap_parent_card": sap_address["cardcode"],
                     "type": address_type,
                     "is_company": False,
                     "user_id": False,
-                    "zip": zip_code,
+                    "zip": sap_address["zipcode"],
                 }
             )
+
+        _logger.info(f"Transformed {len(partner_vals)} address records.")
         return partner_vals
 
-    @api.model
-    def _get_users_dict(self) -> Dict[int, int]:
-        """Get a dictionary of Odoo user IDs with their SAP salesperson codes as keys."""
-        return {
-            user.sap_slpcode: user.id
-            for user in self.env["res.users"].search(
-                [
-                    ("sap_slpcode", "!=", False),
-                    ("active", "in", [False, True]),
-                ]
-            )
-        }
+    @ETL.load()
+    def load_addresses(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load addresses into Odoo.
 
-    @api.model
-    def _get_ocpr_partner_vals(self, sap_contacts: List[Dict[str, Any]]):
-        """Get a list of Odoo partner values from SAP contacts."""
-        partner_vals = []
-        for sap_contact in sap_contacts:
-            email = fix_quotes(sap_contact["e_maill"])
-            email = email_normalize(email)
-            # In Odoo 19.0, mobile field was removed. Use phone field for mobile if no landline.
-            phone = sap_contact["tel1"] or sap_contact["tel2"] or sap_contact["cellolar"]
-            partner_vals.append(
-                {
-                    "name": fix_quotes(sap_contact["name"]),
-                    "sap_cntct_code": sap_contact["cntctcode"],
-                    "sap_parent_card": sap_contact["cardcode"],
-                    "is_company": False,
-                    "email": email,
-                    "phone": phone,
-                    "active": sap_contact["active"] == "Y",
-                    "function": sap_contact["position"] or sap_contact["title"],
-                    "company_id": self.env.company.id,
-                    "comment": sap_contact["notes1"] or sap_contact["notes2"] or "",
-                    "type": "contact",
-                }
-            )
-        return partner_vals
+        Args:
+            ctx: ETL context.
+            transformed: Dictionary containing transformed data.
+        """
+        partner_vals = transformed["transform_addresses"]
 
-    @api.model
-    def _get_payment_terms_dict(self):
-        terms = self.env["account.payment.term"].search([])
-        return {term.sap_groupnum: term.id for term in terms}
-
-    @api.model
-    def _get_payment_terms(self, terms_dict, sap_partner):
-        """Returns a tuple of (payment_term_id, supplier_payment_term_id) with only
-        one value set depending if cardtype matches a customer or vendor entry in SAP"""
-        if sap_partner["cardtype"] in ["C", "L"]:
-            return terms_dict.get(sap_partner["groupnum"]), False
+        if partner_vals:
+            partners = ctx.env["res.partner"].create(partner_vals)
+            _logger.info(f"Created {len(partners)} address partners.")
         else:
-            return False, terms_dict.get(sap_partner["groupnum"])
+            _logger.info("No new addresses to create.")
 
-    @api.model
-    def _get_state(self, states_dict, code, country_code=None):
-        """Get the state associated with code and country_code. If no country_code is
-        set, try first a Canadian province and, if not found, a US state."""
-        if not code:
-            return False
-        if not country_code:
-            return states_dict.get("CA").get(code, False) or states_dict.get("US").get(
-                code, False
-            )
-        return states_dict.get(country_code).get(code, False)
 
-    @api.model
-    def _get_countries_dict(self):
-        """Get a dictionary of countries with their codes as keys."""
-        return {country.code: country for country in self.env["res.country"].search([])}
+@ETL.pipeline(
+    target_model="res.partner",
+    importer_name="res.partner.contact.importer",
+    sap_source="ocpr",
+    depends_on=["res.partner.company.importer"],
+    allow_multiprocessing=False,  # Single-process for now due to write contention
+)
+class ResPartnerContactImporter(models.AbstractModel):
+    _description = "SAP Partner Contacts Importer (OCPR)"
 
-    @api.model
-    def _get_states_dict(self) -> Dict[str, Dict[str, Any]]:
-        """Get a dictionary of states with their codes as keys.
+    @ETL.extract("ocpr")
+    def extract_contacts(self, ctx: ETLContext) -> List[Dict]:
+        """Extract partner contacts from SAP OCPR table.
+
+        Args:
+            ctx: ETL context with SAP cursor and Odoo environment.
 
         Returns:
-            A dictionary of states by country, i.e. {"CA": {"ON": state}, ...}.
-            The inner value is the Odoo state record.
+            List of contact dictionaries from SAP.
         """
-        states = self.env["res.country.state"].search([])
-        result = {}
-        for state in states:
-            if state.country_id.code not in result:
-                result[state.country_id.code] = {}
-            result[state.country_id.code][state.code] = state
-        return result
-
-    @api.model
-    def _extract_sap_state_country(self, country, state, country_dict, states_dict):
-        """Get the state associated with code and country_code. If no country_code is
-        set, try first a Canadian province and, if not found, a US state."""
-        odoo_country = country_dict.get(country) or country_dict.get("CA")
-        odoo_state = self._get_state(states_dict, state, country)
-        if not odoo_state and state:
-            matching_states = self.env["res.country.state"].search(
-                [("code", "=", state)]
-            )
-            if len(matching_states) == 1:
-                odoo_state = matching_states[0]
-                odoo_country = odoo_state.country_id
-            elif len(matching_states) > 1:
-                _logger.warning(
-                    f"Found multiple states with code {state} for country {country}."
-                )
-            else:
-                _logger.warning(
-                    f"Could not find state with code {state} for country {country}"
-                )
-        return odoo_country, odoo_state
-
-    @api.model
-    def _get_basic_pricelists_dict(self):
-        """Get a dictionary of pricelists with their codes as keys."""
-        pricelists = self.env["product.pricelist"].search(
-            [("sap_listnum", "!=", False)]
+        # Get existing contacts to avoid duplicates
+        ctx.env.cr.execute(
+            "SELECT sap_cntct_code FROM res_partner WHERE sap_cntct_code is not null"
         )
-        lists_dict = self.__class__._basic_pricelists_dict = {
-            pricelist.sap_listnum: pricelist for pricelist in pricelists
-        }
-        return lists_dict
+        existing_cntct_codes = tuple(row[0] for row in ctx.env.cr.fetchall())
 
-    @api.model
-    def _extract_sap_street_street2(self, address, block):
-        """Extract street and street2 from SAP address or block. If block is set and
-        address is not, return block as street and an empty string as street2."""
-        if block and not address:
-            return block, ""
-        return address, block
+        # Query SAP
+        sql = "SELECT * FROM ocpr"
+        if existing_cntct_codes:
+            sql += " WHERE cntctcode NOT IN %s"
+            ctx.cr.execute(SQL(sql, existing_cntct_codes))
+        else:
+            ctx.cr.execute(sql)
 
-    ##################################################################
-    # Loading and Post-Loading Adjustment Methods
-    ##################################################################
+        sap_contacts = ctx.cr.dictfetchall()
+        _logger.info(f"Extracted {len(sap_contacts)} contacts from SAP OCPR.")
+        return sap_contacts
 
-    @api.model
-    def _set_partner_ranks(self):
-        """Post-loading adjustment to flag partners as customers and/or vendors."""
-        # Set customer ranks for cardtype C and L
-        self.env.cr.execute(
-            """
-            UPDATE res_partner 
-            SET customer_rank = 1 
-            WHERE sap_partner_type IN ('C', 'L')
-            AND customer_rank = 0
+    @ETL.transform()
+    def transform_contacts(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform SAP contacts into Odoo partner values.
+
+        Args:
+            ctx: ETL context.
+            extracted: Dictionary containing extracted data.
+
+        Returns:
+            List of partner value dictionaries ready for creation.
         """
+        sap_contacts = extracted["extract_contacts"]
+
+        partner_vals = []
+        for sap_contact in sap_contacts:
+            # Get contact details first
+            email = fix_quotes(sap_contact["e_maill"])
+            email = email_normalize(email) if email else False
+
+            # In Odoo 19.0, mobile field was removed. Use phone field for mobile if no landline.
+            phone = (
+                sap_contact["tel1"] or sap_contact["tel2"] or sap_contact["cellolar"]
+            )
+
+            # Get name - use email or phone as fallback if empty
+            name = fix_quotes(sap_contact["name"])
+            if not name or not name.strip():
+                if email:
+                    name = email
+                    _logger.debug(
+                        f"Using email as name for contact: cntctcode={sap_contact['cntctcode']}"
+                    )
+                elif phone:
+                    name = f"Contact {phone}"
+                    _logger.debug(
+                        f"Using phone as name for contact: cntctcode={sap_contact['cntctcode']}"
+                    )
+                else:
+                    # No identifying information at all - skip this one
+                    _logger.warning(
+                        f"Skipping contact with no name, email, or phone: cntctcode={sap_contact['cntctcode']}"
+                    )
+                    continue
+
+            partner_vals.append(
+                {
+                    "name": name,
+                    "sap_cntct_code": sap_contact["cntctcode"],
+                    "sap_parent_card": sap_contact["cardcode"],
+                    "email": email,
+                    "phone": phone,
+                    "is_company": False,
+                    "type": "contact",
+                    "company_id": ctx.env.company.id,
+                }
+            )
+
+        _logger.info(
+            f"Transformed {len(partner_vals)} contact records (skipped contacts with empty names)."
         )
-        # Set supplier ranks for other cardtypes (S, etc)
-        self.env.cr.execute(
-            """
-            UPDATE res_partner 
-            SET supplier_rank = 1 
-            WHERE sap_partner_type NOT IN ('C', 'L')
-            AND sap_partner_type IS NOT NULL
-            AND supplier_rank = 0
+        return partner_vals
+
+    @ETL.load()
+    def load_contacts(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load contacts into Odoo.
+
+        Args:
+            ctx: ETL context.
+            transformed: Dictionary containing transformed data.
         """
-        )
-        self.env.cr.commit()
+        partner_vals = transformed["transform_contacts"]
 
-    @api.model
-    def _set_payable_receivable_accounts(self):
-        """Post-loading adjustment to set partner receivable and payable accounts."""
-        self.env.flush_all()
-        cad_receivable = (
-            self.env["account.account"]
-            .search(
-                [("account_type", "=", "asset_receivable"), ("name", "ilike", "%CDN")]
-            )
-            .id
-        )
-        cad_payable = (
-            self.env["account.account"]
-            .search(
-                [("account_type", "=", "liability_payable"), ("name", "ilike", "%CDN")]
-            )
-            .id
-        )
-        usd_receivable = (
-            self.env["account.account"]
-            .search(
-                [("account_type", "=", "asset_receivable"), ("name", "ilike", "%US")]
-            )
-            .id
-        )
-        usd_payable = (
-            self.env["account.account"]
-            .search(
-                [("account_type", "=", "liability_payable"), ("name", "ilike", "%US")]
-            )
-            .id
-        )
-        usd_currency = self.env["res.currency"].search([("name", "=", "USD")]).id
-        usd_pricelist_partners = self.env["res.partner"].search(
-            [("specific_property_product_pricelist.currency_id", "=", usd_currency)]
-        )
-        _logger.info(
-            f"Updating {len(usd_pricelist_partners)} USD pricelist partners with account {usd_receivable}"
-        )
-        usd_pricelist_partners.write({"property_account_receivable_id": usd_receivable})
-        cad_pricelist_partners = self.env["res.partner"].search(
-            [
-                "|",
-                ("specific_property_product_pricelist.currency_id", "!=", usd_currency),
-                ("specific_property_product_pricelist", "=", False),
-            ]
-        )
-        _logger.info(
-            f"Updating {len(cad_pricelist_partners)} CAD pricelist partners with account {cad_receivable}"
-        )
-        cad_pricelist_partners.write({"property_account_receivable_id": cad_receivable})
-        usd_purchase_partners = self.env["res.partner"].search(
-            [("property_purchase_currency_id", "=", usd_currency)]
-        )
-        _logger.info(
-            f"Updating {len(usd_purchase_partners)} USD purchase partners with account {usd_payable}"
-        )
-        usd_purchase_partners.write({"property_account_payable_id": usd_payable})
-        cad_purchase_partners = self.env["res.partner"].search(
-            [
-                "|",
-                ("property_purchase_currency_id", "!=", usd_currency),
-                ("property_purchase_currency_id", "=", False),
-            ]
-        )
-        _logger.info(
-            f"Updating {len(cad_purchase_partners)} CAD purchase partners with account {cad_payable}"
-        )
-        cad_purchase_partners.write({"property_account_payable_id": cad_payable})
+        if partner_vals:
+            partners = ctx.env["res.partner"].create(partner_vals)
+            _logger.info(f"Created {len(partners)} contact partners.")
+        else:
+            _logger.info("No new contacts to create.")
 
-    @api.model
-    def _link_children_parents(self):
-        """Link contacts and addresses to their parent companies."""
+
+@ETL.pipeline(
+    target_model="res.partner",
+    importer_name="res.partner.postprocess.importer",
+    depends_on=[
+        "res.partner.company.importer",
+        "res.partner.address.importer",
+        "res.partner.contact.importer",
+    ],  # Runs after all partner imports
+    allow_multiprocessing=False,
+)
+class ResPartnerPostProcessImporter(models.AbstractModel):
+    _description = "SAP Partner Post-Processing (Link Children to Parents)"
+
+    @ETL.extract()
+    def extract_nothing(self, ctx: ETLContext) -> List:
+        """No extraction needed for post-processing.
+
+        Args:
+            ctx: ETL context.
+
+        Returns:
+            Empty list.
+        """
+        return []
+
+    @ETL.transform()
+    def transform_nothing(self, ctx: ETLContext, extracted: Dict) -> None:
+        """No transformation needed for post-processing.
+
+        Args:
+            ctx: ETL context.
+            extracted: Dictionary containing extracted data (empty).
+
+        Returns:
+            None.
+        """
+        return None
+
+    @ETL.load()
+    def load_link_children_to_parents(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Link children (addresses/contacts) to their parent companies.
+
+        Args:
+            ctx: ETL context.
+            transformed: Dictionary containing transformed data (None).
+        """
         _logger.info("Linking children to parents.")
-        self.env.flush_all()
-        parent_matches_str = """
-            """
+        ctx.env.flush_all()
 
-        self.env.cr.execute(
+        # Link children to parents based on SAP codes
+        ctx.env.cr.execute(
             """
             -- First, let's create a CTE to match children with their parents based on SAP codes
             WITH parent_matches AS (
@@ -634,6 +680,7 @@ class SapResPartnerImporter(models.AbstractModel):
                 AND (rp.parent_id IS NULL OR rp.parent_id != pm.parent_id OR rp.commercial_partner_id != pm.parent_id);  -- Only update if different
             """
         )
+
         # Fill in a partner's address if there isn't already information in the fields
         sql = """
         WITH parent_matches AS (
@@ -666,19 +713,6 @@ class SapResPartnerImporter(models.AbstractModel):
                 AND (rp.zip IS NULL OR rp.zip = pm.zip)
         """
         for col in ["street", "street2", "city", "country_id", "state_id", "zip"]:
-            self.env.cr.execute(sql % {"col": col})
-        self.env.cr.commit()
+            ctx.env.cr.execute(sql % {"col": col})
 
-    ##################################################################
-    # Utilities
-    ##################################################################
-
-    @api.model
-    def _delete_all(self):
-        self.env.cr.execute(
-            """
-            DELETE FROM res_partner WHERE sap_card_code is not null 
-            or sap_cntct_code is not null 
-            or sap_parent_card is not null
-            """
-        )
+        _logger.info("Completed linking children to parents.")
