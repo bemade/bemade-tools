@@ -1,16 +1,17 @@
-from collections import defaultdict
-from odoo import models, fields, api
-from odoo.addons.mrp.models.stock_quant import StockQuant
 import logging
 import multiprocessing
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
+from typing import Dict, List, Tuple, Any
+
+from odoo import api, fields, models
+from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 from odoo.modules.registry import Registry
 from odoo.sql_db import SQL
-from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
-
-workers = 8
 
 _logger = logging.getLogger(__name__)
+
+MAX_WORKERS = 8
 
 
 class ProductTemplate(models.Model):
@@ -44,8 +45,17 @@ class SapProductImporter(models.AbstractModel):
     _name = "sap.product.importer"
     _description = "SAP Product Importer"
 
+    ##################################################################
+    # Public Interface and Main Entry Point Methods
+    ##################################################################
+
     @api.model
-    def import_products(self, cr):
+    def import_products(self, cr) -> None:
+        """Import products and product categories from SAP.
+
+        Args:
+            cr: Database cursor for the SAP database.
+        """
         _logger.info("Importing products and categories...")
         category_ids = self._import_oitb(cr)
         self.env["product.category"].flush_model()
@@ -53,140 +63,22 @@ class SapProductImporter(models.AbstractModel):
         self._import_oitm(cr, category_ids)
 
     @api.model
-    def import_inventory(self, cr):
+    def import_inventory(self, cr) -> None:
+        """Import inventory valuations and stock quants from SAP.
+
+        Args:
+            cr: Database cursor for the SAP database.
+        """
         self._import_inventory_valuation(cr)
         self._import_stock_quants(cr)
 
-    @staticmethod
-    def _sub_import_oitm(dbname, uid, context, chunk, categories_map):
-        _logger.info(f"Subprocess: Importing {len(chunk)} products.")
-        try:
-            with Registry(dbname).cursor() as cr:
-                env = api.Environment(cr, uid, context)
-                product_vals = []
-                for sap_product in chunk:
-                    country_of_origin = sap_product["u_fcsdk_coo"]
-                    if country_of_origin:
-                        country_of_origin = env["res.country"].search(
-                            [("code", "=", country_of_origin)]
-                        )
-                    categ = (
-                        categories_map[sap_product["itmsgrpcod"]]
-                        if sap_product["itmsgrpcod"]
-                        and sap_product["itmsgrpcod"] in categories_map
-                        else False
-                    )
-                    vals = {
-                        "sap_item_code": sap_product["itemcode"],
-                        "sap_atcentry": sap_product["atcentry"],
-                        "default_code": fix_quotes(sap_product["itemname"]),
-                        "name": fix_quotes(sap_product["frgnname"] or "N/A"),
-                        "sale_ok": sap_product["sellitem"] == "Y",
-                        "purchase_ok": sap_product["prchseitem"] == "Y",
-                        "active": sap_product["validfor"] == "Y",
-                        "type": "consu",
-                        "is_storable": True,
-                        "company_id": env.company.id,
-                        "hs_code": sap_product["u_fcsdk_hst"] or None,
-                        "country_of_origin": country_of_origin
-                        and country_of_origin.id
-                        or None,
-                    }
-                    if categ:
-                        vals["categ_id"] = categ
-                    product_vals.append(vals)
-                env["product.product"].create(product_vals)
-                cr.commit()
-        except Exception:
-            _logger.error("An exception occurred in a subprocess.", exc_info=True)
-            raise
+    @api.model
+    def import_orderpoints(self, cr) -> None:
+        """Import stock reordering rules (min/max levels) from SAP.
 
-    def _import_oitm(self, cr, categories):
-        """Import sellable products"""
-        existing_products = tuple(
-            [
-                p["sap_item_code"]
-                for p in self.env["product.product"].search_read(
-                    [
-                        ("sap_item_code", "!=", False),
-                        ("active", "in", [True, False]),
-                    ],
-                    ["sap_item_code"],
-                )
-            ]
-        )
-        _logger.info(f"Found {len(existing_products)} existing products.")
-        sql = "SELECT * FROM oitm"
-        if existing_products:
-            sql += " WHERE itemcode not in %s"
-            sql = SQL(sql, existing_products)
-        else:
-            sql = SQL(sql)
-        cr.execute(sql)
-        sap_products = cr.dictfetchall()
-        chunk_size = 500
-        chunks = [
-            sap_products[i : i + chunk_size]
-            for i in range(0, len(sap_products), chunk_size)
-        ]
-        start_method = multiprocessing.get_start_method()
-        multiprocessing.set_start_method("fork", force=True)
-        categories_map = {
-            category.sap_itms_grp_cod: category.id for category in categories
-        }
-        try:
-            _logger.info(
-                f"Importing {len(sap_products)} products in {len(chunks)} chunks."
-            )
-            with ProcessPoolExecutor(max_workers=workers) as executor:
-                futures = [
-                    executor.submit(
-                        self._sub_import_oitm,
-                        self.env.cr.dbname,
-                        self.env.uid,
-                        dict(self.env.context),
-                        chunk,
-                        categories_map,
-                    )
-                    for chunk in chunks
-                ]
-                for future in futures:
-                    future.result()
-        except Exception as e:
-            raise e
-        finally:
-            multiprocessing.set_start_method(start_method, force=True)
-
-    def _import_oitb(self, cr):
-        """Import product categories from SAP"""
-        existing_groups = tuple(
-            self.env["product.category"]
-            .search([("sap_itms_grp_cod", "!=", False)])
-            .mapped("sap_itms_grp_cod")
-        )
-        sql = "SELECT * FROM oitb WHERE itmsgrpnam <> '' and itmsgrpnam is not null"
-        if existing_groups:
-            sql += " and itmsgrpcod not in %s"
-            sql = SQL(sql, existing_groups)
-        else:
-            sql = SQL(sql)
-        cr.execute(sql)
-        sap_product_groups = cr.dictfetchall()
-        _logger.info(f"Importing {len(sap_product_groups)} product categories.")
-        category_vals = []
-        for sap_group in sap_product_groups:
-            category_vals.append(
-                {
-                    "name": sap_group["itmsgrpnam"],
-                    "sap_itms_grp_cod": sap_group["itmsgrpcod"],
-                    "property_cost_method": "fifo",
-                }
-            )
-        categs = self.env["product.category"].create(category_vals)
-        self.env.cr.commit()
-        return categs
-
-    def import_orderpoints(self, cr):
+        Args:
+            cr: Database cursor for the SAP database.
+        """
         existing_orderpoints = tuple(
             self.env["stock.warehouse.orderpoint"]
             .search(
@@ -227,15 +119,162 @@ class SapProductImporter(models.AbstractModel):
                 }
             )
 
-    def _get_kit_component_quantities(self, product, quantity):
+    @api.model
+    def _import_oitm(self, cr, categories) -> None:
+        """Import sellable products from SAP OITM table using multiprocessing.
+
+        Args:
+            cr: Database cursor for the SAP database.
+            categories: Recordset of product.category records with SAP codes.
+        """
+        # Extract
+        sap_products, chunks = self._extract_oitm_products(cr)
+
+        # Transform: Build category mapping
+        categories_map = {
+            category.sap_itms_grp_cod: category.id for category in categories
+        }
+
+        # Load: Import products using multiprocessing
+        start_method = multiprocessing.get_start_method()
+        multiprocessing.set_start_method("fork", force=True)
+        try:
+            _logger.info(
+                f"Importing {len(sap_products)} products in {len(chunks)} chunks."
+            )
+            with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = [
+                    executor.submit(
+                        self._sub_import_oitm,
+                        self.env.cr.dbname,
+                        self.env.uid,
+                        dict(self.env.context),
+                        chunk,
+                        categories_map,
+                    )
+                    for chunk in chunks
+                ]
+                for future in futures:
+                    future.result()
+        except Exception as e:
+            raise e
+        finally:
+            multiprocessing.set_start_method(start_method, force=True)
+
+    ##################################################################
+    # Extraction Methods
+    ##################################################################
+
+    @api.model
+    def _extract_oitm_products(
+        self, cr, chunk_size: int = 500
+    ) -> Tuple[List[Dict[str, Any]], List[List[Dict[str, Any]]]]:
+        """Extract products from SAP OITM table, excluding already imported products.
+
+        Args:
+            cr: Database cursor for the SAP database.
+            chunk_size: Size of chunks for multiprocessing.
+
+        Returns:
+            Tuple of (all_products, chunked_products) where:
+                - all_products: Full list of SAP product dictionaries
+                - chunked_products: List of product chunks for parallel processing
+        """
+        # Get existing products to exclude
+        existing_products = tuple(
+            [
+                p["sap_item_code"]
+                for p in self.env["product.product"].search_read(
+                    [
+                        ("sap_item_code", "!=", False),
+                        ("active", "in", [True, False]),
+                    ],
+                    ["sap_item_code"],
+                )
+            ]
+        )
+        _logger.info(f"Found {len(existing_products)} existing products.")
+
+        # Build SQL query to extract new products
+        sql = "SELECT * FROM oitm"
+        if existing_products:
+            sql += " WHERE itemcode not in %s"
+            sql = SQL(sql, existing_products)
+        else:
+            sql = SQL(sql)
+
+        # Execute query
+        cr.execute(sql)
+        sap_products = cr.dictfetchall()
+
+        # Split into chunks for parallel processing
+        chunks = [
+            sap_products[i : i + chunk_size]
+            for i in range(0, len(sap_products), chunk_size)
+        ]
+
+        return sap_products, chunks
+
+
+    ##################################################################
+    # Transformation Methods
+    ##################################################################
+
+    @staticmethod
+    def _transform_oitm_chunk(
+        chunk: List[Dict[str, Any]], categories_map: Dict[int, int], company_id: int
+    ) -> List[Dict[str, Any]]:
+        """Transform a chunk of SAP OITM products into Odoo product values.
+
+        Args:
+            chunk: List of SAP product dictionaries.
+            categories_map: Mapping of SAP category codes to Odoo category IDs.
+            company_id: Company ID for the products.
+
+        Returns:
+            List of product value dicts ready for creation.
+        """
+        product_vals = []
+        for sap_product in chunk:
+            # Determine category
+            categ = (
+                categories_map[sap_product["itmsgrpcod"]]
+                if sap_product["itmsgrpcod"]
+                and sap_product["itmsgrpcod"] in categories_map
+                else False
+            )
+
+            # Build product values
+            vals = {
+                "sap_item_code": sap_product["itemcode"],
+                "sap_atcentry": sap_product["atcentry"],
+                "default_code": fix_quotes(sap_product["itemname"]),
+                "name": fix_quotes(sap_product["frgnname"] or "N/A"),
+                "sale_ok": sap_product["sellitem"] == "Y",
+                "purchase_ok": sap_product["prchseitem"] == "Y",
+                "active": sap_product["validfor"] == "Y",
+                "type": "consu",
+                "is_storable": True,
+                "company_id": company_id,
+            }
+
+            if categ:
+                vals["categ_id"] = categ
+
+            product_vals.append(vals)
+
+        return product_vals
+
+    @api.model
+    def _get_kit_component_quantities(self, product, quantity: float) -> Dict:
         """Get the component quantities for a kit product.
 
         Args:
-            product: product.product record that is a kit
-            quantity: quantity of the kit needed
+            product: product.product record that is a kit.
+            quantity: Quantity of the kit needed.
 
         Returns:
-            dict: product_id -> quantity mapping for components
+            Dictionary mapping product records to required quantities.
         """
         # Get the phantom BOM for this product
         bom = self.env["mrp.bom"].sudo()._bom_find(product, bom_type="phantom")[product]
@@ -272,21 +311,67 @@ class SapProductImporter(models.AbstractModel):
 
         return components
 
-    def _import_stock_quants(self, cr):
+    ##################################################################
+    # Loading Methods
+    ##################################################################
+
+    @api.model
+    def _import_stock_quants(self, cr) -> None:
+        """Import stock quantities from SAP, handling both regular products and kits.
+
+        Args:
+            cr: Database cursor for the SAP database.
+        """
         self.env.flush_all()
+
+        # Extract
+        sap_stocks = self._extract_stock_quants(cr)
+        if not sap_stocks:
+            return
+
+        # Transform
+        regular_vals, kit_vals, location = self._transform_stock_quants(sap_stocks)
+
+        # Load
+        self._load_stock_quants(regular_vals, kit_vals, location)
+
+    @api.model
+    def _extract_stock_quants(self, cr) -> List[Dict[str, Any]]:
+        """Extract stock quantities from SAP OITW table.
+
+        Args:
+            cr: Database cursor for the SAP database.
+
+        Returns:
+            List of stock dictionaries with itemcode and onhand quantity.
+        """
         cr.execute(
             """
-            SELECT oitw.itemcode,oitw.onhand
+            SELECT oitw.itemcode, oitw.onhand
             FROM oitw 
             INNER JOIN oitm ON oitw.itemcode = oitm.itemcode and oitw.onhand > 0
             """
         )
-        stocks = cr.dictfetchall()
-        if not stocks:
-            return
+        return cr.dictfetchall()
 
+    @api.model
+    def _transform_stock_quants(
+        self, sap_stocks: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], List[Tuple], Any]:
+        """Transform SAP stock data into regular and kit product values.
+
+        Args:
+            sap_stocks: List of SAP stock dictionaries.
+
+        Returns:
+            Tuple of (regular_vals, kit_vals, location) where:
+                - regular_vals: List of dicts for regular products
+                - kit_vals: List of tuples (product, quantity, location) for kits
+                - location: Stock location record
+        """
+        # Get products
         products = self.env["product.product"].search(
-            [("sap_item_code", "in", [s["itemcode"] for s in stocks])]
+            [("sap_item_code", "in", [s["itemcode"] for s in sap_stocks])]
         )
         products_dict = {p.sap_item_code: p for p in products}
 
@@ -300,7 +385,7 @@ class SapProductImporter(models.AbstractModel):
         kit_vals = []
         regular_vals = []
 
-        for stock in stocks:
+        for stock in sap_stocks:
             if stock["itemcode"] not in products_dict:
                 continue
 
@@ -317,78 +402,23 @@ class SapProductImporter(models.AbstractModel):
                     }
                 )
 
-        # Pre-fetch all products and locations we'll need
-        all_product_ids = set()
-        all_location_ids = set()
+        return regular_vals, kit_vals, location
 
-        # Gather IDs from regular vals
-        for val in regular_vals:
-            all_product_ids.add(val["product_id"])
-            all_location_ids.add(val["location_id"])
+    @api.model
+    def _load_stock_quants(self, regular_vals, kit_vals, location):
+        """Load stock quantities into Odoo.
 
-        # Pre-fetch all products and locations
-        products = self.env["product.product"].browse(list(all_product_ids))
-        locations = self.env["stock.location"].browse(list(all_location_ids))
-
-        # Create lookup dictionaries
-        products_by_id = {p.id: p for p in products}
-        locations_by_id = {l.id: l for l in locations}
-
-        # Get all existing quants
-        existing_quants = {}
-        for quant in self.env["stock.quant"].search(
-            [
-                ("location_id", "in", list(all_location_ids)),
-                ("product_id", "in", list(all_product_ids)),
-            ]
-        ):
-            existing_quants[(quant.product_id, quant.location_id)] = quant
-
-        def process_quants(vals_list, existing_quants, products_dict, locations_dict):
-            """Process a list of quant values, either creating new quants or updating existing ones.
-
-            Args:
-                vals_list: List of dicts with product_id, location_id, and quantity
-                existing_quants: Dict of existing quants keyed by (product, location)
-                products_dict: Dict of product records keyed by id
-                locations_dict: Dict of location records keyed by id
-
-            Returns:
-                Tuple of (quants_to_create, quants_to_update)
-            """
-            to_create = []
-            to_update = []
-
-            for val in vals_list:
-                product = products_dict.get(val["product_id"])
-                location = locations_dict.get(val["location_id"])
-                if not product or not location:
-                    continue
-
-                key = (product, location)
-                if key in existing_quants:
-                    quant = existing_quants[key]
-                    quant.quantity += val["quantity"]
-                    to_update.append(quant)
-                else:
-                    to_create.append(val)
-
-            return to_create, to_update
-
-        def batch_create(to_create, batch_size=1000):
-            """Create quants in batches."""
-            for i in range(0, len(to_create), batch_size):
-                batch = to_create[i : i + batch_size]
-                self.env["stock.quant"].create(batch)
-                self.env.cr.commit()
-
-        # Process regular products
-        regular_create, regular_update = process_quants(
-            regular_vals, existing_quants, products_by_id, locations_by_id
+        Args:
+            regular_vals: List of dicts for regular products
+            kit_vals: List of tuples (product, quantity, location) for kits
+            location: Stock location record
+        """
+        existing_quants = self._get_existing_quants(regular_vals, kit_vals)
+        regular_create, regular_update = self._process_quant_vals(
+            regular_vals, existing_quants
         )
-        batch_create(regular_create)
-        if regular_update:
-            self.env.cr.commit()  # Commit the quantity updates
+        self._batch_create_quants(regular_create)
+        self.env.cr.commit()  # Commit the quantity updates
 
         # Handle kit products
         components_to_update = defaultdict(float)
@@ -412,55 +442,200 @@ class SapProductImporter(models.AbstractModel):
             for (component, location), quantity in components_to_update.items()
         ]
 
-        # Add component product IDs to our lookup
-        for val in component_vals:
-            all_product_ids.add(val["product_id"])
-
-        # Update product lookup with any new components
-        new_products = self.env["product.product"].browse(
-            list(all_product_ids - set(products_by_id.keys()))
+        component_create, component_update = self._process_quant_vals(
+            component_vals, existing_quants
         )
-        products_by_id.update({p.id: p for p in new_products})
-
-        # Process component quants
-        component_create, component_update = process_quants(
-            component_vals, existing_quants, products_by_id, locations_by_id
-        )
-        batch_create(component_create)
+        self._batch_create_quants(component_create)
         if component_update:
             self.env.cr.commit()  # Commit the quantity updates
 
-    def _import_inventory_valuation(self, cr):
-        self.env.flush_all()
-        cr.execute(
-            """
-            SELECT oitw.itemcode,oitw.avgprice,oitm.onhand
-            FROM oitw 
-            INNER JOIN oitm ON oitw.itemcode = oitm.itemcode and oitm.onhand > 0
-            """
-        )
-        valuations = cr.dictfetchall()
-        products = self.env["product.template"].search(
-            [("sap_item_code", "in", [val["itemcode"] for val in valuations])]
-        )
-        products_dict = {p.sap_item_code: p for p in products}
-        vals_list = []
-        for val in valuations:
-            product = products_dict[val["itemcode"]]
-            vals = {
-                "company_id": self.env.company.id,
-                "product_id": product.id,
-                "unit_cost": val["avgprice"],
-                "quantity": val["onhand"],
-            }
-            vals_list.append(vals)
-        self.env["stock.valuation.layer"].create(vals_list)
-        self.env.flush_all()
+    @api.model
+    def _get_existing_quants(self, regular_vals, kit_vals):
+        """Get existing stock quants for the given products and locations.
 
-    def _delete_all(self):
+        Args:
+            regular_vals: List of dicts for regular products
+            kit_vals: List of tuples (product, quantity, location) for kits
+
+        Returns:
+            Dict of existing quants keyed by (product, location)
+        """
+        all_product_ids = set()
+        all_location_ids = set()
+
+        # Gather IDs from regular vals
+        for val in regular_vals:
+            all_product_ids.add(val["product_id"])
+            all_location_ids.add(val["location_id"])
+
+        # Gather IDs from kit vals
+        for product, _, location in kit_vals:
+            all_product_ids.add(product.id)
+            all_location_ids.add(location.id)
+
+        # Pre-fetch all products and locations
+        products = self.env["product.product"].browse(list(all_product_ids))
+        locations = self.env["stock.location"].browse(list(all_location_ids))
+
+        # Create lookup dictionaries
+        products_by_id = {p.id: p for p in products}
+        locations_by_id = {l.id: l for l in locations}
+
+        # Get all existing quants
+        existing_quants = {}
+        for quant in self.env["stock.quant"].search(
+            [
+                ("location_id", "in", list(all_location_ids)),
+                ("product_id", "in", list(all_product_ids)),
+            ]
+        ):
+            existing_quants[(quant.product_id, quant.location_id)] = quant
+
+        return existing_quants
+
+    @api.model
+    def _process_quant_vals(self, vals_list, existing_quants):
+        """Process a list of quant values, either creating new quants or updating existing ones.
+
+        Args:
+            vals_list: List of dicts with product_id, location_id, and quantity
+            existing_quants: Dict of existing quants keyed by (product, location)
+
+        Returns:
+            Tuple of (quants_to_create, quants_to_update)
+        """
+        to_create = []
+        to_update = []
+
+        for val in vals_list:
+            product = self.env["product.product"].browse(val["product_id"])
+            location = self.env["stock.location"].browse(val["location_id"])
+            if not product or not location:
+                continue
+
+            key = (product, location)
+            if key in existing_quants:
+                quant = existing_quants[key]
+                quant.quantity += val["quantity"]
+                to_update.append(quant)
+            else:
+                to_create.append(val)
+
+        return to_create, to_update
+
+    @api.model
+    def _batch_create_quants(self, to_create, batch_size=1000):
+        """Create quants in batches."""
+        for i in range(0, len(to_create), batch_size):
+            batch = to_create[i : i + batch_size]
+            self.env["stock.quant"].create(batch)
+            self.env.cr.commit()
+
+    ##################################################################
+    # Utilities
+    ##################################################################
+
+    @api.model
+    def _delete_all(self) -> None:
+        """Delete all SAP-imported products and categories from Odoo.
+
+        Warning: This is a destructive operation.
+        """
         self.env.cr.execute(
             "DELETE from product_product WHERE sap_item_code is not null"
         )
         self.env.cr.execute(
             "DELETE from product_category WHERE sap_itms_grp_cod is not null"
         )
+
+    ##################################################################
+    # Inventory Valuation
+    ##################################################################
+
+    @api.model
+    def _import_inventory_valuation(self, cr) -> None:
+        """Import inventory valuation layers from SAP.
+
+        Note: stock.valuation.layer model may not exist in Odoo 19.0.
+        This method may need to be updated for the new inventory valuation system.
+
+        Args:
+            cr: Database cursor for the SAP database.
+        """
+        self.env.flush_all()
+
+        # Extract
+        sap_valuations = self._extract_inventory_valuations(cr)
+
+        # Transform
+        valuation_vals = self._transform_inventory_valuations(sap_valuations)
+
+        # Load
+        self._load_inventory_valuations(valuation_vals)
+
+        self.env.flush_all()
+
+    @api.model
+    def _extract_inventory_valuations(self, cr) -> List[Dict[str, Any]]:
+        """Extract inventory valuations from SAP OITW table.
+
+        Args:
+            cr: Database cursor for the SAP database.
+
+        Returns:
+            List of valuation dictionaries with itemcode, avgprice, and onhand.
+        """
+        cr.execute(
+            """
+            SELECT oitw.itemcode, oitw.avgprice, oitm.onhand
+            FROM oitw 
+            INNER JOIN oitm ON oitw.itemcode = oitm.itemcode and oitm.onhand > 0
+            """
+        )
+        return cr.dictfetchall()
+
+    @api.model
+    def _transform_inventory_valuations(
+        self, sap_valuations: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Transform SAP inventory valuations into Odoo valuation layer values.
+
+        Args:
+            sap_valuations: List of SAP valuation dictionaries.
+
+        Returns:
+            List of valuation layer value dicts ready for creation.
+        """
+        products = self.env["product.template"].search(
+            [("sap_item_code", "in", [val["itemcode"] for val in sap_valuations])]
+        )
+        products_dict = {p.sap_item_code: p for p in products}
+
+        vals_list = []
+        for val in sap_valuations:
+            product = products_dict.get(val["itemcode"])
+            if not product:
+                continue
+
+            vals_list.append(
+                {
+                    "company_id": self.env.company.id,
+                    "product_id": product.id,
+                    "unit_cost": val["avgprice"],
+                    "quantity": val["onhand"],
+                }
+            )
+
+        return vals_list
+
+    @api.model
+    def _load_inventory_valuations(self, valuation_vals: List[Dict[str, Any]]) -> None:
+        """Load inventory valuation layers into Odoo.
+
+        Note: stock.valuation.layer model may not exist in Odoo 19.0.
+
+        Args:
+            valuation_vals: List of valuation layer value dicts.
+        """
+        if valuation_vals:
+            self.env["stock.valuation.layer"].create(valuation_vals)

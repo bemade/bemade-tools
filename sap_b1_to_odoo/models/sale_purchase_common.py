@@ -80,6 +80,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
 
         self.env.cr.commit()
 
+    @api.model
     def _get_row_vals(self, row, products_dict, sap_table):
         # Handle text lines from RDR10/POR10
         if "linetext" in row:  # This is a text line
@@ -177,6 +178,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             )
         }
 
+    @api.model
     def _get_imported_docnums(self):
         """Get already imported document numbers from Odoo"""
         table = self._odoo_table
@@ -184,13 +186,14 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             """
         SELECT distinct(sap_docnum) from %s WHERE sap_docnum is not null
         """,
-            SQL.identifier(table),
+            SQL.identifier(table),  # pyright: ignore[reportArgumentType]
         )
         cr = self.env.cr
         cr.execute(sql)
         docnums = [order[0] for order in cr.fetchall()]
         return docnums
 
+    @api.model
     def _create_orders(self, cr, pager, multiproc=True):
         """Create orders from SAP data"""
         self._check_configuration()
@@ -239,6 +242,7 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
             multiprocessing.set_start_method(start_method, force=True)
             _logger.info("Import completed.")
 
+    @api.model
     def _get_lines(self, cr, sap_orders):
         docentries = [order["docentry"] for order in sap_orders]
         # Get product lines

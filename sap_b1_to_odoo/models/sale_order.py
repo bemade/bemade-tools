@@ -1,16 +1,18 @@
-from odoo import models, fields, Command, api
+import logging
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
+from typing import Dict, List, Any, Optional
+
+from fuzzywuzzy import fuzz, process
+from odoo import api, Command, fields, models
+from odoo.addons.sap_b1_to_odoo.tools import PagingIterator, fix_tz
 from odoo.modules.registry import Registry
 from odoo.tools.sql import SQL
-from odoo.addons.sap_b1_to_odoo.tools import PagingIterator, fix_tz
-from concurrent.futures import ProcessPoolExecutor
-import multiprocessing
-import logging
-import os
-from fuzzywuzzy import process, fuzz
-
-workers = os.cpu_count() - 1
 
 _logger = logging.getLogger(__name__)
+
+MAX_WORKERS = os.cpu_count() - 1 if os.cpu_count() else 7 # pyright: ignore[reportOptionalOperand]
 
 
 class SalesOrder(models.Model):
@@ -75,7 +77,7 @@ class SapSaleOrderImporter(models.AbstractModel):
     _description = "SAP Sales Order Importer"
     _inherit = "sap.sale.purchase.importer.mixin"
 
-    # Configuration
+    # SAP to Odoo table mapping configuration
     _sap_header_table = "ordr"
     _sap_lines_table = "rdr1"
     _sap_text_lines_table = "rdr10"
@@ -88,8 +90,97 @@ class SapSaleOrderImporter(models.AbstractModel):
     _quantity_method_field = "qty_delivered_method"
     _order_line_field = "sale_line_id"
 
+    ##################################################################
+    # Public Interface and Main Entry Point Methods
+    ##################################################################
+
     @api.model
-    def _get_sap_users_dict(self):
+    def import_sales_orders(self, cr) -> None:
+        """Import sales orders from SAP.
+        
+        Args:
+            cr: Database cursor for the SAP database.
+        """
+        self._uppercase_all_cardcodes(cr)
+        self._import_all(cr)
+
+    @api.model
+    def init_pricelists(self) -> None:
+        """Initialize default pricelists for all active currencies in the database."""
+        active_currencies = self.env["res.currency"].search([("active", "=", True)])
+        
+        for currency in active_currencies:
+            pricelist_name = f"Default {currency.name} Pricelist"
+            
+            # Check if pricelist already exists
+            existing_pricelist = self.env["product.pricelist"].search(
+                [
+                    ("currency_id", "=", currency.id),
+                    ("company_id", "=", self.env.company.id),
+                    ("name", "=", pricelist_name),
+                ],
+                limit=1,
+            )
+            if existing_pricelist:
+                continue
+            
+            # Create pricelist
+            self.env["product.pricelist"].create(
+                {
+                    "name": pricelist_name,
+                    "currency_id": currency.id,
+                }
+            )
+            _logger.info(f"Created {pricelist_name} for {currency.name} currency.")
+
+    def _import_all(self, cr):
+        # First import orders
+        imported_docnums = tuple(self._get_imported_docnums())
+        _logger.info(f"Found {len(imported_docnums)} imported sales orders.")
+        args = []
+        where = ""
+        if imported_docnums:
+            where += "WHERE docnum not in %s"
+            args = [imported_docnums]
+        order_pager = PagingIterator(
+            cr,
+            fetch_query=f"select * from {self._sap_header_table} {where}",
+            fetch_args=args,
+            count_query=f"select count(*) from {self._sap_header_table} {where}",
+            count_args=args,
+            limit=500,
+            orderby="docentry",
+            logger=_logger,
+        )
+        _logger.info("Creating orders.")
+        self._create_orders(cr, order_pager)
+        _logger.info("Confirming closed orders (no picking).")
+        self._confirm_closed_orders(cr)
+        self._set_delivered_received_qty_for_closed_orders(cr)
+        _logger.info("Confirming open orders.")
+        self._confirm_open_orders(cr)
+        _logger.info("Canceling canceled orders.")
+        self._cancel_canceled_orders(cr)
+        _logger.info("Recomputing delivery status for all orders.")
+        self._recompute_delivery_status()
+        _logger.info("Processing pickings that are partially shipped in SAP.")
+        self._validate_pickings_with_sap_quantities(cr)
+        _logger.info("Setting order dates.")
+        self._set_order_dates(cr)
+        self.env[self._odoo_model].flush_model()
+        self.env.cr.commit()
+
+    ##################################################################
+    # Transformation Methods
+    ##################################################################
+
+    @api.model
+    def _get_sap_users_dict(self) -> Dict[int, int]:
+        """Get a dictionary mapping SAP salesperson codes to Odoo user IDs.
+        
+        Returns:
+            Dictionary with SAP slpcode as key and Odoo user ID as value.
+        """
         return {
             user.sap_slpcode: user.id
             for user in self.env["res.users"].search(
@@ -100,37 +191,6 @@ class SapSaleOrderImporter(models.AbstractModel):
             )
         }
 
-    def import_sales_orders(self, cr):
-        self._uppercase_all_cardcodes(cr)
-        self._import_utm_sources(cr)
-        self._import_all(cr)
-
-    @api.model
-    def _import_utm_sources(self, cr):
-        sql = (
-            "SELECT DISTINCT u_fcsdk_source FROM ORDR "
-            "WHERE u_fcsdk_source IS NOT null AND u_fcsdk_source <> ''"
-        )
-        cr.execute(SQL(sql))
-        sources = cr.dictfetchall()
-        sql = "SELECT DISTINCT name from utm_source"
-        self.env.cr.execute(SQL(sql))
-        existing_sources = set([source[0] for source in cr.fetchall()])
-        vals_list = []
-        for source in sources:
-            if source["u_fcsdk_source"] not in existing_sources:
-                vals_list.append(
-                    {
-                        "name": source["u_fcsdk_source"],
-                    }
-                )
-        if vals_list:
-            self.env["utm.source"].create(vals_list)
-            self.env["utm.source"].flush_model()
-
-    @api.model
-    def _get_sources_dict(self):
-        return {source.name: source.id for source in self.env["utm.source"].search([])}
 
     @staticmethod
     def _find_partner_by_type(order, partner, address_type):
@@ -170,78 +230,6 @@ class SapSaleOrderImporter(models.AbstractModel):
         upper-case match in the ocrd table."""
         cr.execute("UPDATE ordr SET cardcode = UPPER(cardcode)")
         cr.execute("UPDATE oqut SET cardcode = UPPER(cardcode)")
-
-    def _import_all(self, cr):
-        # First import orders
-        imported_docnums = tuple(self._get_imported_docnums())
-        _logger.info(f"Found {len(imported_docnums)} imported sales orders.")
-        args = []
-        where = ""
-        if imported_docnums:
-            where += "WHERE docnum not in %s"
-            args = [imported_docnums]
-        order_pager = PagingIterator(
-            cr,
-            fetch_query=f"select * from {self._sap_header_table} {where}",
-            fetch_args=args,
-            count_query=f"select count(*) from {self._sap_header_table} {where}",
-            count_args=args,
-            limit=500,
-            orderby="docentry",
-            logger=_logger,
-        )
-        _logger.info("Creating orders.")
-        self._create_orders(cr, order_pager)
-        _logger.info("Confirming closed orders (no picking).")
-        self._confirm_closed_orders(cr)
-        self._set_delivered_received_qty_for_closed_orders(cr)
-        _logger.info("Confirming open orders.")
-        self._confirm_open_orders(cr)
-        _logger.info("Canceling canceled orders.")
-        self._cancel_canceled_orders(cr)
-        _logger.info("Recomputing delivery status for all orders.")
-        self._recompute_delivery_status()
-        _logger.info("Processing pickings that are partially shipped in SAP.")
-        self._validate_pickings_with_sap_quantities(cr)
-        _logger.info("Setting order dates.")
-        self._set_order_dates(cr)
-        self.env[self._odoo_model].flush_model()
-        self.env.cr.commit()
-
-    @api.model
-    def init_pricelists(self):
-        cad_pricelist = self.env["product.pricelist"].search(
-            [
-                ("currency_id.name", "=", "CAD"),
-                ("company_id", "=", self.env.company.id),
-                ("name", "=", "Default CAD Pricelist"),
-            ]
-        )
-        usd_pricelist = self.env["product.pricelist"].search(
-            [
-                ("currency_id.name", "=", "USD"),
-                ("company_id", "=", self.env.company.id),
-                ("name", "=", "Default USD Pricelist"),
-            ]
-        )
-        if not cad_pricelist:
-            self.env["product.pricelist"].create(
-                {
-                    "name": "Default CAD Pricelist",
-                    "currency_id": self.env["res.currency"]
-                    .search([("name", "=", "CAD")])
-                    .id,
-                }
-            )
-        if not usd_pricelist:
-            self.env["product.pricelist"].create(
-                {
-                    "name": "Default USD Pricelist",
-                    "currency_id": self.env["res.currency"]
-                    .search([("name", "=", "USD")])
-                    .id,
-                }
-            )
 
     @api.model
     def _get_order_vals(self, sap_order_rows, sap_orders, sap_table):
@@ -284,7 +272,6 @@ class SapSaleOrderImporter(models.AbstractModel):
         partners_dict = self._get_partners_dict()
         contacts_dict = self._get_contacts_dict()
         sap_users_dict = self._get_sap_users_dict()
-        sources_dict = self._get_sources_dict()
         carriers_dict = _get_carriers_dict()
 
         order_rows_dict = {}
@@ -317,7 +304,6 @@ class SapSaleOrderImporter(models.AbstractModel):
             )
             terms = terms_dict.get(order["groupnum"])
             user = sap_users_dict.get(order["slpcode"], False)
-            source = sources_dict.get(order["u_fcsdk_source"], False)
             carrier = carriers_dict.get(order["trnspcode"])
             rows = order_rows_dict.get(order["docentry"])
             row_vals = [
@@ -339,7 +325,6 @@ class SapSaleOrderImporter(models.AbstractModel):
                 "picking_policy": self._get_picking_policy(order),
                 "carrier_id": carrier and carrier.id,
                 "order_line": row_vals,
-                "source_id": source,
                 "user_id": user,
             }
             if order["docstatus"] == "C":
