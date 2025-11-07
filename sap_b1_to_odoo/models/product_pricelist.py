@@ -36,347 +36,342 @@ class ProductPricelist(models.Model):
         return res
 
 
-class ProductPricelistImporter(models.AbstractModel):
-    _name = "sap.product.pricelist.importer"
-    _description = "SAP Product Pricelist Importer"
+@ETL.pipeline(
+    target_model="product.pricelist",
+    importer_name="product.pricelist.item.importer",
+    sap_source="opln,ooat,oat1",
+    depends_on=["product.product.importer", "res.partner.company.importer"],
+    allow_multiprocessing=False,  # Small dataset, always single-process
+)
+class ProductPricelistItemImporter(models.AbstractModel):
+    _name = "product.pricelist.item.importer"
+    _description = "SAP Product Pricelist Items Importer (OPLN/OOAT/OAT1)"
 
-    _products_dict = None
-    _partners_dict = None
+    _lookup_cache = {}
 
-    @api.model
-    def _get_products_dict(self, cr):
-        product_dict = ProductPricelistImporter._products_dict
-        if product_dict is None:
-            sql = "SELECT distinct(itemcode) from OAT1"
-            cr.execute(SQL(sql))
-            itemcodes = [item[0] for item in cr.fetchall()]
-            products = self.env["product.product"].search(
-                [
-                    ("sap_item_code", "in", itemcodes),
-                    ("active", "in", [False, True]),
-                ]
-            )
-            ProductPricelistImporter._products_dict = product_dict = {
-                product.sap_item_code: product for product in products
-            }
-        return product_dict
+    @ETL.extract("opln,ooat,oat1")
+    def extract_pricelists_and_blankets(self, ctx: ETLContext) -> Dict:
+        """Extract pricelists and blanket orders from SAP.
 
-    @api.model
-    def _get_partners_dict(self, cr):
-        partners_dict = ProductPricelistImporter._partners_dict
-        if partners_dict is None:
-            sql = "SELECT distinct (bpcode) from OOAT"
-            cr.execute(SQL(sql))
-            cardcodes = [item[0] for item in cr.fetchall()]
-            partners = self.env["res.partner"].search(
-                [
-                    ("sap_card_code", "in", cardcodes),
-                    ("active", "in", [True, False]),
-                ]
-            )
-            ProductPricelistImporter._partners_dict = partners_dict = {
-                partner.sap_card_code: partner for partner in partners
-            }
-        return partners_dict
+        Args:
+            ctx: ETL context with SAP cursor and Odoo environment.
 
-    @api.model
-    def _get_sap_basic_pricelists(self, cr):
-        sql = "SELECT * FROM opln"
-        cr.execute(SQL(sql))
-        return cr.dictfetchall()
+        Returns:
+            Dictionary containing basic pricelists, blanket orders, and blanket lines.
+        """
+        # Extract basic pricelists from OPLN
+        ctx.cr.execute("SELECT * FROM opln")
+        basic_pricelists = ctx.cr.dictfetchall()
+        _logger.info(f"Extracted {len(basic_pricelists)} basic pricelists from OPLN.")
 
-    @api.model
-    def import_all(self, cr):
-        return self._import_all(cr)
+        # Extract blanket orders from OOAT
+        ctx.cr.execute("SELECT * FROM ooat")
+        blanket_orders = ctx.cr.dictfetchall()
+        _logger.info(f"Extracted {len(blanket_orders)} blanket orders from OOAT.")
 
-    @api.model
-    def _import_all(self, cr):
-        _logger.info(f"Importing pricelists.")
-        self._import_basic_pricelists(cr)
-        sap_blanket_orders = self._get_all_sap_blanket_orders(cr)
-        sap_blanket_lines_dict = self._get_sap_blanket_lines_dict(cr)
-        products_dict = self._get_products_dict(cr)
-        partners_dict = self._get_partners_dict(cr)
-        pricelist_vals = self._get_pricelist_vals(
-            sap_blanket_orders, sap_blanket_lines_dict, products_dict, partners_dict
-        )
-        pricelists = self.env["product.pricelist"].create(pricelist_vals)
-        _logger.info(
-            f"{len(pricelists)} Product pricelists imported "
-            f"with {len(pricelists.mapped('item_ids'))} lines."
-        )
-        _logger.info("Setting default partner pricelists.")
-        self._set_partner_default_pricelists(
-            sap_blanket_orders, pricelists, partners_dict
-        )
-        self._set_usd_pricelist_partners(cr)
-        _logger.info("Importing purchase blankets.")
-        purchase_blanket_vals = self._get_purchase_blanket_vals(
-            cr,
-            sap_blanket_orders,
-            sap_blanket_lines_dict,
-            products_dict,
-            partners_dict,
-        )
-        blankets = self.env["purchase.requisition"].create(purchase_blanket_vals)
-        _logger.info(f"Imported {len(blankets)} purchase blankets.")
+        # Extract blanket lines from OAT1
+        ctx.cr.execute("SELECT * FROM oat1")
+        blanket_lines = ctx.cr.dictfetchall()
+        _logger.info(f"Extracted {len(blanket_lines)} blanket lines from OAT1.")
 
-    @api.model
-    def _set_usd_pricelist_partners(self, cr):
-        cr.execute("SELECT cardcode FROM ocrd WHERE currency = 'USD'")
-        cardcodes = [item[0] for item in cr.fetchall()]
-        cad_pricelist = self.env["product.pricelist"].search(
-            [("name", "=", "Default CAD Pricelist")]
-        )
-        usd_pricelist = self.env["product.pricelist"].search(
-            [("name", "=", "Default USD Pricelist")]
-        )
-        odoo_partners = self.env["res.partner"].search(
-            [
-                ("sap_card_code", "in", cardcodes),
-                ("active", "in", [True, False]),
-            ]
-        )
-        odoo_partners = odoo_partners.filtered(
-            lambda partner: partner.property_product_pricelist == cad_pricelist
-        )
-        odoo_partners.write({"property_product_pricelist": usd_pricelist.id})
+        # Group lines by agreement number
+        lines_dict = {}
+        for line in blanket_lines:
+            lines_dict.setdefault(line["agrno"], []).append(line)
 
-    @api.model
-    def _import_basic_pricelists(self, cr):
-        """For simple pricelists in the OPLN table, we just import the name and the
-        linenum so that we can later reference them. Each pricelist that isn't the base
-        pricelist gets one line, simply using the main pricelist as its base. This is
-        done so that we can associate clients to the pricelists and then apply the
-        discount levels appropriately after import via manual config.
+        # Pre-compute lookup dictionaries
+        _logger.info("Pre-computing lookup dictionaries...")
 
-        The public pricelist gets renamed to the pricelist with ID 1 ("END USER") and
-        gets its linenum set."""
-        basic_lists = self._get_sap_basic_pricelists(cr)
-        public_pricelist = self.env["product.pricelist"].search(
-            [
-                ("name", "ilike", "public"),
-                ("currency_id", "=", self.env.ref("base.CAD").id),
-            ]
+        # Get products
+        itemcodes = [line["itemcode"] for line in blanket_lines]
+        products = ctx.env["product.product"].search(
+            [("sap_item_code", "in", itemcodes), ("active", "in", [False, True])]
         )
-        for pricelist in basic_lists:
-            if pricelist["listnum"] == 1:
-                public_pricelist.name = pricelist["listname"]
-                public_pricelist.sap_listnum = pricelist["listnum"]
-            else:
-                self.env["product.pricelist"].create(
+        products_map = {product.sap_item_code: product.id for product in products}
+        product_tmpl_map = {
+            product.sap_item_code: product.product_tmpl_id.id for product in products
+        }
+
+        # Get partners
+        cardcodes = [blanket["bpcode"] for blanket in blanket_orders]
+        partners = ctx.env["res.partner"].search(
+            [("sap_card_code", "in", cardcodes), ("active", "in", [True, False])]
+        )
+        partners_map = {partner.sap_card_code: partner.id for partner in partners}
+        partner_type_map = {
+            partner.sap_card_code: partner.sap_partner_type for partner in partners
+        }
+        partner_pricelist_map = {
+            partner.sap_card_code: partner.property_product_pricelist.id
+            for partner in partners
+        }
+
+        # Get currencies
+        currencies = ctx.env["res.currency"].search([])
+        currencies_map = {currency.name: currency.id for currency in currencies}
+
+        # Get agreement to cardcode mapping for purchase blankets
+        ctx.cr.execute(
+            "SELECT cardcode, dflagrmnt FROM ocrd WHERE dflagrmnt IS NOT NULL"
+        )
+        agreements_to_cardcode = ctx.cr.fetchall()
+        agreement_partners_dict = {}
+        for cardcode, agreement_id in agreements_to_cardcode:
+            partner_id = partners_map.get(cardcode)
+            if partner_id:
+                agreement_partners_dict.setdefault(agreement_id, []).append(partner_id)
+
+        ProductPricelistItemImporter._lookup_cache = {
+            "products_map": products_map,
+            "product_tmpl_map": product_tmpl_map,
+            "partners_map": partners_map,
+            "partner_type_map": partner_type_map,
+            "partner_pricelist_map": partner_pricelist_map,
+            "currencies_map": currencies_map,
+            "agreement_partners_dict": agreement_partners_dict,
+            "company_id": ctx.env.company.id,
+        }
+        _logger.info("Lookup dictionaries ready.")
+
+        return {
+            "basic_pricelists": basic_pricelists,
+            "blanket_orders": blanket_orders,
+            "blanket_lines_dict": lines_dict,
+        }
+
+    @ETL.transform()
+    def transform_pricelists_and_blankets(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> Dict:
+        """Transform SAP pricelists and blankets into Odoo values.
+
+        Args:
+            ctx: ETL context.
+            extracted: Dictionary containing extracted data.
+
+        Returns:
+            Dictionary with basic_pricelist_vals, customer_pricelist_vals, and purchase_blanket_vals.
+        """
+        data = extracted["extract_pricelists_and_blankets"]
+        basic_pricelists = data["basic_pricelists"]
+        blanket_orders = data["blanket_orders"]
+        blanket_lines_dict = data["blanket_lines_dict"]
+
+        cache = ProductPricelistItemImporter._lookup_cache
+        products_map = cache["products_map"]
+        product_tmpl_map = cache["product_tmpl_map"]
+        partners_map = cache["partners_map"]
+        partner_type_map = cache["partner_type_map"]
+        partner_pricelist_map = cache["partner_pricelist_map"]
+        currencies_map = cache["currencies_map"]
+        company_id = cache["company_id"]
+
+        # Transform basic pricelists (OPLN)
+        basic_pricelist_vals = []
+        for pricelist in basic_pricelists:
+            if pricelist["listnum"] != 1:  # Skip listnum 1, it's the public pricelist
+                basic_pricelist_vals.append(
                     {
                         "sap_listnum": pricelist["listnum"],
                         "name": pricelist["listname"],
-                        "item_ids": [
-                            Command.create(
-                                {
-                                    "applied_on": "3_global",
-                                    "base": "pricelist",
-                                    "base_pricelist_id": public_pricelist.id,
-                                }
-                            )
-                        ],
                     }
                 )
 
-    @api.model
-    def _set_partner_default_pricelists(
-        self,
-        sap_blanket_orders,
-        pricelists,
-        partners_dict,
-    ):
-        now = datetime.now()
-        pricelists_dict = {
-            pricelist.sap_abs_id: pricelist
-            for pricelist in (
-                pricelists.mapped("item_ids")
-                .filtered(
-                    lambda line: (not line.date_start or line.date_start <= now)
-                    and (not line.date_end or now <= line.date_end)
-                )
-                .mapped("pricelist_id")
-            )
-        }
-        default_pricelists = self.env["product.pricelist"].search(
-            [("name", "ilike", "Default")]
-        )
-        for blanket in sap_blanket_orders:
-            partner = partners_dict[blanket["bpcode"]]
-            pricelist = pricelists_dict.get(blanket["absid"])
-            if pricelist and pricelist.active and partner:
-                partner.property_product_pricelist = pricelist
-            elif (
-                pricelist
-                and not pricelist.active
-                and partner
-                and pricelist.currency_id != self.env.company.currency_id
-            ):
-                applicable_pricelists = default_pricelists.filtered(
-                    lambda pl: pl.currency_id == pricelist.currency_id
-                )
-                if applicable_pricelists:
-                    partner.property_product_pricelist = applicable_pricelists[0]
+        _logger.info(f"Transformed {len(basic_pricelist_vals)} basic pricelists.")
 
-    @api.model
-    def _get_all_sap_blanket_orders(self, cr):
-        sql = "SELECT * from OOAT"
-        cr.execute(SQL(sql))
-        return cr.dictfetchall()
+        # Transform customer pricelists (blanket orders for customers)
+        customer_pricelist_vals = []
+        now = datetime.now(utc)
 
-    @api.model
-    def _get_sap_blanket_lines_dict(self, cr):
-        sql = "SELECT * FROM OAT1"
-        cr.execute(SQL(sql))
-        lines = cr.dictfetchall()
-        lines_dict = {}
-        for line in lines:
-            lines_dict.setdefault(line["agrno"], []).append(line)
-        return lines_dict
-
-    @api.model
-    def _get_pricelist_vals(
-        self, sap_blanket_orders, sap_blanket_lines_dict, products_dict, partners_dict
-    ):
-        vals = []
-        for blanket in sap_blanket_orders:
-            partner = partners_dict[blanket["bpcode"]]
-            # Don't set these up for suppliers
-            if partner.sap_partner_type == "S":
+        for blanket in blanket_orders:
+            partner_id = partners_map.get(blanket["bpcode"])
+            if not partner_id:
                 continue
+
+            partner_type = partner_type_map.get(blanket["bpcode"])
+            if partner_type == "S":  # Skip suppliers
+                continue
+
             start = fix_tz(blanket["startdate"])
             end = fix_tz(blanket["enddate"])
-            active = datetime.now() <= end
-            name = blanket["descript"] or partner.name
+            active = now <= end
+
+            lines = blanket_lines_dict.get(blanket["absid"], [])
+            item_vals = []
+
+            for line in lines:
+                product_tmpl_id = product_tmpl_map.get(line["itemcode"])
+                if not product_tmpl_id:
+                    continue
+
+                item_vals.append(
+                    {
+                        "applied_on": "1_product",
+                        "product_tmpl_id": product_tmpl_id,
+                        "compute_price": "fixed",
+                        "fixed_price": line["unitprice"],
+                        "company_id": company_id,
+                        "date_start": start,
+                        "date_end": end,
+                    }
+                )
+
+            # Add fallback to base pricelist
+            base_pricelist_id = partner_pricelist_map.get(blanket["bpcode"])
+            if base_pricelist_id:
+                item_vals.append(
+                    {
+                        "applied_on": "3_global",
+                        "base": "pricelist",
+                        "base_pricelist_id": base_pricelist_id,
+                    }
+                )
+
             currency_code = "USD" if blanket["bpcurr"] == "USD" else "CAD"
-            currency = self.env["res.currency"].search([("name", "=", currency_code)])
-            item_vals = self._extract_item_vals(
-                sap_blanket_lines_dict[blanket["absid"]],
-                products_dict,
-                start,
-                end,
-            )
-            # Add the final line to refer back to the base pricelist for all other products
-            item_vals += [
-                {
-                    "applied_on": "3_global",
-                    "base": "pricelist",
-                    "base_pricelist_id": partner.property_product_pricelist.id,
-                }
-            ]
-            vals.append(
+            currency_id = currencies_map.get(currency_code)
+
+            # Get partner name for pricelist name
+            partner = ctx.env["res.partner"].browse(partner_id)
+            name = blanket["descript"] or partner.name
+
+            customer_pricelist_vals.append(
                 {
                     "sap_abs_id": blanket["absid"],
-                    "name": partner.name + " - " + name,
+                    "name": f"{partner.name} - {name}",
                     "active": active,
-                    "currency_id": currency.id,
+                    "currency_id": currency_id,
                     "item_ids": [Command.create(val) for val in item_vals],
-                    "company_id": self.env.company.id,
+                    "company_id": company_id,
+                    "_partner_id": partner_id,  # Store for later use
+                    "_is_active": active,
                 }
             )
-        return vals
 
-    def _get_purchase_blanket_vals(
-        self,
-        cr,
-        sap_blanket_orders,
-        sap_blanket_lines_dict,
-        products_dict,
-        partners_dict,
-    ):
-        def _get_status(blanket):
-            match blanket["status"]:
-                case "A" | "X" | "P":
-                    return "confirmed"
-                case "B" | "D" | "F":
-                    return "draft"
-                case "T":
-                    return "done"
-                case "C":
-                    return "cancel"
+        _logger.info(f"Transformed {len(customer_pricelist_vals)} customer pricelists.")
 
-        vals = []
-        cr.execute("SELECT cardcode, dflagrmnt FROM ocrd WHERE dflagrmnt is not null")
-        agreements_to_cardcode = cr.fetchall()
-        partners = self.env["res.partner"].search(
-            [
-                ("sap_card_code", "in", [agr[0] for agr in agreements_to_cardcode]),
-                ("active", "in", [False, True]),
-            ]
-        )
-        cardcode_to_partner_ids_dict = {
-            partner.sap_card_code: partner.id for partner in partners
+        return {
+            "basic_pricelist_vals": basic_pricelist_vals,
+            "customer_pricelist_vals": customer_pricelist_vals,
         }
-        agreement_partners_dict = {}
-        for agmt in agreements_to_cardcode:
-            agreement_partners_dict.setdefault(agmt[1], []).append(
-                cardcode_to_partner_ids_dict[agmt[0]]
-            )
-        for blanket in sap_blanket_orders:
-            partner = partners_dict.get(blanket["bpcode"])
-            # Only make these for suppliers
-            if partner.sap_partner_type != "S":
-                continue
-            start = fix_tz(blanket["startdate"])
-            end = fix_tz(blanket["enddate"])
-            reference = blanket["descript"]
-            status = _get_status(blanket)
-            currency_code = "USD" if blanket["bpcurr"] == "USD" else "CAD"
-            currency = self.env["res.currency"].search([("name", "=", currency_code)])
-            item_vals = self._extract_blanket_item_vals(
-                sap_blanket_lines_dict[blanket["absid"]],
-                products_dict,
-            )
-            customer_ids = agreement_partners_dict.get(blanket["absid"], [])
-            vals.append(
-                {
-                    "vendor_id": partner.id,
-                    "reference": reference,
-                    "date_start": start,
-                    "date_end": end,
-                    "state": status,
-                    "currency_id": currency.id,
-                    "line_ids": [Command.create(val) for val in item_vals],
-                    "requisition_type": "blanket_order",
-                    "customer_ids": [Command.set(customer_ids)] if customer_ids else [],
-                }
-            )
-        return vals
 
-    @api.model
-    def _extract_item_vals(self, sap_blanket_lines, products_dict, start, end):
-        vals = []
-        for line in sap_blanket_lines:
-            product = products_dict[line["itemcode"]]
-            vals.append(
-                {
-                    "applied_on": "1_product",
-                    "product_tmpl_id": product.product_tmpl_id.id,
-                    "compute_price": "fixed",
-                    "fixed_price": line["unitprice"],
-                    "company_id": self.env.company.id,
-                    "date_start": start,
-                    "date_end": end,
-                }
-            )
-        return vals
+    @ETL.load()
+    def load_pricelists_and_blankets(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load pricelists and blankets into Odoo.
 
-    @api.model
-    def _extract_blanket_item_vals(self, sap_blanket_lines, products_dict):
-        vals = []
-        for line in sap_blanket_lines:
-            product = products_dict[line["itemcode"]]
-            quantity = line["planqty"]
-            price = line["unitprice"]
-            vals.append(
-                {
-                    "product_id": product.id,
-                    "product_qty": quantity,
-                    "price_unit": price,
-                }
+        Args:
+            ctx: ETL context.
+            transformed: Dictionary containing transformed data.
+        """
+        data = transformed["transform_pricelists_and_blankets"]
+        basic_pricelist_vals = data["basic_pricelist_vals"]
+        customer_pricelist_vals = data["customer_pricelist_vals"]
+
+        # Load basic pricelists
+        if basic_pricelist_vals:
+            # Get public pricelist to use as base
+            public_pricelist = ctx.env["product.pricelist"].search(
+                [
+                    ("name", "ilike", "public"),
+                    ("currency_id", "=", ctx.env.ref("base.CAD").id),
+                ],
+                limit=1,
             )
-        return vals
+
+            if not public_pricelist:
+                _logger.warning(
+                    "Public pricelist not found. Creating basic pricelists without base pricelist."
+                )
+                # Create without base pricelist - they'll be standalone
+                ctx.env["product.pricelist"].create(basic_pricelist_vals)
+            else:
+                # Add base pricelist reference to each
+                for vals in basic_pricelist_vals:
+                    vals["item_ids"] = [
+                        Command.create(
+                            {
+                                "applied_on": "3_global",
+                                "base": "pricelist",
+                                "base_pricelist_id": public_pricelist.id,
+                            }
+                        )
+                    ]
+
+                ctx.env["product.pricelist"].create(basic_pricelist_vals)
+            
+            _logger.info(f"Created {len(basic_pricelist_vals)} basic pricelists.")
+
+        # Load customer pricelists
+        if customer_pricelist_vals:
+            # Remove temporary fields
+            partner_mappings = []
+            for vals in customer_pricelist_vals:
+                partner_mappings.append(
+                    {
+                        "partner_id": vals.pop("_partner_id"),
+                        "is_active": vals.pop("_is_active"),
+                    }
+                )
+
+            pricelists = ctx.env["product.pricelist"].create(customer_pricelist_vals)
+            _logger.info(f"Created {len(pricelists)} customer pricelists.")
+
+            # Set partner default pricelists
+            now = datetime.now(utc)
+            default_pricelists = ctx.env["product.pricelist"].search(
+                [("name", "ilike", "Default")]
+            )
+
+            for pricelist, mapping in zip(pricelists, partner_mappings):
+                partner = ctx.env["res.partner"].browse(mapping["partner_id"])
+
+                if pricelist.active and mapping["is_active"]:
+                    partner.property_product_pricelist = pricelist
+                elif (
+                    not pricelist.active
+                    and pricelist.currency_id != ctx.env.company.currency_id
+                ):
+                    # Set to default pricelist with matching currency
+                    applicable = default_pricelists.filtered(
+                        lambda pl: pl.currency_id == pricelist.currency_id
+                    )
+                    if applicable:
+                        partner.property_product_pricelist = applicable[0]
+
+            _logger.info("Set partner default pricelists.")
+
+        # Set USD pricelist for USD partners
+        self._set_usd_pricelist_partners(ctx)
+
+    def _set_usd_pricelist_partners(self, ctx: ETLContext) -> None:
+        """Set USD pricelist for partners with USD currency."""
+        ctx.cr.execute("SELECT cardcode FROM ocrd WHERE currency = 'USD'")
+        cardcodes = [item[0] for item in ctx.cr.fetchall()]
+
+        if not cardcodes:
+            return
+
+        cad_pricelist = ctx.env["product.pricelist"].search(
+            [("name", "=", "Default CAD Pricelist")], limit=1
+        )
+        usd_pricelist = ctx.env["product.pricelist"].search(
+            [("name", "=", "Default USD Pricelist")], limit=1
+        )
+
+        if not usd_pricelist:
+            return
+
+        partners = ctx.env["res.partner"].search(
+            [("sap_card_code", "in", cardcodes), ("active", "in", [True, False])]
+        )
+
+        # Only update partners that have the CAD pricelist
+        partners_to_update = partners.filtered(
+            lambda p: p.property_product_pricelist == cad_pricelist
+        )
+
+        if partners_to_update:
+            partners_to_update.write({"property_product_pricelist": usd_pricelist.id})
+            _logger.info(f"Set USD pricelist for {len(partners_to_update)} partners.")
 
 
 @ETL.pipeline(

@@ -1,8 +1,8 @@
 # SAP B1 to Odoo ETL Framework - Design Document
 
-**Version:** 1.0  
+**Version:** 2.0  
 **Date:** November 7, 2025  
-**Status:** In Progress
+**Status:** Major Progress - Core Models Migrated
 
 ---
 
@@ -194,6 +194,46 @@ class PipelineOrchestrator:
 
 ---
 
+## Key Learnings & Patterns
+
+### Multiprocessing Best Practices
+1. **Cache Primitive Types Only**: Store only IDs (integers/strings) in class-level caches, never Odoo recordsets. Recordsets cannot be pickled across processes.
+2. **Pre-compute in Extract**: Build all lookup dictionaries in the extract phase (main process) before multiprocessing begins.
+3. **Conservative Settings**: Start with lower worker counts (4-8) and larger chunk sizes (100-500) to avoid database contention.
+4. **Error Propagation**: Remove try/except blocks in worker processes to ensure exceptions bubble up and fail fast.
+
+### Address Idempotence Pattern
+For addresses (CRD1), use `sap_parent_card` + `sap_address_linenum` as the unique key:
+- Added `sap_address_linenum` field to store SAP's line number
+- This allows multiple addresses of the same type per company
+- Matches SAP's data model where `cardcode` + `linenum` is the primary key
+
+### Name Validation Pattern
+For records with potentially empty names:
+- **Companies**: Skip records with empty names (log warning)
+- **Addresses**: Use fallback name like "Delivery Address" or "Invoice Address"
+- **Contacts**: Use email or phone as fallback name
+
+### Split Pipeline Pattern
+Complex models like `res.partner` benefit from splitting into multiple pipelines:
+1. **Companies** (OCRD) - parent records
+2. **Addresses** (CRD1) - child records with type
+3. **Contacts** (OCPR) - child records
+4. **Post-process** - link children to parents (no extract/transform, just load)
+
+This allows:
+- Independent idempotence checks
+- Clearer separation of concerns
+- Easier debugging
+- Better multiprocessing control per pipeline
+
+### Data Quality Handling
+- **Negative quantities**: Filter out BOM lines with qty ≤ 0 (violates Odoo constraints)
+- **Empty names**: Validate and provide fallbacks
+- **Missing foreign keys**: Log warnings and skip records gracefully
+
+---
+
 ## Model Dependencies
 
 Based on analysis of `sap_database.py::_import_all()`:
@@ -265,18 +305,21 @@ Migrate models with no multiprocessing:
 - [x] `product.pricelist` (init_pricelists) ✅
 - [x] `delivery.carrier.account` ✅
 
-### Phase 5: Migration - Complex Models (IN PROGRESS)
+### Phase 5: Migration - Complex Models ✅ COMPLETED
 Migrate models with multiprocessing:
-- [ ] `product.product` (already has good ETL separation)
-- [x] `res.partner` (split into 4 pipelines: companies, addresses, contacts, post-process) ✅
-- [ ] `sale.order`
-- [ ] `purchase.order`
+- [x] `product.product` ✅ (split into 2 pipelines: categories, products with multiprocessing)
+- [x] `res.partner` ✅ (split into 4 pipelines: companies, addresses, contacts, post-process)
+- [x] `mrp.bom` ✅ (single pipeline with BOM headers and lines)
+- [ ] `sale.order` (complex, in progress)
+- [ ] `purchase.order` (complex, in progress)
 
-### Phase 6: Migration - Remaining Models
-- [ ] `mrp.bom`
-- [ ] `stock.quant`
-- [ ] `account.move`
-- [ ] `ir.attachment`
+### Phase 6: Migration - Remaining Models (IN PROGRESS)
+- [x] `product.category` ✅ (part of product pipeline)
+- [ ] `product.pricelist.item` (SAP price lists - OAT1/OOAT tables)
+- [ ] `stock.quant` (inventory quantities)
+- [ ] `stock.valuation.layer` (inventory valuations)
+- [ ] `account.move` (invoices)
+- [ ] `ir.attachment` (file attachments)
 
 ### Phase 7: Integration & Testing
 - [x] Update `sap_database.py` to use orchestrator

@@ -6,6 +6,7 @@ from . import sale_purchase_common
 from . import sale_order
 from . import sale_quotation
 from . import purchase_order
+from . import purchase_requisition
 from . import carrier_account
 from . import product_pricelist
 from . import stock_picking
