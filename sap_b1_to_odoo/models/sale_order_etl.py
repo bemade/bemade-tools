@@ -8,6 +8,7 @@ This module contains 4 ETL pipelines for importing sales orders from SAP B1:
 
 This replaces the legacy SapSaleOrderImporter with a declarative ETL approach.
 """
+
 import logging
 from typing import Dict, List, Any
 from fuzzywuzzy import process
@@ -35,6 +36,7 @@ class SalesOrder(models.Model):
             "Another sale order with this docnum already exists when set",
         )
     ]
+
 
 class SaleOrderLine(models.Model):
     _inherit = "sale.order.line"
@@ -149,26 +151,26 @@ class SaleOrderHeaderImporter(models.AbstractModel):
             [("sap_card_code", "in", cardcodes), ("active", "in", [True, False])]
         )
         partners_map = {partner.sap_card_code: partner.id for partner in partners}
-        
+
         # Pre-compute partner addresses (delivery and invoice) for all partners
         partner_addresses_map = {}
         for partner in partners:
             # Get all potential address partners (commercial + children)
-            all_partners = partner.commercial_partner_id | partner.commercial_partner_id.child_ids
-            
+            all_partners = (
+                partner.commercial_partner_id | partner.commercial_partner_id.child_ids
+            )
+
             # Find delivery addresses
             delivery_partners = all_partners.filtered(lambda p: p.type == "delivery")
             invoice_partners = all_partners.filtered(lambda p: p.type == "invoice")
-            
+
             # Store as dict of address type -> list of (id, address_string)
             partner_addresses_map[partner.id] = {
                 "delivery": [
-                    (p.id, self.extract_address_string(p)) 
-                    for p in delivery_partners
+                    (p.id, self.extract_address_string(p)) for p in delivery_partners
                 ],
                 "invoice": [
-                    (p.id, self.extract_address_string(p)) 
-                    for p in invoice_partners
+                    (p.id, self.extract_address_string(p)) for p in invoice_partners
                 ],
                 "commercial_id": partner.commercial_partner_id.id,
             }
@@ -177,7 +179,12 @@ class SaleOrderHeaderImporter(models.AbstractModel):
         contacts = ctx.env["res.partner"].search(
             [("sap_cntct_code", "in", cntctcodes), ("active", "in", [True, False])]
         )
-        contacts_map = {contact.sap_cntct_code: contact.parent_id.id if contact.parent_id else contact.id for contact in contacts}
+        contacts_map = {
+            contact.sap_cntct_code: (
+                contact.parent_id.id if contact.parent_id else contact.id
+            )
+            for contact in contacts
+        }
 
         slpcodes = [h["slpcode"] for h in headers if h.get("slpcode")]
         users = ctx.env["res.users"].search(
@@ -307,7 +314,6 @@ class SaleOrderHeaderImporter(models.AbstractModel):
             _logger.info("No new order headers to create.")
 
 
-
 # =============================================================================
 # Pipeline 2: Sale Order Product Lines (RDR1)
 # =============================================================================
@@ -394,7 +400,7 @@ class SaleOrderLineImporter(models.AbstractModel):
             if docentry not in lines_by_order:
                 lines_by_order[docentry] = []
             lines_by_order[docentry].append(line)
-        
+
         _logger.info(f"Grouped into {len(lines_by_order)} orders.")
 
         # Pre-compute lookups
@@ -436,7 +442,7 @@ class SaleOrderLineImporter(models.AbstractModel):
         for order_data in orders_with_lines:
             docentry = order_data["docentry"]
             lines = order_data["lines"]
-            
+
             order_id = cache["orders_map"].get(docentry)
             if not order_id:
                 _logger.warning(
@@ -575,7 +581,7 @@ class SaleOrderTextLineImporter(models.AbstractModel):
             if docentry not in lines_by_order:
                 lines_by_order[docentry] = []
             lines_by_order[docentry].append(line)
-        
+
         _logger.info(f"Grouped into {len(lines_by_order)} orders.")
 
         # Pre-compute lookups
@@ -609,7 +615,7 @@ class SaleOrderTextLineImporter(models.AbstractModel):
         for order_data in orders_with_lines:
             docentry = order_data["docentry"]
             lines = order_data["lines"]
-            
+
             order_id = cache["orders_map"].get(docentry)
             if not order_id:
                 _logger.warning(
@@ -677,7 +683,7 @@ class SaleOrderPostProcessor(models.AbstractModel):
     def extract_sap_order_data(self, ctx: ETLContext) -> Dict[str, Any]:
         """Extract SAP order status data needed for post-processing."""
         _logger.info("Extracting SAP order data for post-processing...")
-        
+
         # Get closed orders (confirmed and closed, no delivery)
         ctx.cr.execute(
             """
@@ -688,7 +694,7 @@ class SaleOrderPostProcessor(models.AbstractModel):
             """
         )
         closed_orders = [row[0] for row in ctx.cr.fetchall()]
-        
+
         # Get open orders (to confirm)
         ctx.cr.execute(
             """
@@ -701,7 +707,7 @@ class SaleOrderPostProcessor(models.AbstractModel):
             """
         )
         open_orders = [row[0] for row in ctx.cr.fetchall()]
-        
+
         # Get canceled orders
         ctx.cr.execute(
             """
@@ -711,7 +717,7 @@ class SaleOrderPostProcessor(models.AbstractModel):
             """
         )
         canceled_orders = [row[0] for row in ctx.cr.fetchall()]
-        
+
         # Get SAP line quantities for pickings validation
         ctx.cr.execute(
             """
@@ -726,17 +732,17 @@ class SaleOrderPostProcessor(models.AbstractModel):
             """
         )
         sap_line_quantities = ctx.cr.dictfetchall()
-        
+
         # Get order dates
         ctx.cr.execute("SELECT docnum, docdate, createdate FROM ordr")
         order_dates = ctx.cr.fetchall()
-        
+
         _logger.info(
             f"Extracted: {len(closed_orders)} closed, {len(open_orders)} open, "
             f"{len(canceled_orders)} canceled, {len(sap_line_quantities)} line quantities, "
             f"{len(order_dates)} order dates"
         )
-        
+
         return {
             "closed_orders": closed_orders,
             "open_orders": open_orders,
@@ -745,12 +751,24 @@ class SaleOrderPostProcessor(models.AbstractModel):
             "order_dates": order_dates,
         }
 
+    @ETL.transform()
+    def transform_sap_order_data(
+        self, ctx: ETLContext, extracted: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Pass-through transform for SAP order data used in post-processing.
+
+        This makes the extracted SAP data available to the load phase under the
+        'transform_sap_order_data' key, in line with the ETL framework's
+        extract → transform → load contract.
+        """
+        return extracted.get("extract_sap_order_data", {})
+
     @ETL.load()
     def post_process_orders(self, ctx: ETLContext, transformed: Dict) -> None:
         """Post-process all sales orders using extracted SAP data."""
-        # Get extracted SAP data (no transform phase, so it's in transformed dict)
-        sap_data = transformed.get("extract_sap_order_data", {})
-        
+        # Get SAP data from the transform phase
+        sap_data = transformed.get("transform_sap_order_data", {})
+
         _logger.info("Starting post-processing of sales orders...")
 
         _logger.info("Confirming closed orders (no delivery order)...")
@@ -769,7 +787,9 @@ class SaleOrderPostProcessor(models.AbstractModel):
         self._recompute_delivery_status()
 
         _logger.info("Validating pickings with SAP quantities...")
-        self._validate_pickings_with_sap_quantities(sap_data.get("sap_line_quantities", []))
+        self._validate_pickings_with_sap_quantities(
+            sap_data.get("sap_line_quantities", [])
+        )
 
         _logger.info("Setting order dates...")
         self._set_order_dates(sap_data.get("order_dates", []))

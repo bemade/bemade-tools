@@ -651,7 +651,7 @@ class PurchaseOrderTextLineImporter(models.AbstractModel):
 
 
 # =============================================================================
-# Pipeline 4: purchase Order Post-Processor
+# Pipeline 4: Purchase Order Post-Processor
 # =============================================================================
 
 
@@ -741,11 +741,16 @@ class PurchaseOrderPostProcessor(models.AbstractModel):
             "order_dates": order_dates,
         }
 
+    @ETL.transform()
+    def transform_sap_data(self, ctx: ETLContext, extracted: Dict) -> Dict:
+        """Trivial transform, just pass along extracted data."""
+        return extracted.get("extract_sap_order_data", {})
+
     @ETL.load()
     def post_process_orders(self, ctx: ETLContext, transformed: Dict) -> None:
         """Post-process all purchases orders using extracted SAP data."""
         # Get extracted SAP data (no transform phase, so it's in transformed dict)
-        sap_data = transformed.get("extract_sap_order_data", {})
+        sap_data = transformed.get("transform_sap_data", {})
 
         _logger.info("Starting post-processing of purchases orders...")
 
