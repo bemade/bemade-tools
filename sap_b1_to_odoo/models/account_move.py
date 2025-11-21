@@ -104,12 +104,50 @@ class AccountMoveCommon(models.AbstractModel):
             vals["name"] = row["dscription"] or ""
             vals["product_uom_id"] = self.env.ref("uom.product_uom_unit").id
 
+        # Map SAP tax code (vatgroup) to Odoo tax
+        vatgroup = row.get("vatgroup")
+        if vatgroup:
+            tax = self._lookup_tax(vatgroup, sap_table)
+            if tax:
+                vals["tax_ids"] = [Command.set([tax.id])]
+
         # Link to order line if available
         order_line_id = order_lines_dict.get((row["docentry"], row["linenum"]))
         if order_line_id:
             vals.update(self._get_order_line_link_vals(order_line_id))
 
         return vals
+
+    @api.model
+    def _lookup_tax(self, vatgroup, sap_table):
+        """Look up Odoo tax by SAP tax code (vatgroup).
+
+        Args:
+            vatgroup: SAP tax code (e.g., "CO", "WY 01")
+            sap_table: SAP table name (inv1 for sales, pch1 for purchases)
+
+        Returns:
+            account.tax record or False
+        """
+        # Determine if this is a sale or purchase based on table
+        type_tax_use = "sale" if "inv" in sap_table.lower() else "purchase"
+
+        # Search without company filter since company context may not be set correctly
+        tax = self.env["account.tax"].search(
+            [
+                ("sap_tax_code", "=", vatgroup),
+                ("type_tax_use", "=", type_tax_use),
+            ],
+            limit=1,
+        )
+
+        if not tax:
+            _logger.warning(
+                f"Tax not found for SAP vatgroup '{vatgroup}' "
+                f"(type: {type_tax_use}). Line will have no tax."
+            )
+
+        return tax
 
     @api.model
     def import_order_invoiced_qty(self, cr):
@@ -123,7 +161,6 @@ class AccountMoveCommon(models.AbstractModel):
         model = self._get_order_line_link_config()["order_line_model"]
         table = model.replace(".", "_")
         field = "sap_qty_invoiced"
-        invoice_status_method = self._get_import_config()["invoice_status_method"]
         # Create a temporary table to hold the data
         self.env.cr.execute("DROP TABLE IF EXISTS temp_order_lines")
         self.env.cr.execute(
@@ -256,11 +293,15 @@ class AccountMoveCommon(models.AbstractModel):
 
     def _get_order_line_link_config(self):
         """Get configuration for linking to order lines. Override in child classes."""
-        return None
+        raise NotImplementedError(
+            "Subclasses must implement _get_order_line_link_config()"
+        )
 
     def _get_order_line_link_vals(self, order_line_id):
         """Get the values to link to an order line. Override in child classes."""
-        return {}
+        raise NotImplementedError(
+            "Subclasses must implement _get_order_line_link_vals()"
+        )
 
     @api.model
     def _get_lines(self, cr, lines_table, sap_orders):
@@ -297,15 +338,26 @@ class AccountMoveCommon(models.AbstractModel):
         return product_lines + text_lines
 
     @api.model
-    def _get_move_vals(self, order, partner, lines, sap_table, order_lines_dict):
-        """Get common values for both invoices and bills"""
+    def _get_move_vals(
+        self, order, partner, lines, sap_header_table, sap_line_table, order_lines_dict
+    ):
+        """Get common values for both invoices and bills
+
+        Args:
+            order: SAP header record
+            partner: Odoo partner
+            lines: Dict of lines by docentry
+            sap_header_table: SAP header table name (e.g., 'oinv', 'opch')
+            sap_line_table: SAP line table name (e.g., 'inv1', 'pch1')
+            order_lines_dict: Dict mapping to order lines
+        """
         if order["docentry"] in lines:
             move_lines = [
                 Command.create(
                     self._get_row_vals(
                         line,
                         self._get_products_dict(),
-                        sap_table,
+                        sap_line_table,
                         order_lines_dict,
                     )
                 )
@@ -361,7 +413,7 @@ class AccountMoveCommon(models.AbstractModel):
             "invoice_date_due": fix_tz(order["docduedate"]),
             "sap_docentry": order["docentry"],
             "sap_docnum": order["docnum"],
-            "sap_table": sap_table,
+            "sap_table": sap_header_table,
             "ref": order["numatcard"],
             "line_ids": move_lines,
             "invoice_user_id": invoice_user_id,
@@ -447,7 +499,12 @@ class AccountMoveCommon(models.AbstractModel):
                 continue
 
             vals = self._get_move_vals(
-                doc, partner, lines_dict, config["line_table"], order_lines_dict
+                doc,
+                partner,
+                lines_dict,
+                config["header_table"],
+                config["line_table"],
+                order_lines_dict,
             )
             vals.update(
                 {
@@ -478,6 +535,9 @@ class AccountMoveCommon(models.AbstractModel):
         ```
         """
         pass
+
+    def _trigger_recomputation(self, lines):
+        raise NotImplementedError("Subclasses must implement _trigger_recomputation()")
 
 
 class InvoiceImporter(models.AbstractModel):

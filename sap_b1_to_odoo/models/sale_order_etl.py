@@ -13,7 +13,7 @@ import logging
 from typing import Dict, List, Any
 from fuzzywuzzy import process
 
-from odoo import api, models, fields
+from odoo import api, models, fields, Command
 from odoo.tools.sql import SQL
 
 from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
@@ -95,7 +95,6 @@ class SaleOrderLine(models.Model):
     ],
     multiprocessing_threshold=500,
     chunk_size=500,
-    max_workers=8,
 )
 class SaleOrderHeaderImporter(models.AbstractModel):
     _name = "sale.order.header.importer"
@@ -326,10 +325,10 @@ class SaleOrderHeaderImporter(models.AbstractModel):
     depends_on=[
         "sale.order.header.importer",
         "product.product.importer",
+        "account.tax.importer",  # Need taxes loaded for line tax mapping
     ],
     multiprocessing_threshold=1000,
     chunk_size=500,
-    max_workers=8,
 )
 class SaleOrderLineImporter(models.AbstractModel):
     _name = "sale.order.line.importer"
@@ -389,6 +388,7 @@ class SaleOrderLineImporter(models.AbstractModel):
             SaleOrderLineImporter._lookup_cache = {
                 "products_map": {},
                 "orders_map": {},
+                "taxes_map": {},
                 "uom_unit_id": ctx.env.ref("uom.product_uom_unit").id,
             }
             return []
@@ -416,9 +416,15 @@ class SaleOrderLineImporter(models.AbstractModel):
         orders = ctx.env["sale.order"].search([("sap_docentry", "in", docentries)])
         orders_map = {order.sap_docentry: order.id for order in orders}
 
+        # Pre-load all sale taxes for fast lookup
+        taxes = ctx.env["account.tax"].search([("type_tax_use", "=", "sale")])
+        taxes_map = {tax.sap_tax_code: tax.id for tax in taxes if tax.sap_tax_code}
+        _logger.info(f"Pre-loaded {len(taxes_map)} sale taxes for lookup")
+
         SaleOrderLineImporter._lookup_cache = {
             "products_map": products_map,
             "orders_map": orders_map,
+            "taxes_map": taxes_map,
             "uom_unit_id": ctx.env.ref("uom.product_uom_unit").id,
         }
         _logger.info("Lookup dictionaries ready.")
@@ -428,6 +434,34 @@ class SaleOrderLineImporter(models.AbstractModel):
             {"docentry": docentry, "lines": order_lines}
             for docentry, order_lines in lines_by_order.items()
         ]
+
+    @api.model
+    def _lookup_tax(self, ctx, vatgroup):
+        """Look up Odoo tax by SAP tax code (vatgroup) using pre-loaded cache.
+
+        Args:
+            ctx: ETL context
+            vatgroup: SAP tax code (e.g., "CO", "WY 01")
+
+        Returns:
+            account.tax ID or False
+        """
+        cache = SaleOrderLineImporter._lookup_cache
+        taxes_map = cache.get("taxes_map", {})
+
+        if not taxes_map:
+            _logger.error("Tax cache is empty! Taxes were not pre-loaded.")
+            return False
+
+        tax_id = taxes_map.get(vatgroup)
+
+        if not tax_id:
+            _logger.warning(
+                f"Tax not found for SAP vatgroup '{vatgroup}' (sale). "
+                f"Available tax codes: {list(taxes_map.keys())[:10]}..."
+            )
+
+        return tax_id
 
     @ETL.transform()
     def transform_lines(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -471,6 +505,13 @@ class SaleOrderLineImporter(models.AbstractModel):
                     vals["name"] = line["dscription"] or ""
                     vals["product_uom_id"] = cache["uom_unit_id"]
 
+                # Map SAP tax code (vatgroup) to Odoo tax
+                vatgroup = line.get("vatgroup")
+                if vatgroup:
+                    tax_id = self._lookup_tax(ctx, vatgroup)
+                    if tax_id:
+                        vals["tax_ids"] = [Command.set([tax_id])]
+
                 line_vals.append(vals)
 
         _logger.info(f"Transformed {len(line_vals)} product lines.")
@@ -500,7 +541,6 @@ class SaleOrderLineImporter(models.AbstractModel):
     depends_on=["sale.order.header.importer"],
     multiprocessing_threshold=1000,
     chunk_size=500,
-    max_workers=8,
 )
 class SaleOrderTextLineImporter(models.AbstractModel):
     _name = "sale.order.text.line.importer"

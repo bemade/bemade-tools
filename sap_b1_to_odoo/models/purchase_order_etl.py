@@ -121,7 +121,6 @@ class PurchaseOrderLine(models.Model):
     ],
     multiprocessing_threshold=500,
     chunk_size=500,
-    max_workers=8,
 )
 class PurchaseOrderHeaderImporter(models.AbstractModel):
     _name = "purchase.order.header.importer"
@@ -320,7 +319,6 @@ class PurchaseOrderHeaderImporter(models.AbstractModel):
     ],
     multiprocessing_threshold=1000,
     chunk_size=500,
-    max_workers=8,
 )
 class PurchaseOrderLineImporter(models.AbstractModel):
     _name = "purchase.order.line.importer"
@@ -490,7 +488,6 @@ class PurchaseOrderLineImporter(models.AbstractModel):
     depends_on=["purchase.order.header.importer"],
     multiprocessing_threshold=1000,
     chunk_size=500,
-    max_workers=8,
 )
 class PurchaseOrderTextLineImporter(models.AbstractModel):
     _name = "purchase.order.text.line.importer"

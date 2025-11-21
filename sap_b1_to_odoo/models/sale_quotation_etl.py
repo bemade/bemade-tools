@@ -7,6 +7,7 @@ This module contains 3 ETL pipelines for importing sale quotations from SAP B1:
 
 Note: Quotations don't need post-processing (no confirmation, pickings, etc.)
 """
+
 import logging
 from typing import Dict, List, Any
 
@@ -35,7 +36,6 @@ _logger = logging.getLogger(__name__)
     ],
     multiprocessing_threshold=500,
     chunk_size=500,
-    max_workers=8,
 )
 class SaleQuotationHeaderImporter(models.AbstractModel):
     _name = "sale.quotation.header.importer"
@@ -125,7 +125,9 @@ class SaleQuotationHeaderImporter(models.AbstractModel):
             [("sap_cntct_code", "in", cntctcodes), ("active", "in", [True, False])]
         )
         contacts_map = {
-            contact.sap_cntct_code: contact.parent_id.id if contact.parent_id else contact.id
+            contact.sap_cntct_code: (
+                contact.parent_id.id if contact.parent_id else contact.id
+            )
             for contact in contacts
         }
 
@@ -266,10 +268,10 @@ class SaleQuotationHeaderImporter(models.AbstractModel):
     depends_on=[
         "sale.quotation.header.importer",
         "product.product.importer",
+        "account.tax.importer",  # Need taxes loaded for line tax mapping
     ],
     multiprocessing_threshold=1000,
     chunk_size=500,
-    max_workers=8,
 )
 class SaleQuotationLineImporter(models.AbstractModel):
     _name = "sale.quotation.line.importer"
@@ -440,7 +442,6 @@ class SaleQuotationLineImporter(models.AbstractModel):
     depends_on=["sale.quotation.header.importer"],
     multiprocessing_threshold=1000,
     chunk_size=500,
-    max_workers=8,
 )
 class SaleQuotationTextLineImporter(models.AbstractModel):
     _name = "sale.quotation.text.line.importer"

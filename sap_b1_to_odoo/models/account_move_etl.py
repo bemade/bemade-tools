@@ -14,6 +14,7 @@ _logger = logging.getLogger(__name__)
     sap_source="oinv",
     depends_on=[
         "account.journal.setup",  # Ensures CoA + journals are ready
+        "account.tax.importer",  # Ensures taxes are imported
         "res.partner.company.importer",
         "product.product.importer",
         "res.users.importer",
@@ -45,6 +46,11 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
             "order_basetype": 17,  # Sales Orders have BaseType = 17
             "order_line_model": "sale.order.line",
         }
+
+    @api.model
+    def _get_order_line_link_vals(self, order_line_id):
+        """Return values to link invoice line to sale order line."""
+        return {"sale_line_ids": [(4, order_line_id)]}
 
     @ETL.extract("oinv")
     def extract_invoices(self, ctx: ETLContext):
@@ -99,7 +105,7 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
                 continue
 
             vals = self._get_move_vals(
-                doc, partner, lines_dict, "inv1", order_lines_dict
+                doc, partner, lines_dict, "oinv", "inv1", order_lines_dict
             )
             vals.update({"move_type": "out_invoice"})
             moves_vals.append(vals)
