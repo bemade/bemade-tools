@@ -14,4 +14,10 @@ from . import res_users
 from . import account_payment_term
 from . import customer_product_code
 from . import ir_attachment
+from . import ir_module
+from . import account_account
 from . import account_move
+from . import account_move_etl
+from . import account_account_etl
+from . import account_journal_setup
+from . import res_company_etl

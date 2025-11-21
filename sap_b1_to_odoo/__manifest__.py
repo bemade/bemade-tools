@@ -41,6 +41,7 @@
         "purchase_customer_requisition",
         "purchase_delivery_carrier",
         "picking_policy_per_customer",
+        "accountant",
     ],
     "data": [
         "security/ir.model.access.csv",

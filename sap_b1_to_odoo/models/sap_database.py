@@ -15,7 +15,7 @@ PAGE_SIZE = 1000
 
 class SapDatabase(models.Model):
     """Model to manage SAP Business One database connections and data import."""
-    
+
     _name = "sap.database"
     _description = "SAP Database"
 
@@ -57,7 +57,7 @@ class SapDatabase(models.Model):
         """
         Setup SAP database from environment variables.
         Called from XML data file on module install/upgrade.
-        
+
         Environment variables:
         - SAP_DB_HOST: Database host
         - SAP_DB_NAME: Database name
@@ -94,10 +94,13 @@ class SapDatabase(models.Model):
         _logger.info(f"Creating sap.database record for {db_host}/{db_name}")
 
         # Check if a record already exists
-        existing = self.search([
-            ("database_host", "=", db_host),
-            ("database_name", "=", db_name),
-        ], limit=1)
+        existing = self.search(
+            [
+                ("database_host", "=", db_host),
+                ("database_name", "=", db_name),
+            ],
+            limit=1,
+        )
 
         vals = {
             "database_host": db_host,
@@ -137,47 +140,55 @@ class SapDatabase(models.Model):
     def action_init_pricelists(self) -> dict:
         """Initialize default pricelists for all active currencies using ETL framework."""
         # Note: This doesn't use SAP cursor, just Odoo data
-        from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLExecutor, ETLContext
-        
+        from odoo.addons.sap_b1_to_odoo.etl_framework import (
+            ETL,
+            ETLExecutor,
+            ETLContext,
+        )
+
         # Get the registered pipeline
-        pipeline = ETL.get_pipeline('product.pricelist.importer')
+        pipeline = ETL.get_pipeline("product.pricelist.importer")
         if not pipeline:
             raise UserError(_("product.pricelist.importer ETL pipeline not found"))
-        
+
         # Get importer instance
         importer = self.env["product.pricelist.importer"].with_company(self.env.company)
-        
+
         # Create context (no SAP cursor needed for this one)
         ctx = ETLContext(cr=None, env=self.env)
         executor = ETLExecutor(pipeline, ctx, importer)
-        
+
         # Execute pipeline
         executor.execute()
         self.env.cr.commit()
-        
+
         return self._success_notification()
 
     def action_import_users(self) -> dict:
         """Import SAP salespeople as Odoo users using ETL framework."""
         with self.get_cursor() as cr:
-            from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLExecutor, ETLContext
-            
+            from odoo.addons.sap_b1_to_odoo.etl_framework import (
+                ETL,
+                ETLExecutor,
+                ETLContext,
+            )
+
             # Get the registered pipeline
-            pipeline = ETL.get_pipeline('res.users.importer')
+            pipeline = ETL.get_pipeline("res.users.importer")
             if not pipeline:
                 raise UserError(_("res.users.importer ETL pipeline not found"))
-            
+
             # Get importer instance
             importer = self.env["res.users.importer"].with_company(self.env.company)
-            
+
             # Create context and executor
             ctx = ETLContext(cr=cr, env=self.env)
             executor = ETLExecutor(pipeline, ctx, importer)
-            
+
             # Execute pipeline
             executor.execute()
             self.env.cr.commit()
-        
+
         return self._success_notification()
 
     def action_import_partners(self) -> dict:
@@ -191,24 +202,30 @@ class SapDatabase(models.Model):
     def action_import_carrier_accounts(self) -> dict:
         """Import SAP delivery carriers and carrier accounts using ETL framework."""
         with self.get_cursor() as cr:
-            from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLExecutor, ETLContext
-            
+            from odoo.addons.sap_b1_to_odoo.etl_framework import (
+                ETL,
+                ETLExecutor,
+                ETLContext,
+            )
+
             # Get the registered pipeline
-            pipeline = ETL.get_pipeline('delivery.carrier.importer')
+            pipeline = ETL.get_pipeline("delivery.carrier.importer")
             if not pipeline:
                 raise UserError(_("delivery.carrier.importer ETL pipeline not found"))
-            
+
             # Get importer instance
-            importer = self.env["delivery.carrier.importer"].with_company(self.env.company)
-            
+            importer = self.env["delivery.carrier.importer"].with_company(
+                self.env.company
+            )
+
             # Create context and executor
             ctx = ETLContext(cr=cr, env=self.env)
             executor = ETLExecutor(pipeline, ctx, importer)
-            
+
             # Execute pipeline
             executor.execute()
             self.env.cr.commit()
-        
+
         return self._success_notification()
 
     def action_import_products(self) -> dict:
@@ -228,24 +245,32 @@ class SapDatabase(models.Model):
     def action_import_payment_terms(self) -> dict:
         """Import SAP payment terms using ETL framework."""
         with self.get_cursor() as cr:
-            from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLExecutor, ETLContext
-            
+            from odoo.addons.sap_b1_to_odoo.etl_framework import (
+                ETL,
+                ETLExecutor,
+                ETLContext,
+            )
+
             # Get the registered pipeline
-            pipeline = ETL.get_pipeline('account.payment.term.importer')
+            pipeline = ETL.get_pipeline("account.payment.term.importer")
             if not pipeline:
-                raise UserError(_("account.payment.term.importer ETL pipeline not found"))
-            
+                raise UserError(
+                    _("account.payment.term.importer ETL pipeline not found")
+                )
+
             # Get importer instance
-            importer = self.env["account.payment.term.importer"].with_company(self.env.company)
-            
+            importer = self.env["account.payment.term.importer"].with_company(
+                self.env.company
+            )
+
             # Create context and executor
             ctx = ETLContext(cr=cr, env=self.env)
             executor = ETLExecutor(pipeline, ctx, importer)
-            
+
             # Execute pipeline
             executor.execute()
             self.env.cr.commit()
-        
+
         return self._success_notification()
 
     def action_import_sales_orders(self) -> dict:
@@ -298,9 +323,28 @@ class SapDatabase(models.Model):
     def action_import_invoices(self) -> None:
         """Import SAP customer invoices."""
         with self.get_cursor() as cr:
-            self.env["sap.invoice.importer"].with_company(
+            from odoo.addons.sap_b1_to_odoo.etl_framework import (
+                ETL,
+                ETLExecutor,
+                ETLContext,
+            )
+
+            pipeline = ETL.get_pipeline("account.move.invoice.importer")
+            if not pipeline:
+                raise UserError(
+                    _("account.move.invoice.importer ETL pipeline not found")
+                )
+
+            importer = self.env["account.move.invoice.importer"].with_company(
                 self.env.company
-            ).import_invoices(cr)
+            )
+
+            ctx = ETLContext(cr=cr, env=self.env)
+            executor = ETLExecutor(pipeline, ctx, importer)
+            executor.execute()
+            self.env.cr.commit()
+
+        return self._success_notification()
 
     def action_import_bills(self) -> None:
         """Import SAP vendor bills."""
@@ -335,7 +379,7 @@ class SapDatabase(models.Model):
 
     def action_delete_all(self) -> dict:
         """Delete all SAP-imported records from Odoo.
-        
+
         Warning: This is a destructive operation.
         """
         self._delete_all()
@@ -395,7 +439,7 @@ class SapDatabase(models.Model):
 
     def _import_all(self) -> None:
         """Internal method to import all SAP data using ETL framework.
-        
+
         This method uses the PipelineOrchestrator to automatically:
         1. Resolve dependencies between models
         2. Execute pipelines in the correct order
@@ -404,11 +448,11 @@ class SapDatabase(models.Model):
         """
         self.ensure_one()
         _logger.info("Beginning SAP record import using ETL framework.")
-        
+
         with self.get_cursor() as cr:
             # Create orchestrator
             orchestrator = PipelineOrchestrator(self.env)
-            
+
             # Execute all registered pipelines
             # Note: Only res.users is migrated so far, others will use old methods
             try:
@@ -416,7 +460,7 @@ class SapDatabase(models.Model):
             except Exception as e:
                 _logger.error(f"ETL pipeline execution failed: {e}", exc_info=True)
                 raise
-        
+
         # TODO: Remove these as models are migrated to ETL framework
         # Commented out to allow iterative testing of ETL framework migrations
         _logger.info("Legacy import methods (commented out during ETL migration)...")
@@ -439,12 +483,12 @@ class SapDatabase(models.Model):
         # self.env.cr.commit()
         # self.action_import_purchase_orders()
         # self.env.cr.commit()
-        
+
         _logger.info("Successfully completed SAP record import (ETL framework only).")
 
     def _delete_all(self) -> None:
         """Internal method to delete all SAP-imported records.
-        
+
         Warning: This is a destructive operation.
         """
         self.ensure_one()

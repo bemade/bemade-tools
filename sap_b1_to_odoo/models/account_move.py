@@ -9,7 +9,9 @@ _logger = logging.getLogger(__name__)
 class AccountMove(models.Model):
     _inherit = "account.move"
 
-    sap_docentry = fields.Integer(index="btree", string="SAP Document Entry", copy=False)
+    sap_docentry = fields.Integer(
+        index="btree", string="SAP Document Entry", copy=False
+    )
     sap_docnum = fields.Integer(index="btree", string="SAP Document Number", copy=False)
     sap_table = fields.Char(index="btree", copy=False)
     sap_atcentry = fields.Integer(index="btree", copy=False)
@@ -224,6 +226,10 @@ class AccountMoveCommon(models.AbstractModel):
         1. Direct link: Invoice line -> Sales Order line
         2. Through delivery: Invoice line -> Delivery line -> Sales Order line
         """
+        config = self._get_order_line_link_config()
+        if not config:
+            return {}
+
         rel_lines = self._get_order_line_links_raw(cr)
 
         # Only get product lines (where sap_line_num is set)
@@ -311,11 +317,18 @@ class AccountMoveCommon(models.AbstractModel):
         users_dict = self._get_users_dict()
         invoice_user_id = users_dict.get(order.get("slpcode"), False)
 
-        # Get the currency from SAP's DocCur field, default to CAD if not set
-        currency_code = order.get("doccur", "CAD")
-        currency = self.env["res.currency"].search([("name", "=", currency_code)])
+        # Get the currency from SAP's DocCur field, default to company currency if not set
+        company_currency = self.env.company.currency_id
+        currency_code = order.get("doccur") or company_currency.name
+        currency = self.env["res.currency"].search(
+            [
+                ("name", "=", currency_code),
+                ("active", "in", [False, True]),
+            ],
+            limit=1,
+        )
         if not currency:
-            currency = self.env.ref("base.CAD")
+            currency = company_currency
 
         # Get the currency rate from SAP's DocRate field
         # SAP stores the rate as foreign currency to base currency

@@ -17,7 +17,9 @@ class ResPartner(models.Model):
 
     sap_card_code = fields.Char(index="btree", copy=False)
     sap_parent_card = fields.Char(index="btree", copy=False)
-    sap_address_linenum = fields.Integer(index="btree", copy=False)  # CRD1 linenum for addresses
+    sap_address_linenum = fields.Integer(
+        index="btree", copy=False
+    )  # CRD1 linenum for addresses
     sap_cntct_code = fields.Integer(index="btree", copy=False)
     sap_atcentry = fields.Integer(index="btree", copy=False)
     sap_partner_type = fields.Char(index="btree", copy=False)
@@ -173,7 +175,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         # Get currencies as {name: id}
         currencies = ctx.env["res.currency"].search([])
         currencies_dict = {curr.name: curr.id for curr in currencies}
-        cad_currency_id = ctx.env.ref("base.CAD").id
+        company_currency_id = ctx.env.company.currency_id.id
 
         # Get company ID
         company_id = ctx.env.company.id
@@ -184,7 +186,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             "users_dict": users_dict,
             "terms_dict": terms_dict,
             "currencies_dict": currencies_dict,
-            "cad_currency_id": cad_currency_id,
+            "company_currency_id": company_currency_id,
             "company_id": company_id,
         }
         _logger.info("Lookup dictionaries ready.")
@@ -205,14 +207,21 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             List of partner value dictionaries ready for creation.
         """
         import os
-        print(f"[PID {os.getpid()}] Transform START - {len(extracted['extract_companies'])} records")
-        
+
+        print(
+            f"[PID {os.getpid()}] Transform START - {len(extracted['extract_companies'])} records"
+        )
+
         sap_partners = extracted["extract_companies"]
 
         # Debug: Check if we're in a worker process
         import multiprocessing
+
         current_pid = os.getpid()
-        is_main = current_pid == os.getppid() or multiprocessing.current_process().name == 'MainProcess'
+        is_main = (
+            current_pid == os.getppid()
+            or multiprocessing.current_process().name == "MainProcess"
+        )
 
         print(f"[PID {current_pid}] Getting cache...")
         # Use pre-computed lookup dictionaries from class cache (no database queries in workers)
@@ -221,7 +230,9 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             print(f"[PID {current_pid}] Cache is EMPTY in transform! is_main={is_main}")
             raise RuntimeError("Cache is empty in transform! This should never happen.")
         else:
-            print(f"[PID {current_pid}] Cache has {len(cache)} items, is_main={is_main}")
+            print(
+                f"[PID {current_pid}] Cache has {len(cache)} items, is_main={is_main}"
+            )
 
         print(f"[PID {current_pid}] Starting transformation loop...")
 
@@ -230,13 +241,17 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         users_dict = cache["users_dict"]
         terms_dict = cache["terms_dict"]
         company_id = cache["company_id"]
-        
-        print(f"[PID {current_pid}] Cache contents: countries={len(countries_dict)}, states={len(states_dict)}, users={len(users_dict)}, terms={len(terms_dict)}, company_id={company_id}")
+
+        print(
+            f"[PID {current_pid}] Cache contents: countries={len(countries_dict)}, states={len(states_dict)}, users={len(users_dict)}, terms={len(terms_dict)}, company_id={company_id}"
+        )
 
         partner_vals = []
         for i, sap_partner in enumerate(sap_partners):
             if i == 0 or i % 10 == 0:  # Print every 10 records
-                print(f"[PID {current_pid}] Processing record {i+1}/{len(sap_partners)}")
+                print(
+                    f"[PID {current_pid}] Processing record {i+1}/{len(sap_partners)}"
+                )
 
             # Get name and skip if empty
             name = fix_quotes(sap_partner["cardname"])
@@ -268,8 +283,10 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             currency_id = currencies_dict.get(sap_partner["currency"])
             if not currency_id:
                 if i == 0:
-                    print(f"[PID {current_pid}] Currency not in cache, using CAD...")
-                currency_id = cache.get("cad_currency_id")
+                    print(
+                        f"[PID {current_pid}] Currency not in cache, using company currency..."
+                    )
+                currency_id = cache.get("company_currency_id")
             if i == 0:
                 print(f"[PID {current_pid}] Currency resolved")
 
@@ -285,7 +302,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
 
             if i == 0:
                 print(f"[PID {current_pid}] Building partner dict...")
-            
+
             partner_vals.append(
                 {
                     "sap_card_code": sap_partner["cardcode"],
@@ -311,12 +328,12 @@ class ResPartnerCompanyImporter(models.AbstractModel):
                     "picking_policy": picking_policy,
                 }
             )
-            
+
             if i == 0:
                 print(f"[PID {current_pid}] First record complete")
 
         _logger.info(f"Transformed {len(partner_vals)} company records.")
-        
+
         # Debug: Print when transform completes
         print(f"[PID {os.getpid()}] Transform COMPLETE - {len(partner_vals)} records")
 
@@ -331,14 +348,17 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             transformed: Dictionary containing transformed data.
         """
         import os
+
         print(f"[PID {os.getpid()}] Load START")
-        
+
         partner_vals = transformed["transform_companies"]
 
         if partner_vals:
             print(f"[PID {os.getpid()}] Creating {len(partner_vals)} partners...")
             partners = ctx.env["res.partner"].create(partner_vals)
-            print(f"[PID {os.getpid()}] Load COMPLETE - created {len(partners)} partners")
+            print(
+                f"[PID {os.getpid()}] Load COMPLETE - created {len(partners)} partners"
+            )
             _logger.info(f"Created {len(partners)} company partners.")
         else:
             print(f"[PID {os.getpid()}] Load COMPLETE - no partners to create")
@@ -380,22 +400,23 @@ class ResPartnerAddressImporter(models.AbstractModel):
             AND sap_address_linenum IS NOT NULL
             """
         )
-        existing_addresses = set(
-            (row[0], row[1]) for row in ctx.env.cr.fetchall()
-        )
+        existing_addresses = set((row[0], row[1]) for row in ctx.env.cr.fetchall())
         _logger.info(f"Found {len(existing_addresses)} existing addresses.")
 
         # Query SAP
         ctx.cr.execute("SELECT * FROM crd1")
         all_addresses = ctx.cr.dictfetchall()
-        
+
         # Filter out existing addresses based on cardcode + linenum
         sap_addresses = [
-            addr for addr in all_addresses
+            addr
+            for addr in all_addresses
             if (addr["cardcode"], addr["linenum"]) not in existing_addresses
         ]
-        
-        _logger.info(f"Extracted {len(sap_addresses)} new addresses from SAP CRD1 (filtered from {len(all_addresses)} total).")
+
+        _logger.info(
+            f"Extracted {len(sap_addresses)} new addresses from SAP CRD1 (filtered from {len(all_addresses)} total)."
+        )
 
         # Pre-compute lookup dictionaries in main process (before multiprocessing)
         # Store in class-level cache so they're available to worker processes
