@@ -6,6 +6,7 @@ import psycopg2
 _logger = logging.getLogger(__name__)
 
 
+# TODO: Convert to ETL
 class SapCustomerProductCodeImporter(models.AbstractModel):
     """Sap Customer Product Code Importer for importing from the OSCN table."""
 

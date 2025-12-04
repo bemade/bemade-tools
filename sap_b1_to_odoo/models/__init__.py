@@ -19,6 +19,8 @@ from . import account_account
 from . import account_tax
 from . import account_move
 from . import account_move_etl
+from . import account_move_bill_etl
+from . import account_payment_etl
 from . import account_account_etl
 from . import account_tax_etl
 from . import account_journal_setup

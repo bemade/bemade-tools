@@ -59,6 +59,7 @@ class IrAttachment(models.Model):
     ]
 
 
+#TODO: Convert to ETL
 class SapIrAttachmentImporter(models.AbstractModel):
     _name = "sap.ir.attachment.importer"
     _description = "SAP Attachment Importer"

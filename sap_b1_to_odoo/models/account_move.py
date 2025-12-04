@@ -89,10 +89,20 @@ class AccountMoveCommon(models.AbstractModel):
 
         # Handle product lines
         product = products_dict.get(row["itemcode"])
+
+        # For service/expense lines with zero quantity, use linetotal as price_unit
+        quantity = row["quantity"] if row["quantity"] else 0.0
+        price_unit = row["price"]
+
+        if quantity == 0.0 and row.get("linetotal"):
+            # Service/expense line: set quantity to 1 and use linetotal as price
+            quantity = 1.0
+            price_unit = row["linetotal"]
+
         vals = {
             "product_id": product.id if product else False,
-            "quantity": row["quantity"] if row["quantity"] else 0.0,
-            "price_unit": row["price"],
+            "quantity": quantity,
+            "price_unit": price_unit,
             "discount": row["discprcnt"],
             "sap_line_num": (row["linenum"] or 0) + 2,  # Increment by 2 to avoid 0
             "sap_aftlinenum": 0,  # Product lines don't have aftlinenum, use 0 as null
@@ -103,6 +113,33 @@ class AccountMoveCommon(models.AbstractModel):
         if not vals["product_id"]:
             vals["name"] = row["dscription"] or ""
             vals["product_uom_id"] = self.env.ref("uom.product_uom_unit").id
+
+        # Map SAP account code to Odoo account (for vendor bills)
+        # Use acct_formatcode (human-readable) instead of acctcode (_SYS codes)
+        acct_formatcode = row.get("acct_formatcode")
+        if acct_formatcode and "pch" in sap_table.lower():  # Only for vendor bills
+            account = self.env["account.account"].search(
+                [
+                    ("sap_acct_code", "=", acct_formatcode),
+                ],
+                limit=1,
+            )
+            if account:
+                # Skip receivable/payable accounts on bill lines (Odoo validation will fail)
+                # These are typically vendor credits or special transactions
+                if account.account_type not in [
+                    "asset_receivable",
+                    "liability_payable",
+                ]:
+                    vals["account_id"] = account.id
+                else:
+                    _logger.debug(
+                        f"Skipping {account.account_type} account {acct_formatcode} on bill line"
+                    )
+            else:
+                _logger.warning(
+                    f"Could not find account for SAP code {acct_formatcode} on bill line"
+                )
 
         # Map SAP tax code (vatgroup) to Odoo tax
         vatgroup = row.get("vatgroup")
@@ -306,9 +343,18 @@ class AccountMoveCommon(models.AbstractModel):
     @api.model
     def _get_lines(self, cr, lines_table, sap_orders):
         docentries = [order["docentry"] for order in sap_orders]
-        # Get product lines
+        # Get product lines with account formatcode
         query = SQL(
-            "SELECT *, 'product' as line_type FROM %s WHERE docentry in %s ORDER BY docentry, linenum",
+            """
+            SELECT 
+                l.*, 
+                'product' as line_type,
+                a.formatcode as acct_formatcode
+            FROM %s l
+            LEFT JOIN oact a ON l.acctcode = a.acctcode
+            WHERE l.docentry in %s 
+            ORDER BY l.docentry, l.linenum
+            """,
             SQL.identifier(lines_table),
             tuple(docentries),
         )
@@ -345,12 +391,17 @@ class AccountMoveCommon(models.AbstractModel):
 
         Args:
             order: SAP header record
-            partner: Odoo partner
+            partner: Odoo partner record or partner ID (int)
             lines: Dict of lines by docentry
             sap_header_table: SAP header table name (e.g., 'oinv', 'opch')
             sap_line_table: SAP line table name (e.g., 'inv1', 'pch1')
             order_lines_dict: Dict mapping to order lines
         """
+        # Handle partner as ID or record
+        if isinstance(partner, int):
+            partner_id = partner
+        else:
+            partner_id = partner.id
         if order["docentry"] in lines:
             move_lines = [
                 Command.create(
@@ -406,8 +457,15 @@ class AccountMoveCommon(models.AbstractModel):
                     }
                 )
 
-        return {
-            "partner_id": partner.id,
+        # Determine payment state based on SAP data
+        # In SAP: paidtodate shows amount paid, doctotal is total amount
+        paid_amount = order.get("paidtodate", 0.0) or 0.0
+        total_amount = order.get("doctotal", 0.0) or 0.0
+
+        # Set state: if fully paid, mark as posted (Odoo will handle payment reconciliation separately)
+        # If not paid, still post it but leave payment status as not_paid
+        vals = {
+            "partner_id": partner_id,
             "invoice_date": fix_tz(order["docdate"]),
             "date": fix_tz(order["docdate"]),
             "invoice_date_due": fix_tz(order["docduedate"]),
@@ -419,6 +477,8 @@ class AccountMoveCommon(models.AbstractModel):
             "invoice_user_id": invoice_user_id,
             "currency_id": currency.id,
         }
+
+        return vals
 
     @api.model
     def _get_users_dict(self):

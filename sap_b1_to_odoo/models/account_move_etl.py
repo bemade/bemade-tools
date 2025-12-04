@@ -20,7 +20,8 @@ _logger = logging.getLogger(__name__)
         "res.users.importer",
         "sale.order.post.processor",
     ],
-    allow_multiprocessing=False,
+    multiprocessing_threshold=1000,
+    chunk_size=500,
 )
 class AccountMoveInvoiceETLImporter(models.AbstractModel):
     _name = "account.move.invoice.importer"
@@ -54,7 +55,7 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
 
     @ETL.extract("oinv")
     def extract_invoices(self, ctx: ETLContext):
-        """Extract open SAP invoices and their lines, excluding already imported ones."""
+        """Extract all SAP invoices and their lines, excluding already imported ones."""
         already_imported = ctx.env["account.move"].search(
             [
                 ("sap_docnum", "!=", False),
@@ -62,24 +63,35 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
             ]
         )
 
-        where = "WHERE docstatus='O'"
+        where = ""
         args = []
         if already_imported:
-            where += " AND docentry not in %s"
+            where = "WHERE docentry not in %s"
             args = [tuple(already_imported.mapped("sap_docentry"))]
 
-        ctx.cr.execute(SQL(f"SELECT * FROM oinv {where}", *args))
-        open_docs = ctx.cr.dictfetchall()
+        sql = f"SELECT * FROM oinv {where}" if where else "SELECT * FROM oinv"
+        ctx.cr.execute(SQL(sql, *args) if args else sql)
+        docs = ctx.cr.dictfetchall()
 
-        if not open_docs:
+        if not docs:
             return {"headers": [], "lines": {}}
 
-        lines = self._get_lines(ctx.cr, "inv1", open_docs)
+        lines = self._get_lines(ctx.cr, "inv1", docs)
         lines_dict = {}
         for line in lines:
             lines_dict.setdefault(line["docentry"], []).append(line)
 
-        return {"headers": open_docs, "lines": lines_dict}
+        return {"headers": docs, "lines": lines_dict}
+
+    @ETL.extract("rdr1")
+    def extract_metadata(self, ctx: ETLContext):
+        """Extract partners and order line links needed for transform."""
+        # Get partners as ID dict (picklable for multiprocessing)
+        partners = self.env["res.partner"].search([("sap_card_code", "!=", False)])
+        partners_dict = {p.sap_card_code: p.id for p in partners}
+
+        order_lines_dict = self._get_order_line_links(ctx.cr)
+        return {"partners": partners_dict, "order_lines": order_lines_dict}
 
     @ETL.transform()
     def transform_invoices(self, ctx: ETLContext, extracted):
@@ -91,22 +103,31 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
         if not headers:
             return []
 
-        partners_dict = self._get_partners_dict()
-        order_lines_dict = self._get_order_line_links(ctx.cr)
+        metadata = extracted["extract_metadata"]
+        partners_id_dict = metadata["partners"]
+        order_lines_dict = metadata["order_lines"]
 
         moves_vals = []
         _logger.info(f"Creating {len(headers)} out_invoice moves via ETL...")
         for doc in headers:
-            partner = partners_dict.get(doc["cardcode"])
-            if not partner:
+            partner_id = partners_id_dict.get(doc["cardcode"])
+            if not partner_id:
                 _logger.warning(
                     "Could not find partner with cardcode %s", doc["cardcode"]
                 )
                 continue
 
             vals = self._get_move_vals(
-                doc, partner, lines_dict, "oinv", "inv1", order_lines_dict
+                doc, partner_id, lines_dict, "oinv", "inv1", order_lines_dict
             )
+
+            # Skip invoices with no actual accounting lines
+            if not vals.get("line_ids"):
+                _logger.warning(
+                    f"Skipping invoice docentry={doc['docentry']}: no line_ids generated"
+                )
+                continue
+
             vals.update({"move_type": "out_invoice"})
             moves_vals.append(vals)
 
@@ -126,9 +147,12 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
             len(moves),
             len(moves.mapped("line_ids")),
         )
+
+        ctx.env.flush_all()
         moves.action_post()
 
-        self.import_order_invoiced_qty(ctx.cr)
+        # import_order_invoiced_qty should run once after all chunks complete
+        # For now, order line invoiced quantities will be computed by Odoo's standard logic
 
     @api.model
     def _trigger_recomputation(self, lines):
@@ -142,3 +166,59 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
             f"Triggering recalculation of invoice/billing status for {len(orders)} {orders._name}"
         )
         orders._compute_invoice_status()
+
+
+@ETL.pipeline(
+    target_model="sale.order.line",
+    importer_name="account.move.invoice.post.processor",
+    sap_source="oinv",
+    depends_on=["account.move.invoice.importer"],
+    allow_multiprocessing=False,
+)
+class AccountMoveInvoicePostProcessor(models.AbstractModel):
+    _name = "account.move.invoice.post.processor"
+    _description = "Invoice Post-Processor - Update Order Line Invoiced Quantities"
+    _inherit = "sap.account.move.importer.mixin"
+
+    def _get_order_line_link_config(self):
+        """Return config for linking invoice lines to sale order lines."""
+        return {
+            "order_line_model": "sale.order.line",
+            "invoice_line_table": "inv1",
+            "order_line_table": "rdr1",
+            "picking_table": "dln1",
+            "picking_basetype": "13",
+            "order_basetype": "17",
+        }
+
+    @api.model
+    def _trigger_recomputation(self, lines):
+        """Trigger recomputation of invoiced quantities and order status."""
+        _logger.info(
+            f"Triggering recalculation of invoiced quantity for {len(lines)} {lines._name} entries"
+        )
+        orders = lines.order_id
+        lines._compute_qty_invoiced()
+        lines._compute_qty_to_invoice()
+        _logger.info(
+            f"Triggering recalculation of invoice/billing status for {len(orders)} {orders._name}"
+        )
+        orders._compute_invoice_status()
+
+    @ETL.extract("oinv")
+    def extract_for_post_processing(self, ctx: ETLContext):
+        """Trivial extract - just return empty dict to satisfy ETL contract."""
+        return {}
+
+    @ETL.transform()
+    def transform_for_post_processing(self, ctx: ETLContext, extracted):
+        """Trivial transform - pass through to satisfy ETL contract."""
+        return {}
+
+    @ETL.load()
+    def update_order_invoiced_qty(self, ctx: ETLContext, transformed):
+        """Update invoiced quantities on sale order lines after all invoices are imported."""
+        _logger.info(
+            "Post-processing invoices - updating order line invoiced quantities"
+        )
+        self.import_order_invoiced_qty(ctx.cr)

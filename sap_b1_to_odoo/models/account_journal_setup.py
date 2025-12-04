@@ -84,15 +84,20 @@ class AccountJournalSetup(models.AbstractModel):
         income_account = data.get("income_account")
         expense_account = data.get("expense_account")
 
-        # Check existing journals
-        existing_journals = ctx.env["account.journal"].search(
-            [("company_id", "=", ctx.env.company.id)]
+        # Check existing journals (including archived ones to avoid unique constraint violations)
+        existing_journals = (
+            ctx.env["account.journal"]
+            .with_context(active_test=False)
+            .search([("company_id", "=", ctx.env.company.id)])
         )
         existing_codes = set(existing_journals.mapped("code"))
-        existing_types = {j.type for j in existing_journals}
+
+        # Get active journals for type checking
+        active_journals = existing_journals.filtered(lambda j: j.active)
+        existing_types = {j.type for j in active_journals}
 
         # Archive default Odoo journals (like BNK1) that have no transactions
-        default_journals = existing_journals.filtered(
+        default_journals = active_journals.filtered(
             lambda j: j.code in ["BNK1", "CSH1", "STJ", "EXCH", "CABA"]
         )
         if default_journals:
