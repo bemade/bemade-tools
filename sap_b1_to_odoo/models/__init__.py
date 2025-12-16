@@ -7,6 +7,7 @@ from . import mrp_bom
 from . import mrp_bom_etl
 from . import mrp_production
 from . import mrp_etl
+from . import sale_purchase_common
 from . import sale_purchase_order_etl_mixin
 from . import sale_order
 from . import sale_order_etl

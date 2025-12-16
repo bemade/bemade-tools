@@ -181,35 +181,12 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         Returns:
             List of partner value dictionaries ready for creation.
         """
-        import os
-
-        print(
-            f"[PID {os.getpid()}] Transform START - {len(extracted['extract_companies'])} records"
-        )
-
         sap_partners = extracted["extract_companies"]
 
-        # Debug: Check if we're in a worker process
-        import multiprocessing
-
-        current_pid = os.getpid()
-        is_main = (
-            current_pid == os.getppid()
-            or multiprocessing.current_process().name == "MainProcess"
-        )
-
-        print(f"[PID {current_pid}] Getting cache...")
         # Use pre-computed lookup dictionaries from class cache (no database queries in workers)
         cache = ResPartnerCompanyImporter._lookup_cache
         if not cache:
-            print(f"[PID {current_pid}] Cache is EMPTY in transform! is_main={is_main}")
             raise RuntimeError("Cache is empty in transform! This should never happen.")
-        else:
-            print(
-                f"[PID {current_pid}] Cache has {len(cache)} items, is_main={is_main}"
-            )
-
-        print(f"[PID {current_pid}] Starting transformation loop...")
 
         countries_dict = cache["countries_dict"]
         states_dict = cache["states_dict"]
@@ -217,17 +194,8 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         terms_dict = cache["terms_dict"]
         company_id = cache["company_id"]
 
-        print(
-            f"[PID {current_pid}] Cache contents: countries={len(countries_dict)}, states={len(states_dict)}, users={len(users_dict)}, terms={len(terms_dict)}, company_id={company_id}"
-        )
-
         partner_vals = []
         for i, sap_partner in enumerate(sap_partners):
-            if i == 0 or i % 10 == 0:  # Print every 10 records
-                print(
-                    f"[PID {current_pid}] Processing record {i+1}/{len(sap_partners)}"
-                )
-
             # Get name and skip if empty
             name = fix_quotes(sap_partner["cardname"])
             if not name or not name.strip():
@@ -252,18 +220,10 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             user_id = users_dict.get(sap_partner["slpcode"], False)
 
             # Get currency ID from cache
-            if i == 0:
-                print(f"[PID {current_pid}] Getting currency from cache...")
             currencies_dict = cache.get("currencies_dict", {})
             currency_id = currencies_dict.get(sap_partner["currency"])
             if not currency_id:
-                if i == 0:
-                    print(
-                        f"[PID {current_pid}] Currency not in cache, using company currency..."
-                    )
                 currency_id = cache.get("company_currency_id")
-            if i == 0:
-                print(f"[PID {current_pid}] Currency resolved")
 
             # Get payment terms
             property_payment_term_id, property_supplier_payment_term_id = (
@@ -274,9 +234,6 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             picking_policy = "one" if sap_partner["partdelivr"] == "Y" else "direct"
             email = fix_quotes(sap_partner["e_mail"])
             email = email_normalize(email)
-
-            if i == 0:
-                print(f"[PID {current_pid}] Building partner dict...")
 
             partner_vals.append(
                 {
@@ -304,14 +261,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
                 }
             )
 
-            if i == 0:
-                print(f"[PID {current_pid}] First record complete")
-
         _logger.info(f"Transformed {len(partner_vals)} company records.")
-
-        # Debug: Print when transform completes
-        print(f"[PID {os.getpid()}] Transform COMPLETE - {len(partner_vals)} records")
-
         return partner_vals
 
     @ETL.load()
@@ -322,21 +272,12 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             ctx: ETL context.
             transformed: Dictionary containing transformed data.
         """
-        import os
-
-        print(f"[PID {os.getpid()}] Load START")
-
         partner_vals = transformed["transform_companies"]
 
         if partner_vals:
-            print(f"[PID {os.getpid()}] Creating {len(partner_vals)} partners...")
             partners = ctx.env["res.partner"].create(partner_vals)
-            print(
-                f"[PID {os.getpid()}] Load COMPLETE - created {len(partners)} partners"
-            )
             _logger.info(f"Created {len(partners)} company partners.")
         else:
-            print(f"[PID {os.getpid()}] Load COMPLETE - no partners to create")
             _logger.info("No new companies to create.")
 
 
