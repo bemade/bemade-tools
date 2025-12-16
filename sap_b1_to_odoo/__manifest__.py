@@ -45,12 +45,15 @@
     ],
     "data": [
         "security/ir.model.access.csv",
+        "data/res_config_settings.xml",
         "data/sap_database_setup.xml",
         "data/menus_actions.xml",
         "views/sap_database_views.xml",
         "views/sap_field_views.xml",
+        "views/mrp_views.xml",
     ],
     "external_dependencies": {"python": ["fuzzywuzzy", "python-Levenshtein"]},
+    "post_init_hook": "post_init_hook",
     "installable": True,
     "auto_install": False,
 }

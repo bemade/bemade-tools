@@ -22,7 +22,7 @@ _logger = logging.getLogger(__name__)
         "purchase.order.post.processor",  # Ensures POs and lines are ready
     ],
     multiprocessing_threshold=1000,
-    chunk_size=500,
+    chunk_size=50,
 )
 class AccountMoveBillETLImporter(models.AbstractModel):
     _name = "account.move.bill.importer"
@@ -43,7 +43,6 @@ class AccountMoveBillETLImporter(models.AbstractModel):
             """
         )
         existing_docnums = tuple(row[0] for row in ctx.env.cr.fetchall())
-        _logger.info(f"Found {len(existing_docnums)} existing vendor bills.")
 
         # Extract new bill headers
         sql = "SELECT * FROM opch"
@@ -81,13 +80,24 @@ class AccountMoveBillETLImporter(models.AbstractModel):
 
     @ETL.extract("por1")
     def extract_metadata(self, ctx: ETLContext):
-        """Extract partners and order line links needed for transform."""
+        """Extract partners, order line links, and all lookups needed for transform."""
         # Get partners as ID dict (picklable for multiprocessing)
-        partners = self.env["res.partner"].search([("sap_card_code", "!=", False)])
-        partners_dict = {p.sap_card_code: p.id for p in partners}
+        partners = self.env["res.partner"].search_read(
+            [("sap_card_code", "!=", False)],
+            ["id", "sap_card_code"],
+        )
+        partners_dict = {p["sap_card_code"]: p["id"] for p in partners}
 
         order_lines_dict = self._get_order_line_links(ctx.cr)
-        return {"partners": partners_dict, "order_lines": order_lines_dict}
+
+        # Build all lookups once
+        lookups = self._build_lookups()
+
+        return {
+            "partners": partners_dict,
+            "order_lines": order_lines_dict,
+            "lookups": lookups,
+        }
 
     @ETL.transform()
     def transform_bills(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -101,14 +111,11 @@ class AccountMoveBillETLImporter(models.AbstractModel):
         if not bills:
             return []
 
-        _logger.info(
-            f"Transforming {len(bills)} bills with {sum(len(v) for v in lines.values())} lines."
-        )
-
         # Get partner and order line lookups from metadata
         metadata = extracted["extract_metadata"]
         partners_id_dict = metadata["partners"]
         order_lines_dict = metadata["order_lines"]
+        lookups = metadata["lookups"]
 
         # Transform each bill
         bill_vals = []
@@ -136,6 +143,7 @@ class AccountMoveBillETLImporter(models.AbstractModel):
                 "opch",  # header table
                 "pch1",  # line table
                 order_lines_dict,
+                lookups,
             )
 
             # Skip bills with no actual accounting lines
@@ -145,31 +153,10 @@ class AccountMoveBillETLImporter(models.AbstractModel):
                 )
                 continue
 
-            # Set move_type based on total amount (negative = credit note)
-            doctotal = bill.get("doctotal", 0.0) or 0.0
-            is_refund = doctotal < 0
-            vals["move_type"] = "in_refund" if is_refund else "in_invoice"
-
-            # For refunds, invert all line amounts (Odoo expects positive amounts for credit notes)
-            if is_refund:
-                _logger.info(
-                    f"Processing refund docentry={docentry}, doctotal={doctotal}"
-                )
-                if vals.get("line_ids"):
-                    for line_cmd in vals["line_ids"]:
-                        if line_cmd[0] == 0:  # Create command (0, 0, {...})
-                            line_vals = line_cmd[2]
-                            # Invert quantity and price_unit
-                            if "quantity" in line_vals:
-                                line_vals["quantity"] = -line_vals["quantity"]
-                            if "price_unit" in line_vals:
-                                line_vals["price_unit"] = -line_vals["price_unit"]
-                else:
-                    _logger.warning(f"Refund docentry={docentry} has no line_ids!")
+            self._normalize_move_type(vals, "in_invoice", "in_refund")
 
             bill_vals.append(vals)
 
-        _logger.info(f"Transformed {len(bill_vals)} vendor bills.")
         return bill_vals
 
     @ETL.load()
@@ -178,19 +165,11 @@ class AccountMoveBillETLImporter(models.AbstractModel):
         bill_vals = transformed["transform_bills"]
 
         if not bill_vals:
-            _logger.info("No new vendor bills to create.")
             return
 
-        # Create bills
         bills = ctx.env["account.move"].create(bill_vals)
-        _logger.info(
-            f"Created {len(bills)} vendor bills with {len(bills.mapped('line_ids'))} lines."
-        )
-
-        # Post the bills - let errors propagate so framework can retry the chunk
         ctx.env.flush_all()
         bills.action_post()
-        _logger.info(f"Posted {len(bills)} vendor bills.")
 
     def _get_order_line_link_config(self):
         """Return configuration for linking bill lines to purchase order lines."""

@@ -14,7 +14,8 @@ _logger = logging.getLogger(__name__)
         "account.move.invoice.post.processor",
         "account.move.bill.importer",
     ],
-    allow_multiprocessing=False,
+    multiprocessing_threshold=500,
+    chunk_size=200,
 )
 class AccountPaymentReconciliation(models.AbstractModel):
     _name = "account.payment.reconciliation"
@@ -22,12 +23,16 @@ class AccountPaymentReconciliation(models.AbstractModel):
         "SAP Payment Reconciliation - Create Journal Entries for Paid Invoices/Bills"
     )
 
+    # Class-level cache for multiprocessing (only primitive types!)
+    _lookup_cache = {}
+
     @ETL.extract("oinv")
     def extract_payments(self, ctx: ETLContext):
-        """Extract payments from SAP payment tables and pre-load Odoo invoices/bills."""
-        _logger.info("Extracting payment data from SAP...")
+        """Extract payments from SAP payment tables and build lookup maps."""
+        _logger.info("[PaymentReconciliation] Extracting payment data from SAP...")
 
         # Get incoming payments (customer payments) with invoice allocations
+        # rct2.baseabs links to oinv.docentry, invtype=13 is for A/R invoices
         ctx.cr.execute(
             """
             SELECT 
@@ -38,17 +43,18 @@ class AccountPaymentReconciliation(models.AbstractModel):
                 p.cashsum,
                 p.trsfrsum,
                 p.checksum,
-                a.invoiceid,
+                a.baseabs::integer as invoiceid,
                 a.sumapplied,
                 'customer' as payment_type
             FROM orct p
-            LEFT JOIN rct2 a ON p.docentry = a.docentry
-            WHERE a.invoiceid IS NOT NULL
+            JOIN rct2 a ON p.docentry = a.docentry
+            WHERE a.invtype = '13' AND a.baseabs IS NOT NULL
             """
         )
         customer_payments = ctx.cr.dictfetchall()
 
         # Get outgoing payments (vendor payments) with bill allocations
+        # vpm2.baseabs links to opch.docentry, invtype=18 is for A/P invoices (bills)
         ctx.cr.execute(
             """
             SELECT 
@@ -59,26 +65,30 @@ class AccountPaymentReconciliation(models.AbstractModel):
                 p.cashsum,
                 p.trsfrsum,
                 p.checksum,
-                a.docentry as invoiceid,
+                a.baseabs::integer as invoiceid,
                 a.sumapplied,
                 'vendor' as payment_type
             FROM ovpm p
-            LEFT JOIN vpm2 a ON p.docentry = a.docnum
-            WHERE a.docentry IS NOT NULL
+            JOIN vpm2 a ON p.docentry = a.docnum
+            WHERE a.invtype = '18' AND a.baseabs IS NOT NULL
             """
         )
         vendor_payments = ctx.cr.dictfetchall()
 
         _logger.info(
-            f"Found {len(customer_payments)} customer payment allocations and "
-            f"{len(vendor_payments)} vendor payment allocations in SAP"
+            f"[PaymentReconciliation] Found {len(customer_payments)} customer payment "
+            f"allocations and {len(vendor_payments)} vendor payment allocations in SAP"
         )
 
-        # Pre-load all invoices and bills that have payments
+        # Combine all payments into a single list for proper chunking
+        all_payments = customer_payments + vendor_payments
+
+        # Pre-load all invoices and bills - build ID maps (not recordsets!)
         invoice_docentries = [p["invoiceid"] for p in customer_payments]
         bill_docentries = [p["invoiceid"] for p in vendor_payments]
 
-        invoices_dict = {}
+        # Map sap_docentry -> move_id for invoices
+        invoices_map = {}
         if invoice_docentries:
             invoices = ctx.env["account.move"].search(
                 [
@@ -87,9 +97,10 @@ class AccountPaymentReconciliation(models.AbstractModel):
                     ("state", "=", "posted"),
                 ]
             )
-            invoices_dict = {inv.sap_docentry: inv for inv in invoices}
+            invoices_map = {inv.sap_docentry: inv.id for inv in invoices}
 
-        bills_dict = {}
+        # Map sap_docentry -> move_id for bills
+        bills_map = {}
         if bill_docentries:
             bills = ctx.env["account.move"].search(
                 [
@@ -98,103 +109,110 @@ class AccountPaymentReconciliation(models.AbstractModel):
                     ("state", "=", "posted"),
                 ]
             )
-            bills_dict = {bill.sap_docentry: bill for bill in bills}
+            bills_map = {bill.sap_docentry: bill.id for bill in bills}
 
         _logger.info(
-            f"Pre-loaded {len(invoices_dict)} invoices and {len(bills_dict)} bills"
+            f"[PaymentReconciliation] Pre-loaded {len(invoices_map)} invoices "
+            f"and {len(bills_map)} bills"
         )
 
-        return {
-            "customer_payments": customer_payments,
-            "vendor_payments": vendor_payments,
-            "invoices_dict": invoices_dict,
-            "bills_dict": bills_dict,
+        # Get payment journal (created by account.journal.setup)
+        payment_journal = ctx.env["account.journal"].search(
+            [("code", "=", "SAPRC"), ("type", "=", "general")],
+            limit=1,
+        )
+        if not payment_journal:
+            _logger.error("[PaymentReconciliation] SAPRC journal not found!")
+            return []
+
+        # Get bank account
+        bank_account = ctx.env["account.account"].search(
+            [("account_type", "=", "asset_cash")],
+            limit=1,
+        )
+        if not bank_account:
+            _logger.error("[PaymentReconciliation] No bank account found!")
+            return []
+
+        # Store in class-level cache for workers
+        AccountPaymentReconciliation._lookup_cache = {
+            "invoices_map": invoices_map,
+            "bills_map": bills_map,
+            "journal_id": payment_journal.id,
+            "bank_account_id": bank_account.id,
         }
+
+        return all_payments
 
     @ETL.transform()
     def transform_payments(self, ctx: ETLContext, extracted):
-        """Match SAP payments to Odoo invoices/bills and prepare reconciliation data."""
-        extract_data = extracted.get("extract_payments", {})
-        customer_payments = extract_data.get("customer_payments", [])
-        vendor_payments = extract_data.get("vendor_payments", [])
-        invoices_dict = extract_data.get("invoices_dict", {})
-        bills_dict = extract_data.get("bills_dict", {})
+        """Match SAP payments to Odoo move IDs and prepare reconciliation data."""
+        payments = extracted.get("extract_payments", [])
+
+        cache = AccountPaymentReconciliation._lookup_cache
+        invoices_map = cache.get("invoices_map", {})
+        bills_map = cache.get("bills_map", {})
 
         payment_data = []
 
-        # Process customer payments
-        for payment in customer_payments:
-            invoice = invoices_dict.get(payment["invoiceid"])
-            if invoice:
+        for payment in payments:
+            payment_type = payment["payment_type"]
+
+            # Look up move_id based on payment type
+            if payment_type == "customer":
+                move_id = invoices_map.get(payment["invoiceid"])
+            else:  # vendor
+                move_id = bills_map.get(payment["invoiceid"])
+
+            if move_id:
                 payment_data.append(
                     {
-                        "move": invoice,
-                        "payment_amount": payment["sumapplied"],
-                        "payment_date": payment["payment_date"],
+                        "move_id": move_id,
+                        "payment_amount": float(payment["sumapplied"]),
+                        "payment_date": str(payment["payment_date"]),
                         "payment_ref": f"SAP Payment {payment['payment_docnum']}",
-                        "payment_type": "customer",
+                        "payment_type": payment_type,
                     }
                 )
 
-        # Process vendor payments
-        for payment in vendor_payments:
-            bill = bills_dict.get(payment["invoiceid"])
-            if bill:
-                payment_data.append(
-                    {
-                        "move": bill,
-                        "payment_amount": payment["sumapplied"],
-                        "payment_date": payment["payment_date"],
-                        "payment_ref": f"SAP Payment {payment['payment_docnum']}",
-                        "payment_type": "vendor",
-                    }
-                )
-
-        _logger.info(f"Prepared {len(payment_data)} payment reconciliations")
+        _logger.info(
+            f"[PaymentReconciliation] Prepared {len(payment_data)} payment reconciliations"
+        )
         return payment_data
 
     @ETL.load()
     def load_payments(self, ctx: ETLContext, transformed):
-        """Create simple journal entries to reconcile paid invoices/bills."""
+        """Create journal entries to reconcile paid invoices/bills."""
         reconciliation_data = transformed.get("transform_payments", [])
 
         if not reconciliation_data:
-            _logger.info("No payments to reconcile")
+            _logger.info("[PaymentReconciliation] No payments to reconcile in chunk")
             return
 
-        # Get or create a payment journal for SAP reconciliation
-        payment_journal = ctx.env["account.journal"].search(
-            [
-                ("code", "=", "SAPREC"),
-                ("type", "=", "general"),
-            ],
-            limit=1,
-        )
+        cache = AccountPaymentReconciliation._lookup_cache
+        journal_id = cache.get("journal_id")
+        bank_account_id = cache.get("bank_account_id")
 
-        if not payment_journal:
-            payment_journal = ctx.env["account.journal"].create(
-                {
-                    "name": "SAP Payment Reconciliation",
-                    "code": "SAPREC",
-                    "type": "general",
-                }
+        if not journal_id or not bank_account_id:
+            _logger.warning(
+                "[PaymentReconciliation] Missing journal or bank account, skipping"
             )
-
-        # Get bank/cash account for payments (you may need to adjust this)
-        bank_account = ctx.env["account.account"].search(
-            [
-                ("account_type", "=", "asset_cash"),
-            ],
-            limit=1,
-        )
-
-        if not bank_account:
-            _logger.warning("No bank account found for payment reconciliation")
             return
+
+        # Batch fetch all moves needed for this chunk
+        move_ids = [d["move_id"] for d in reconciliation_data]
+        moves = ctx.env["account.move"].browse(move_ids)
+        moves_by_id = {m.id: m for m in moves}
 
         reconciled_count = 0
+        skipped_already_paid = 0
+        skipped_no_line = 0
+
         for data in reconciliation_data:
-            move = data["move"]
+            move = moves_by_id.get(data["move_id"])
+            if not move:
+                continue
+
             payment_amount = data["payment_amount"]
             payment_type = data["payment_type"]
             payment_date = data["payment_date"]
@@ -202,6 +220,7 @@ class AccountPaymentReconciliation(models.AbstractModel):
 
             # Skip if already reconciled
             if move.payment_state in ["paid", "in_payment"]:
+                skipped_already_paid += 1
                 continue
 
             # Find the receivable/payable line to reconcile
@@ -212,11 +231,12 @@ class AccountPaymentReconciliation(models.AbstractModel):
             )
 
             if not line_to_reconcile:
+                skipped_no_line += 1
                 continue
 
-            # Create a simple journal entry for the payment
+            # Create journal entry for the payment
             payment_vals = {
-                "journal_id": payment_journal.id,
+                "journal_id": journal_id,
                 "date": payment_date,
                 "ref": payment_ref,
                 "line_ids": [
@@ -237,7 +257,7 @@ class AccountPaymentReconciliation(models.AbstractModel):
                         0,
                         0,
                         {
-                            "account_id": bank_account.id,
+                            "account_id": bank_account_id,
                             "partner_id": move.partner_id.id,
                             "debit": (
                                 payment_amount if payment_type == "customer" else 0
@@ -262,4 +282,7 @@ class AccountPaymentReconciliation(models.AbstractModel):
                 (line_to_reconcile + payment_line).reconcile()
                 reconciled_count += 1
 
-        _logger.info(f"Reconciled {reconciled_count} payments")
+        _logger.info(
+            f"[PaymentReconciliation] Chunk complete: {reconciled_count} reconciled, "
+            f"{skipped_already_paid} already paid, {skipped_no_line} no line to reconcile"
+        )

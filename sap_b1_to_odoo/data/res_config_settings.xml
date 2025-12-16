@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="0">
+    <!-- 
+    Enable features required by SAP import.
+    Execute res.config.settings to properly enable features with all side effects.
+    -->
+    <function model="res.config.settings" name="_sap_enable_required_features"/>
+</odoo>

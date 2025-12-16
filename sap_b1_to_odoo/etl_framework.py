@@ -50,6 +50,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from odoo import api
 from odoo.modules.registry import Registry
+from odoo.tools import mute_logger
 
 _logger = logging.getLogger(__name__)
 
@@ -417,7 +418,10 @@ class ETLExecutor:
 
     def execute(self) -> None:
         """Execute the complete ETL pipeline."""
-        _logger.info(f"Starting ETL pipeline for {self.pipeline.target_model}")
+        _logger.info(
+            f"Starting ETL pipeline for {self.pipeline.target_model} "
+            f"(importer: {self.pipeline.importer_model_name})"
+        )
 
         # Phase 1: Extract
         extracted_data = self._execute_extract()
@@ -439,7 +443,7 @@ class ETLExecutor:
         else:
             self._execute_sequential(extracted_data)
 
-        _logger.info(f"Completed ETL pipeline for {self.pipeline.target_model}")
+        _logger.info(f"[{self.pipeline.importer_model_name}] Completed ETL pipeline")
 
     def _execute_extract(self) -> Dict[str, Any]:
         """Execute all extraction methods.
@@ -449,7 +453,9 @@ class ETLExecutor:
         """
         results = {}
         for method in self.pipeline.extract_methods:
-            _logger.info(f"Extracting from {method.source_table}")
+            _logger.info(
+                f"[{self.pipeline.importer_model_name}] Extracting from {method.source_table}"
+            )
             result = method.func(self.importer, self.ctx)
             results[method.func.__name__] = result
         return results
@@ -488,13 +494,17 @@ class ETLExecutor:
         # Transform
         transformed_data = {}
         for method in self.pipeline.transform_methods:
-            _logger.info(f"Transforming with {method.func.__name__}")
+            _logger.info(
+                f"[{self.pipeline.importer_model_name}] Transforming with {method.func.__name__}"
+            )
             result = method.func(self.importer, self.ctx, extracted_data)
             transformed_data[method.func.__name__] = result
 
         # Load
         for method in self.pipeline.load_methods:
-            _logger.info(f"Loading with {method.func.__name__}")
+            _logger.info(
+                f"[{self.pipeline.importer_model_name}] Loading with {method.func.__name__}"
+            )
             method.func(self.importer, self.ctx, transformed_data)
 
     def _execute_parallel(self, extracted_data: Dict[str, Any]) -> None:
@@ -509,7 +519,9 @@ class ETLExecutor:
         mp_config = self.pipeline.multiprocessing
         workers = mp_config.get_workers()
 
-        _logger.info(f"Processing {len(chunks)} chunks with {workers} workers.")
+        _logger.info(
+            f"[{self.pipeline.importer_model_name}] Processing {len(chunks)} chunks with {workers} workers."
+        )
 
         start_method = multiprocessing.get_start_method()
 
@@ -543,30 +555,34 @@ class ETLExecutor:
                         for attempt in range(max_retries):
                             try:
                                 current_future.result()
-                                _logger.info(f"Completed chunk {i}/{len(chunks)}")
+                                _logger.info(
+                                    f"[{self.pipeline.importer_model_name}] Completed chunk {i}/{len(chunks)}"
+                                )
                                 break
                             except Exception as e:
+                                # Locate a retryable database error anywhere in the exception chain
+                                retryable_exc = self._find_retryable_db_error(e)
+
                                 # Debug: log what we caught
                                 _logger.debug(
-                                    f"Chunk {i} caught exception: {type(e).__name__}, "
-                                    f"cause: {type(e.__cause__).__name__ if e.__cause__ else 'None'}"
+                                    "Chunk %s caught exception=%s, retryable=%s, chain=%s",
+                                    i,
+                                    type(e).__name__,
+                                    (
+                                        type(retryable_exc).__name__
+                                        if retryable_exc
+                                        else "None"
+                                    ),
+                                    self._summarize_exception_chain(e),
                                 )
 
-                                # Check if the underlying cause is a retryable error
-                                if not isinstance(
-                                    e.__cause__,
-                                    (
-                                        psycopg2.errors.SerializationFailure,
-                                        psycopg2.errors.DeadlockDetected,
-                                        psycopg2.extensions.TransactionRollbackError,
-                                    ),
-                                ):
+                                if not retryable_exc:
                                     # Not a retryable error, crash immediately
                                     raise
                                 if attempt < max_retries - 1:
                                     wait_time = 2**attempt  # Exponential backoff
                                     _logger.warning(
-                                        f"Chunk {i}/{len(chunks)} hit {type(e.__cause__).__name__}, "
+                                        f"Chunk {i}/{len(chunks)} hit {type(retryable_exc).__name__}, "
                                         f"retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})"
                                     )
                                     time.sleep(wait_time)
@@ -588,6 +604,36 @@ class ETLExecutor:
                 raise
             finally:
                 multiprocessing.set_start_method(start_method, force=True)
+
+    @staticmethod
+    def _iter_exception_chain(exc: BaseException):
+        """Yield an exception and its chained causes/contexts without looping."""
+
+        visited = set()
+        current: Optional[BaseException] = exc
+        while current and id(current) not in visited:
+            visited.add(id(current))
+            yield current
+            current = current.__cause__ or current.__context__
+
+    def _find_retryable_db_error(self, exc: BaseException):
+        """Return the first retryable psycopg2 error in the exception chain."""
+
+        retryable = (
+            psycopg2.errors.SerializationFailure,
+            psycopg2.errors.DeadlockDetected,
+            psycopg2.extensions.TransactionRollbackError,
+        )
+        for chained_exc in self._iter_exception_chain(exc):
+            if isinstance(chained_exc, retryable):
+                return chained_exc
+        return None
+
+    def _summarize_exception_chain(self, exc: BaseException) -> str:
+        """Return a short string describing the exception chain."""
+
+        parts = [type(chained).__name__ for chained in self._iter_exception_chain(exc)]
+        return " -> ".join(parts)
 
     def _create_chunks(self, extracted_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Split extracted data into chunks for parallel processing.
@@ -669,21 +715,24 @@ class ETLExecutor:
             # Create ETL context with Odoo cursor (no SAP cursor in multiprocessing)
             ctx = ETLContext(cr=None, env=env)
 
-            # Transform
-            # The chunk is already the full extracted_data dict from all extract methods
-            # (passed from _execute_parallel as extracted_data parameter)
-            extracted_dict = chunk
+            # Mute sql_db to suppress noisy serialization error logs in worker processes
+            # (errors still propagate for retry in the main process)
+            with mute_logger("odoo.sql_db"):
+                # Transform
+                # The chunk is already the full extracted_data dict from all extract methods
+                # (passed from _execute_parallel as extracted_data parameter)
+                extracted_dict = chunk
 
-            transformed_data = {}
-            for method in pipeline.transform_methods:
-                result = method.func(importer, ctx, extracted_dict)
-                transformed_data[method.func.__name__] = result
+                transformed_data = {}
+                for method in pipeline.transform_methods:
+                    result = method.func(importer, ctx, extracted_dict)
+                    transformed_data[method.func.__name__] = result
 
-            # Load
-            for method in pipeline.load_methods:
-                method.func(importer, ctx, transformed_data)
+                # Load
+                for method in pipeline.load_methods:
+                    method.func(importer, ctx, transformed_data)
 
-            cr.commit()
+                cr.commit()
 
 
 # =============================================================================

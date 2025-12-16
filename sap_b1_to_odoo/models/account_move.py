@@ -64,7 +64,19 @@ class AccountMoveCommon(models.AbstractModel):
     _description = "Common functionality for SAP invoice and bill importers"
 
     @api.model
-    def _get_row_vals(self, row, products_dict, sap_table, order_lines_dict):
+    def _get_row_vals(self, row, sap_table, order_lines_dict, lookups):
+        """Transform a SAP line into Odoo account.move.line values.
+
+        Args:
+            row: SAP line dict
+            sap_table: SAP line table name (e.g., 'inv1', 'pch1')
+            order_lines_dict: Dict mapping (docentry, linenum) to order line IDs
+            lookups: Pre-computed lookup dicts with keys:
+                - products: {sap_item_code: product_id}
+                - accounts: {sap_acct_code: (account_id, account_type)}
+                - taxes: {(sap_tax_code, type_tax_use): tax_id}
+                - unit_uom_id: ID of uom.product_uom_unit
+        """
         # Handle text lines from INV10/PCH10
         if "linetext" in row:  # This is a text line
             vals = {
@@ -88,7 +100,8 @@ class AccountMoveCommon(models.AbstractModel):
             return vals
 
         # Handle product lines
-        product = products_dict.get(row["itemcode"])
+        products_dict = lookups["products"]
+        product_id = products_dict.get(row["itemcode"])
 
         # For service/expense lines with zero quantity, use linetotal as price_unit
         quantity = row["quantity"] if row["quantity"] else 0.0
@@ -100,7 +113,7 @@ class AccountMoveCommon(models.AbstractModel):
             price_unit = row["linetotal"]
 
         vals = {
-            "product_id": product.id if product else False,
+            "product_id": product_id,
             "quantity": quantity,
             "price_unit": price_unit,
             "discount": row["discprcnt"],
@@ -112,29 +125,26 @@ class AccountMoveCommon(models.AbstractModel):
         }
         if not vals["product_id"]:
             vals["name"] = row["dscription"] or ""
-            vals["product_uom_id"] = self.env.ref("uom.product_uom_unit").id
+            vals["product_uom_id"] = lookups["unit_uom_id"]
 
         # Map SAP account code to Odoo account (for vendor bills)
         # Use acct_formatcode (human-readable) instead of acctcode (_SYS codes)
         acct_formatcode = row.get("acct_formatcode")
         if acct_formatcode and "pch" in sap_table.lower():  # Only for vendor bills
-            account = self.env["account.account"].search(
-                [
-                    ("sap_acct_code", "=", acct_formatcode),
-                ],
-                limit=1,
-            )
-            if account:
+            accounts_dict = lookups.get("accounts", {})
+            account_info = accounts_dict.get(acct_formatcode)
+            if account_info:
+                account_id, account_type = account_info
                 # Skip receivable/payable accounts on bill lines (Odoo validation will fail)
                 # These are typically vendor credits or special transactions
-                if account.account_type not in [
+                if account_type not in [
                     "asset_receivable",
                     "liability_payable",
                 ]:
-                    vals["account_id"] = account.id
+                    vals["account_id"] = account_id
                 else:
                     _logger.debug(
-                        f"Skipping {account.account_type} account {acct_formatcode} on bill line"
+                        f"Skipping {account_type} account {acct_formatcode} on bill line"
                     )
             else:
                 _logger.warning(
@@ -142,11 +152,9 @@ class AccountMoveCommon(models.AbstractModel):
                 )
 
         # Map SAP tax code (vatgroup) to Odoo tax
-        vatgroup = row.get("vatgroup")
-        if vatgroup:
-            tax = self._lookup_tax(vatgroup, sap_table)
-            if tax:
-                vals["tax_ids"] = [Command.set([tax.id])]
+        tax_id = self._lookup_tax(row, sap_table, lookups.get("taxes", {}))
+        if tax_id:
+            vals["tax_ids"] = [Command.set([tax_id])]
 
         # Link to order line if available
         order_line_id = order_lines_dict.get((row["docentry"], row["linenum"]))
@@ -156,35 +164,87 @@ class AccountMoveCommon(models.AbstractModel):
         return vals
 
     @api.model
-    def _lookup_tax(self, vatgroup, sap_table):
-        """Look up Odoo tax by SAP tax code (vatgroup).
+    def _lookup_tax(self, row, sap_table, taxes_dict):
+        """Look up Odoo tax ID by SAP tax code using pre-computed dict.
 
         Args:
-            vatgroup: SAP tax code (e.g., "CO", "WY 01")
+            row: Dict with SAP line values (must include vatgroup/taxcode when set)
             sap_table: SAP table name (inv1 for sales, pch1 for purchases)
+            taxes_dict: Pre-computed dict {(sap_tax_code, type_tax_use): tax_id}
 
         Returns:
-            account.tax record or False
+            tax_id (int) or False
         """
-        # Determine if this is a sale or purchase based on table
         type_tax_use = "sale" if "inv" in sap_table.lower() else "purchase"
+        vatgroup = (row.get("vatgroup") or "").strip()
+        taxcode = (row.get("taxcode") or "").strip()
 
-        # Search without company filter since company context may not be set correctly
-        tax = self.env["account.tax"].search(
-            [
-                ("sap_tax_code", "=", vatgroup),
-                ("type_tax_use", "=", type_tax_use),
-            ],
-            limit=1,
-        )
+        # For purchases (PCH1) SAP uses taxcode; for sales (INV1) it uses vatgroup.
+        primary = vatgroup if type_tax_use == "sale" else taxcode
+        fallback = taxcode if type_tax_use == "sale" else vatgroup
 
-        if not tax:
+        for code in [primary, fallback]:
+            if not code:
+                continue
+            tax_id = taxes_dict.get((code, type_tax_use))
+            if tax_id:
+                return tax_id
+
+        if primary or fallback:
             _logger.warning(
-                f"Tax not found for SAP vatgroup '{vatgroup}' "
-                f"(type: {type_tax_use}). Line will have no tax."
+                "Tax not found for SAP code '%s' (fallback '%s') type=%s table=%s docentry=%s line=%s",
+                primary or fallback,
+                fallback if primary else "",
+                type_tax_use,
+                sap_table,
+                row.get("docentry"),
+                row.get("linenum"),
             )
 
-        return tax
+        return False
+
+    @staticmethod
+    def _compute_move_line_total(line_commands):
+        """Estimate the untaxed total based on prepared line commands."""
+
+        total = 0.0
+        for command in line_commands or []:
+            if command[0] != 0:
+                continue
+            line_vals = command[2]
+            if line_vals.get("display_type"):
+                continue
+            qty = line_vals.get("quantity") or 0.0
+            price = line_vals.get("price_unit") or 0.0
+            discount = line_vals.get("discount") or 0.0
+            total += qty * price * (1 - discount / 100.0)
+        return total
+
+    @staticmethod
+    def _invert_move_line_commands(line_commands):
+        """Invert line amounts so refunds have positive totals.
+
+        Only invert quantity (not price_unit) to flip the sign of the line total.
+        Inverting both would leave the total unchanged.
+        """
+        for command in line_commands or []:
+            if command[0] != 0:
+                continue
+            line_vals = command[2]
+            if line_vals.get("display_type"):
+                continue
+            if "quantity" in line_vals and line_vals["quantity"]:
+                line_vals["quantity"] = -line_vals["quantity"]
+
+    def _normalize_move_type(self, move_vals, invoice_move_type, refund_move_type):
+        """Ensure the move has the correct type/sign based on line totals."""
+
+        total = self._compute_move_line_total(move_vals.get("line_ids"))
+        if total < 0:
+            move_vals["move_type"] = refund_move_type
+            self._invert_move_line_commands(move_vals.get("line_ids"))
+        else:
+            move_vals["move_type"] = invoice_move_type
 
     @api.model
     def import_order_invoiced_qty(self, cr):
@@ -385,31 +445,42 @@ class AccountMoveCommon(models.AbstractModel):
 
     @api.model
     def _get_move_vals(
-        self, order, partner, lines, sap_header_table, sap_line_table, order_lines_dict
+        self,
+        order,
+        partner_id,
+        lines,
+        sap_header_table,
+        sap_line_table,
+        order_lines_dict,
+        lookups,
     ):
-        """Get common values for both invoices and bills
+        """Get common values for both invoices and bills.
 
         Args:
             order: SAP header record
-            partner: Odoo partner record or partner ID (int)
+            partner_id: Odoo partner ID (int)
             lines: Dict of lines by docentry
             sap_header_table: SAP header table name (e.g., 'oinv', 'opch')
             sap_line_table: SAP line table name (e.g., 'inv1', 'pch1')
-            order_lines_dict: Dict mapping to order lines
+            order_lines_dict: Dict mapping (docentry, linenum) to order line IDs
+            lookups: Pre-computed lookup dicts with keys:
+                - products: {sap_item_code: product_id}
+                - users: {sap_slpcode: user_id}
+                - currencies: {currency_code: currency_id}
+                - currency_rates: {(currency_id, date): rate_id}
+                - accounts: {sap_acct_code: (account_id, account_type)}
+                - taxes: {(sap_tax_code, type_tax_use): tax_id}
+                - unit_uom_id: ID of uom.product_uom_unit
+                - company_currency_id: ID of company currency
         """
-        # Handle partner as ID or record
-        if isinstance(partner, int):
-            partner_id = partner
-        else:
-            partner_id = partner.id
         if order["docentry"] in lines:
             move_lines = [
                 Command.create(
                     self._get_row_vals(
                         line,
-                        self._get_products_dict(),
                         sap_line_table,
                         order_lines_dict,
+                        lookups,
                     )
                 )
                 for line in lines[order["docentry"]]
@@ -417,21 +488,14 @@ class AccountMoveCommon(models.AbstractModel):
         else:
             move_lines = []
 
-        users_dict = self._get_users_dict()
+        users_dict = lookups["users"]
         invoice_user_id = users_dict.get(order.get("slpcode"), False)
 
         # Get the currency from SAP's DocCur field, default to company currency if not set
-        company_currency = self.env.company.currency_id
-        currency_code = order.get("doccur") or company_currency.name
-        currency = self.env["res.currency"].search(
-            [
-                ("name", "=", currency_code),
-                ("active", "in", [False, True]),
-            ],
-            limit=1,
-        )
-        if not currency:
-            currency = company_currency
+        currencies_dict = lookups["currencies"]
+        company_currency_id = lookups["company_currency_id"]
+        currency_code = order.get("doccur") or None
+        currency_id = currencies_dict.get(currency_code, company_currency_id)
 
         # Get the currency rate from SAP's DocRate field
         # SAP stores the rate as foreign currency to base currency
@@ -440,30 +504,30 @@ class AccountMoveCommon(models.AbstractModel):
         if rate and rate != 1.0:
             # Create a rate for this specific date if it doesn't exist
             date = fix_tz(order["docdate"])
-            existing_rate = self.env["res.currency.rate"].search(
-                [
-                    ("currency_id", "=", currency.id),
-                    ("company_id", "=", self.env.company.id),
-                    ("name", "=", date),
-                ]
-            )
-            if not existing_rate:
-                self.env["res.currency.rate"].create(
-                    {
-                        "currency_id": currency.id,
-                        "rate": 1.0 / rate,  # Invert the rate for Odoo
-                        "name": date,
-                        "company_id": self.env.company.id,
-                    }
+            currency_rates = lookups.get("currency_rates", {})
+            rate_key = (currency_id, date)
+            if rate_key not in currency_rates:
+                # Need to create the rate - this is unavoidable but rare
+                existing_rate = self.env["res.currency.rate"].search(
+                    [
+                        ("currency_id", "=", currency_id),
+                        ("company_id", "=", self.env.company.id),
+                        ("name", "=", date),
+                    ],
+                    limit=1,
                 )
+                if not existing_rate:
+                    self.env["res.currency.rate"].create(
+                        {
+                            "currency_id": currency_id,
+                            "rate": 1.0 / rate,  # Invert the rate for Odoo
+                            "name": date,
+                            "company_id": self.env.company.id,
+                        }
+                    )
+                # Cache it for future lookups in this batch
+                currency_rates[rate_key] = True
 
-        # Determine payment state based on SAP data
-        # In SAP: paidtodate shows amount paid, doctotal is total amount
-        paid_amount = order.get("paidtodate", 0.0) or 0.0
-        total_amount = order.get("doctotal", 0.0) or 0.0
-
-        # Set state: if fully paid, mark as posted (Odoo will handle payment reconciliation separately)
-        # If not paid, still post it but leave payment status as not_paid
         vals = {
             "partner_id": partner_id,
             "invoice_date": fix_tz(order["docdate"]),
@@ -475,13 +539,82 @@ class AccountMoveCommon(models.AbstractModel):
             "ref": order["numatcard"],
             "line_ids": move_lines,
             "invoice_user_id": invoice_user_id,
-            "currency_id": currency.id,
+            "currency_id": currency_id,
         }
 
         return vals
 
     @api.model
+    def _build_lookups(self):
+        """Build all lookup dicts needed for transform.
+
+        Returns a dict with:
+            - products: {sap_item_code: product_id}
+            - users: {sap_slpcode: user_id}
+            - currencies: {currency_code: currency_id}
+            - currency_rates: {} (mutable, populated during transform)
+            - accounts: {sap_acct_code: (account_id, account_type)}
+            - taxes: {(sap_tax_code, type_tax_use): tax_id}
+            - unit_uom_id: ID of uom.product_uom_unit
+            - company_currency_id: ID of company currency
+        """
+        # Products
+        products = self.env["product.product"].search_read(
+            [("sap_item_code", "!=", False)],
+            ["id", "sap_item_code"],
+        )
+        products_dict = {p["sap_item_code"]: p["id"] for p in products}
+
+        # Users
+        users = self.env["res.users"].search_read(
+            [("sap_slpcode", "!=", False), ("active", "in", [False, True])],
+            ["id", "sap_slpcode"],
+        )
+        users_dict = {u["sap_slpcode"]: u["id"] for u in users}
+
+        # Currencies
+        currencies = self.env["res.currency"].search_read(
+            [("active", "in", [False, True])],
+            ["id", "name"],
+        )
+        currencies_dict = {c["name"]: c["id"] for c in currencies}
+
+        # Accounts (for vendor bills)
+        accounts = self.env["account.account"].search_read(
+            [("sap_acct_code", "!=", False)],
+            ["id", "sap_acct_code", "account_type"],
+        )
+        accounts_dict = {
+            a["sap_acct_code"]: (a["id"], a["account_type"]) for a in accounts
+        }
+
+        # Taxes
+        taxes = self.env["account.tax"].search_read(
+            [("sap_tax_code", "!=", False)],
+            ["id", "sap_tax_code", "type_tax_use"],
+        )
+        taxes_dict = {(t["sap_tax_code"], t["type_tax_use"]): t["id"] for t in taxes}
+
+        # UoM unit
+        unit_uom_id = self.env.ref("uom.product_uom_unit").id
+
+        # Company currency
+        company_currency_id = self.env.company.currency_id.id
+
+        return {
+            "products": products_dict,
+            "users": users_dict,
+            "currencies": currencies_dict,
+            "currency_rates": {},  # Mutable, populated during transform
+            "accounts": accounts_dict,
+            "taxes": taxes_dict,
+            "unit_uom_id": unit_uom_id,
+            "company_currency_id": company_currency_id,
+        }
+
+    @api.model
     def _get_users_dict(self):
+        """Deprecated: Use _build_lookups() instead."""
         return {
             user.sap_slpcode: user.id
             for user in self.env["res.users"].search(
@@ -494,6 +627,7 @@ class AccountMoveCommon(models.AbstractModel):
 
     @api.model
     def _get_products_dict(self):
+        """Deprecated: Use _build_lookups() instead."""
         return {
             product.sap_item_code: product
             for product in self.env["product.product"].search(
@@ -547,6 +681,7 @@ class AccountMoveCommon(models.AbstractModel):
 
         partners_dict = self._get_partners_dict()
         order_lines_dict = self._get_order_line_links(cr)
+        lookups = self._build_lookups()
 
         moves = self.env["account.move"]
         _logger.info(f"Creating {len(open_docs)} {config['move_type']} moves...")
@@ -560,11 +695,12 @@ class AccountMoveCommon(models.AbstractModel):
 
             vals = self._get_move_vals(
                 doc,
-                partner,
+                partner.id,
                 lines_dict,
                 config["header_table"],
                 config["line_table"],
                 order_lines_dict,
+                lookups,
             )
             vals.update(
                 {
@@ -584,113 +720,16 @@ class AccountMoveCommon(models.AbstractModel):
         """
         Return the import configuration.
 
-        :return: dict in the form
-        ```
-        {
-            "header_table": "oinv",
-            "line_table": "inv1",
-            "move_type": "out_invoice",
-            "invoice_status_method": "_compute_invoice_status",
-        }
-        ```
+        :return: dict in the form::
+
+            {
+                "header_table": "oinv",
+                "line_table": "inv1",
+                "move_type": "out_invoice",
+                "invoice_status_method": "_compute_invoice_status",
+            }
         """
         pass
 
     def _trigger_recomputation(self, lines):
         raise NotImplementedError("Subclasses must implement _trigger_recomputation()")
-
-
-class InvoiceImporter(models.AbstractModel):
-    _name = "sap.invoice.importer"
-    _description = "SAP Invoice Importer"
-    _inherit = "sap.account.move.importer.mixin"
-
-    @api.model
-    def _get_import_config(self):
-        return {
-            "header_table": "oinv",
-            "line_table": "inv1",
-            "move_type": "out_invoice",
-            "invoice_status_method": "_compute_invoice_status",
-        }
-
-    @api.model
-    def _get_order_line_link_config(self):
-        return {
-            "invoice_line_table": "inv1",
-            "order_line_table": "rdr1",
-            "picking_table": "dln1",
-            "picking_basetype": 15,  # Deliveries have BaseType = 15
-            "order_basetype": 17,  # Sales Orders have BaseType = 17
-            "order_line_model": "sale.order.line",
-        }
-
-    def _get_order_line_link_vals(self, order_line_id):
-        return {"sale_line_ids": [Command.link(order_line_id)]}
-
-    @api.model
-    def import_invoices(self, cr):
-        """Import customer invoices from SAP."""
-        return self.import_moves(cr)
-
-    @api.model
-    def _trigger_recomputation(self, lines):
-        _logger.info(
-            f"Triggering recalculation of invoiced quantity for {len(lines)} {lines._name} entries"
-        )
-        orders = lines.order_id
-        lines._compute_qty_invoiced()
-        lines._compute_qty_to_invoice()
-        # Recompute billing status (waiting bills, etc.)
-        _logger.info(
-            f"Triggering recalculation of invoice/billing status for {len(orders)} {orders._name}"
-        )
-        orders._compute_invoice_status()
-
-
-class VendorBillsImporter(models.AbstractModel):
-    _name = "sap.vendor.bill.importer"
-    _description = "SAP Vendor Bill Importer"
-    _inherit = "sap.account.move.importer.mixin"
-
-    @api.model
-    def _get_import_config(self):
-        return {
-            "header_table": "OPCH",
-            "line_table": "pch1",
-            "move_type": "in_invoice",
-            "invoice_status_method": "_get_invoiced",
-        }
-
-    @api.model
-    def _get_order_line_link_config(self):
-        return {
-            "invoice_line_table": "PCH1",
-            "order_line_table": "por1",
-            "picking_table": "PDN1",
-            "picking_basetype": 20,  # Goods Receipt POs have BaseType = 20
-            "order_basetype": 22,  # Purchase Orders have BaseType = 22
-            "order_line_model": "purchase.order.line",
-        }
-
-    @api.model
-    def _get_order_line_link_vals(self, order_line_id):
-        return {"purchase_line_id": order_line_id}
-
-    @api.model
-    def import_bills(self, cr):
-        """Import vendor bills from SAP."""
-        return self.import_moves(cr)
-
-    @api.model
-    def _trigger_recomputation(self, lines):
-        _logger.info(
-            f"Triggering recalculation of invoiced quantity for {len(lines)} {lines._name} entries"
-        )
-        orders = lines.order_id
-        lines._compute_qty_invoiced()
-        # Recompute billing status (waiting bills, etc.)
-        _logger.info(
-            f"Triggering recalculation of invoice/billing status for {len(orders)} {orders._name}"
-        )
-        orders._get_invoiced()

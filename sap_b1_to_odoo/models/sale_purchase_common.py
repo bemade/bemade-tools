@@ -9,7 +9,7 @@ from odoo.sql_db import SQL
 from odoo.addons.sap_b1_to_odoo.tools import fix_tz
 
 _logger = logging.getLogger(__name__)
-workers = os.cpu_count() - 1
+workers = max(os.cpu_count() or 1, 2) - 1
 
 
 class SapSalePurchaseImporterMixin(models.AbstractModel):
@@ -561,17 +561,3 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
         _logger.info(
             f"Validated pickings for {len(orders)} orders based on SAP quantities"
         )
-
-
-class PaymentTerms(models.Model):
-    _inherit = "account.payment.term"
-
-    sap_groupnum = fields.Integer(index="btree")
-
-    _sql_constraints = [
-        (
-            "unique_sap_groupnum",
-            "UNIQUE(sap_groupnum)",
-            "A payment term with this SAP ID already exists.",
-        )
-    ]

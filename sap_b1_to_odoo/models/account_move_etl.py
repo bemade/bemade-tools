@@ -21,7 +21,7 @@ _logger = logging.getLogger(__name__)
         "sale.order.post.processor",
     ],
     multiprocessing_threshold=1000,
-    chunk_size=500,
+    chunk_size=50,
 )
 class AccountMoveInvoiceETLImporter(models.AbstractModel):
     _name = "account.move.invoice.importer"
@@ -85,13 +85,24 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
 
     @ETL.extract("rdr1")
     def extract_metadata(self, ctx: ETLContext):
-        """Extract partners and order line links needed for transform."""
+        """Extract partners, order line links, and all lookups needed for transform."""
         # Get partners as ID dict (picklable for multiprocessing)
-        partners = self.env["res.partner"].search([("sap_card_code", "!=", False)])
-        partners_dict = {p.sap_card_code: p.id for p in partners}
+        partners = self.env["res.partner"].search_read(
+            [("sap_card_code", "!=", False)],
+            ["id", "sap_card_code"],
+        )
+        partners_dict = {p["sap_card_code"]: p["id"] for p in partners}
 
         order_lines_dict = self._get_order_line_links(ctx.cr)
-        return {"partners": partners_dict, "order_lines": order_lines_dict}
+
+        # Build all lookups once
+        lookups = self._build_lookups()
+
+        return {
+            "partners": partners_dict,
+            "order_lines": order_lines_dict,
+            "lookups": lookups,
+        }
 
     @ETL.transform()
     def transform_invoices(self, ctx: ETLContext, extracted):
@@ -106,9 +117,9 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
         metadata = extracted["extract_metadata"]
         partners_id_dict = metadata["partners"]
         order_lines_dict = metadata["order_lines"]
+        lookups = metadata["lookups"]
 
         moves_vals = []
-        _logger.info(f"Creating {len(headers)} out_invoice moves via ETL...")
         for doc in headers:
             partner_id = partners_id_dict.get(doc["cardcode"])
             if not partner_id:
@@ -118,7 +129,7 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
                 continue
 
             vals = self._get_move_vals(
-                doc, partner_id, lines_dict, "oinv", "inv1", order_lines_dict
+                doc, partner_id, lines_dict, "oinv", "inv1", order_lines_dict, lookups
             )
 
             # Skip invoices with no actual accounting lines
@@ -128,7 +139,7 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
                 )
                 continue
 
-            vals.update({"move_type": "out_invoice"})
+            self._normalize_move_type(vals, "out_invoice", "out_refund")
             moves_vals.append(vals)
 
         return moves_vals
@@ -138,16 +149,9 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
         """Create and post account.move invoices, then recompute order invoiced qty."""
         move_vals = transformed.get("transform_invoices", [])
         if not move_vals:
-            _logger.info("No SAP invoices to import via ETL.")
             return
 
         moves = ctx.env["account.move"].create(move_vals)
-        _logger.info(
-            "Created %s account.move invoices with %s lines via ETL.",
-            len(moves),
-            len(moves.mapped("line_ids")),
-        )
-
         ctx.env.flush_all()
         moves.action_post()
 

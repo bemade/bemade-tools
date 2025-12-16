@@ -1,7 +1,7 @@
 # SAP B1 to Odoo ETL Framework
 
-**Version:** 2.0  
-**Last Updated:** November 7, 2025
+**Version:** 2.1  
+**Last Updated:** December 5, 2025
 
 ---
 
@@ -336,11 +336,148 @@ This allows:
 - **Cause**: Idempotence check not working
 - **Solution**: Verify SAP unique field is correctly filtered in extract phase
 
+**Issue**: `SerializationFailure: could not serialize access due to concurrent update`
+- **Cause**: Multiple workers updating the same records (e.g., `res_partner.write_date`)
+- **Solution**: Framework automatically retries with exponential backoff (up to 5 attempts). If persistent, reduce `max_workers` or increase `chunk_size`
+
+**Issue**: Noisy "bad query" ERROR logs during multiprocessing
+- **Cause**: PostgreSQL serialization failures logged by `odoo.sql_db`
+- **Solution**: Framework v2.1+ automatically mutes these in worker processes. Errors still propagate for retry handling.
+
 ---
 
 ## API Reference
 
 See inline documentation in `etl_framework.py` for complete API details.
+
+---
+
+## v2.1 Changes (December 2025)
+
+- **Automatic log muting**: Framework now automatically mutes `odoo.sql_db` logs in multiprocessing workers to suppress noisy serialization error messages (errors still propagate for retry)
+- **Enhanced logging**: All log messages now include `[importer_name]` prefix for easier debugging
+- **Serialization retry**: Built-in retry logic with exponential backoff for PostgreSQL serialization failures
+
+---
+
+## Extracting the Framework
+
+### Odoo Dependencies Analysis
+
+The framework has the following Odoo-specific dependencies:
+
+| Import | Usage | Extractable? |
+|--------|-------|--------------|
+| `odoo.api` | `api.Environment` for creating Odoo env in workers | ❌ Core Odoo |
+| `odoo.modules.registry.Registry` | Database registry for worker processes | ❌ Core Odoo |
+| `odoo.tools.mute_logger` | Suppress noisy SQL logs | ⚠️ Could be replaced |
+
+### Tight Coupling Points
+
+1. **ETLContext.env**: The `env` attribute is an Odoo `Environment` object used for:
+   - `env.cr` - Odoo database cursor
+   - `env["model.name"]` - Model access
+   - `env.flush_all()` - ORM flush
+
+2. **Worker Process Setup**: `_process_chunk_static` uses:
+   - `Registry(dbname).cursor()` - Odoo's connection pool
+   - `api.Environment(cr, uid, context)` - Odoo environment creation
+
+3. **Pipeline Registration**: Pipelines are registered on `models.AbstractModel` subclasses
+
+### Extraction Options
+
+#### Option A: Separate Odoo Module (Recommended)
+
+Create a standalone `etl_framework` Odoo addon:
+
+```
+addons/
+├── etl_framework/
+│   ├── __init__.py
+│   ├── __manifest__.py
+│   ├── framework.py          # Core ETL classes
+│   ├── executor.py           # ETLExecutor
+│   ├── orchestrator.py       # PipelineOrchestrator
+│   └── README.md
+└── sap_b1_to_odoo/
+    ├── __manifest__.py       # depends: ['etl_framework']
+    └── models/
+        └── *.py              # Importer pipelines
+```
+
+**Pros:**
+- Reusable across projects
+- Clear separation of concerns
+- Can be versioned independently
+- Easy to install via Odoo module system
+
+**Cons:**
+- Still requires Odoo runtime
+- Can't be used outside Odoo
+
+#### Option B: Hybrid Python Package + Odoo Adapter
+
+```
+etl_framework/                 # Pure Python package
+├── __init__.py
+├── core.py                    # ETLPipeline, ETLMethod, ETLPhase
+├── config.py                  # MultiprocessingConfig
+├── executor.py                # Abstract executor interface
+└── adapters/
+    └── odoo.py               # Odoo-specific implementation
+
+addons/
+└── odoo_etl_framework/       # Odoo adapter module
+    ├── __manifest__.py
+    └── adapter.py            # Imports from etl_framework
+```
+
+**Pros:**
+- Core logic is framework-agnostic
+- Could theoretically support other ORMs
+- Testable without Odoo
+
+**Cons:**
+- More complex architecture
+- Adapter layer adds overhead
+- Most value is in Odoo integration anyway
+
+#### Option C: Keep as Single Module (Current)
+
+Keep everything in `sap_b1_to_odoo` but document the framework well.
+
+**Pros:**
+- Simple, no refactoring needed
+- All code in one place
+- Easy to understand
+
+**Cons:**
+- Not reusable for other SAP→Odoo projects
+- Framework mixed with SAP-specific code
+
+### Recommendation
+
+**Option A (Separate Odoo Module)** is the best balance:
+
+1. Extract `etl_framework.py` into `addons/etl_framework/`
+2. Keep SAP-specific importers in `sap_b1_to_odoo`
+3. Add `'etl_framework'` to `sap_b1_to_odoo` dependencies
+
+This allows:
+- Reuse for other migration projects (e.g., Sage→Odoo, QuickBooks→Odoo)
+- Independent versioning and testing
+- Clean separation without over-engineering
+
+### Migration Path
+
+```python
+# Before (sap_b1_to_odoo/models/product_etl.py)
+from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
+
+# After (sap_b1_to_odoo/models/product_etl.py)
+from odoo.addons.etl_framework import ETL, ETLContext
+```
 
 ---
 

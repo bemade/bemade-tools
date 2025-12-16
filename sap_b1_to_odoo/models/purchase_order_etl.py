@@ -13,96 +13,13 @@ import logging
 from typing import Dict, List, Any
 from fuzzywuzzy import process
 
-from odoo import api, models, fields, Command
+from odoo import api, models, Command
 from odoo.tools.sql import SQL
 
 from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
 from odoo.addons.sap_b1_to_odoo.tools import fix_tz
 
 _logger = logging.getLogger(__name__)
-
-
-class PurchaseOrder(models.Model):
-    _inherit = "purchase.order"
-
-    sap_docentry = fields.Integer(
-        index="btree", string="SAP Document Entry", copy=False
-    )
-    sap_docnum = fields.Integer(index="btree", string="SAP Document Number", copy=False)
-    sap_atcentry = fields.Integer(index="btree", copy=False)
-
-    _sql_constraints = [
-        (
-            "sap_docnum_unique",
-            "EXCLUDE USING btree (sap_docnum WITH =) WHERE (sap_docnum != 0)",
-            "SAP docnum must be unique when set!",
-        )
-    ]
-
-
-class PurchaseOrderLine(models.Model):
-    _inherit = "purchase.order.line"
-
-    sap_line_num = fields.Integer(
-        index="btree",
-        copy=False,
-    )
-    sap_aftlinenum = fields.Integer(
-        index="btree",
-        copy=False,
-    )
-    sap_lineseq = fields.Integer(
-        index="btree",
-        copy=False,
-    )
-    sap_docentry = fields.Integer(
-        related="order_id.sap_docentry",
-        store=True,
-        index="btree",
-        copy=False,
-    )
-    sap_table = fields.Char(
-        index="btree",
-        copy=False,
-    )
-    sap_qty_invoiced = fields.Float()
-
-    _sql_constraints = [
-        (
-            "sap_line_type_check",
-            """CHECK(
-                (sap_line_num != 0 AND sap_lineseq = 0 AND sap_aftlinenum = 0) OR  -- 0 replaces null since Odoo doesn't insert null into Integer fields
-                (sap_line_num = 0 AND sap_lineseq != 0 AND sap_aftlinenum !=0)
-            )""",
-            "A line must have either a line_num (for product lines) or an aftlinenum (for text lines), but not both.",
-        ),
-        (
-            "sap_line_docentry_table_unique",
-            "UNIQUE(sap_line_num, sap_aftlinenum, sap_lineseq, sap_docentry, sap_table)",
-            "Another line with this line number and docentry already exists for this SAP table.",
-        ),
-    ]
-
-    @api.depends(
-        "invoice_lines.move_id.state",
-        "invoice_lines.quantity",
-        "qty_received",
-        "product_uom_qty",
-        "order_id.state",
-    )
-    def _compute_qty_invoiced(self):
-        super()._compute_qty_invoiced()
-        # Pre-fetch quantities
-        sap_lines = self.filtered("sap_qty_invoiced")
-        # Prefetch the quantity instead of running one query per line later
-        _ = sap_lines.invoice_lines.filtered("sap_docentry").mapped("quantity")
-        for line in sap_lines:
-            open_sap_qty = line.invoice_lines.filtered("sap_docentry").mapped(
-                "quantity"
-            )
-            line.qty_invoiced += line.sap_qty_invoiced - sum(open_sap_qty)
-            # Purchase order lines compute this second field right here
-            line.qty_to_invoice -= line.sap_qty_invoiced
 
 
 # =============================================================================

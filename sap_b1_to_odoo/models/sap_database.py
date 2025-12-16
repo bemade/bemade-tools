@@ -120,15 +120,7 @@ class SapDatabase(models.Model):
             _logger.info("Creating new sap.database record")
             sap_db = self.create(vals)
 
-        # Run import_all if requested
-        if auto_import:
-            _logger.info("SAP_AUTO_IMPORT is enabled, running import_all()")
-            try:
-                sap_db._import_all()
-                _logger.info("Successfully completed SAP import")
-            except Exception as e:
-                _logger.error(f"Error during SAP import: {e}", exc_info=True)
-        else:
+        if not auto_import:
             _logger.info(
                 "SAP database record created. Set SAP_AUTO_IMPORT=1 to auto-run import_all()"
             )
@@ -349,9 +341,24 @@ class SapDatabase(models.Model):
     def action_import_bills(self) -> None:
         """Import SAP vendor bills."""
         with self.get_cursor() as cr:
-            self.env["sap.vendor.bill.importer"].with_company(
+            from odoo.addons.sap_b1_to_odoo.etl_framework import (
+                ETL,
+                ETLExecutor,
+                ETLContext,
+            )
+
+            pipeline = ETL.get_pipeline("account.move.bill.importer")
+            if not pipeline:
+                raise UserError(_("account.move.bill.importer ETL pipeline not found"))
+
+            importer = self.env["account.move.bill.importer"].with_company(
                 self.env.company
-            ).import_bills(cr)
+            )
+
+            ctx = ETLContext(cr=cr, env=self.env)
+            executor = ETLExecutor(pipeline, ctx, importer)
+            executor.execute()
+            self.env.cr.commit()
 
     def action_import_attachments(self) -> None:
         """Import SAP file attachments."""

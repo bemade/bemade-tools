@@ -159,7 +159,18 @@ class AccountJournalSetup(models.AbstractModel):
             journal_vals.append(vals)
             _logger.info("Will create General journal (MISC)")
 
-        # 4. Bank Journals (one per cash account)
+        # 4. SAP Payment Reconciliation Journal (for payment import)
+        if "SAPRC" not in existing_codes:
+            vals = {
+                "name": "SAP Payment Reconciliation",
+                "code": "SAPRC",
+                "type": "general",
+                "company_id": ctx.env.company.id,
+            }
+            journal_vals.append(vals)
+            _logger.info("Will create SAP Payment Reconciliation journal (SAPRC)")
+
+        # 5. Bank Journals (one per cash account)
         for idx, cash_account in enumerate(cash_accounts or [], start=1):
             journal_code = f"BNK{idx}"
             if journal_code in existing_codes:
