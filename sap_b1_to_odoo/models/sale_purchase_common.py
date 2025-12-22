@@ -109,12 +109,24 @@ class SapSalePurchaseImporterMixin(models.AbstractModel):
 
         # Handle product lines
         product = products_dict.get(row["itemcode"])
+
+        # Always derive effective price from SAP's linetotal (the authoritative final amount)
+        # rather than trusting price + discprcnt which can have bogus values
+        quantity = row["quantity"] if row["quantity"] else 0.0
+        linetotal = row.get("linetotal") or 0.0
+
+        if quantity and quantity != 0:
+            price_unit = linetotal / quantity
+        else:
+            # Service/expense line: set quantity to 1 and use linetotal as price
+            quantity = 1.0
+            price_unit = linetotal
+
         vals = {
             "product_id": product.id if product else False,
-            "product_uom_qty": row["quantity"] if row["quantity"] else 0.0,
-            "product_qty": row["quantity"] if row["quantity"] else 0.0,
-            "price_unit": row["price"],
-            "discount": row["discprcnt"],
+            "product_uom_qty": quantity,
+            "product_qty": quantity,
+            "price_unit": price_unit,
             "sap_line_num": (row["linenum"] or 0) + 2,  # Increment by 2 to avoid 0
             "sap_aftlinenum": 0,  # Product lines don't have aftlinenum, use 0 as null
             "sap_lineseq": 0,  # Product lines don't have lineseq, use 0 as null

@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
+import os
+
 from odoo import models
 
 _logger = logging.getLogger(__name__)
@@ -9,10 +11,10 @@ class IrModuleModule(models.Model):
     _inherit = "ir.module.module"
 
     def _register_hook(self):
-        """Prevent chart template auto-installation after SAP import.
+        """Handle SAP import module registration.
 
-        The SAP import creates its own CoA and journals, so we don't want
-        Odoo's chart template to try installing afterwards and creating duplicates.
+        1. Prevent chart template auto-installation after SAP import
+        2. Run SAP import if SAP_AUTO_IMPORT is enabled (works on both install and update)
         """
         # Check if we're in a SAP-imported company
         company = self.env.company
@@ -30,7 +32,21 @@ class IrModuleModule(models.Model):
                 )
                 # Mark chart template as installed by setting the flag
                 company.chart_template = "skip"
-                return
 
-        # Otherwise, proceed with normal chart template installation
+        # Run SAP import if SAP_AUTO_IMPORT is enabled
+        # This works on both install and update (-u)
+        auto_import = os.getenv("SAP_AUTO_IMPORT", "").lower() in ("1", "true")
+        if auto_import:
+            _logger.info("SAP_AUTO_IMPORT is enabled, running import_all()")
+            sap_db = self.env["sap.database"].search([], limit=1)
+            if sap_db:
+                try:
+                    sap_db._import_all()
+                    _logger.info("Successfully completed SAP import")
+                except Exception as e:
+                    _logger.error(f"Error during SAP import: {e}", exc_info=True)
+            else:
+                _logger.warning("No sap.database record found, skipping auto-import")
+
+        # Proceed with normal hook chain
         return super()._register_hook()

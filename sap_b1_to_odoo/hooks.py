@@ -6,13 +6,8 @@ from odoo import SUPERUSER_ID, api
 _logger = logging.getLogger(__name__)
 
 
-def post_init_hook(env):
-    """Run SAP import after module installation completes.
-
-    This hook runs after the module install transaction commits,
-    ensuring all schema changes (new columns, etc.) are visible
-    to any cron jobs or separate cursors that may run during import.
-    """
+def _run_sap_import(env):
+    """Run SAP import if SAP_AUTO_IMPORT is enabled."""
     auto_import = os.getenv("SAP_AUTO_IMPORT", "").lower() in ("1", "true")
     if not auto_import:
         return
@@ -30,3 +25,24 @@ def post_init_hook(env):
         _logger.info("Successfully completed SAP import")
     except Exception as e:
         _logger.error(f"Error during SAP import: {e}", exc_info=True)
+
+
+def post_init_hook(env):
+    """Run SAP import after module installation completes."""
+    _run_sap_import(env)
+
+
+def post_load_hook():
+    """Run SAP import after module update (post_load runs on every load).
+
+    Note: This runs before the registry is fully loaded, so we need to
+    defer the actual import using a post_init_hook pattern.
+    """
+    # post_load doesn't have env, so we can't run import here directly.
+    # Instead, we'll use the uninstall_hook approach or rely on post_init.
+    pass
+
+
+def uninstall_hook(env):
+    """Cleanup hook for module uninstall."""
+    pass

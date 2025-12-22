@@ -34,6 +34,9 @@ from . import account_move
 from . import account_move_etl
 from . import account_move_bill_etl
 from . import account_payment_etl
+from . import account_credit_memo_reconciliation_etl
+from . import account_internal_reconciliation_etl
+from . import account_force_paid_etl
 from . import account_account_etl
 from . import account_tax_etl
 from . import account_journal_setup

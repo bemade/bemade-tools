@@ -394,11 +394,23 @@ class PurchaseOrderLineImporter(models.AbstractModel):
             for line in lines:
                 product_id = cache["products_map"].get(line["itemcode"])
 
+                # Always derive effective price from SAP's linetotal (the authoritative final amount)
+                # rather than trusting price + discprcnt which can have bogus values
+                quantity = line["quantity"] if line["quantity"] else 0.0
+                linetotal = line.get("linetotal") or 0.0
+
+                if quantity and quantity != 0:
+                    price_unit = linetotal / quantity
+                else:
+                    # Service/expense line: set quantity to 1 and use linetotal as price
+                    quantity = 1.0
+                    price_unit = linetotal
+
                 vals = {
                     "order_id": order_id,
                     "product_id": product_id if product_id else False,
-                    "product_qty": line["quantity"] if line["quantity"] else 0.0,
-                    "price_unit": line["price"],
+                    "product_qty": quantity,
+                    "price_unit": price_unit,
                     "sap_line_num": (line["linenum"] or 0) + 2,
                     "sap_aftlinenum": 0,
                     "sap_lineseq": 0,

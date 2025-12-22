@@ -100,7 +100,7 @@ class AccountMoveBillETLImporter(models.AbstractModel):
         }
 
     @ETL.transform()
-    def transform_bills(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+    def transform_bills(self, ctx: ETLContext, extracted: Dict) -> Dict:
         """Transform SAP vendor bills into Odoo account.move values."""
         bills_data = extracted["extract_bills"]
         bills = bills_data.get("headers", [])
@@ -109,7 +109,7 @@ class AccountMoveBillETLImporter(models.AbstractModel):
         lines = lines_data.get("lines", {})
 
         if not bills:
-            return []
+            return {"move_vals": [], "lookups": {}}
 
         # Get partner and order line lookups from metadata
         metadata = extracted["extract_metadata"]
@@ -157,15 +157,20 @@ class AccountMoveBillETLImporter(models.AbstractModel):
 
             bill_vals.append(vals)
 
-        return bill_vals
+        return {"move_vals": bill_vals, "lookups": lookups}
 
     @ETL.load()
     def load_bills(self, ctx: ETLContext, transformed: Dict) -> None:
         """Load vendor bills into Odoo."""
-        bill_vals = transformed["transform_bills"]
+        data = transformed.get("transform_bills", {})
+        bill_vals = data.get("move_vals", [])
+        lookups = data.get("lookups", {})
 
         if not bill_vals:
             return
+
+        # Batch-create any pending currency rates before creating moves
+        self._create_pending_currency_rates(lookups)
 
         bills = ctx.env["account.move"].create(bill_vals)
         ctx.env.flush_all()

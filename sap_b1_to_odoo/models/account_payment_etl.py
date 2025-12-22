@@ -33,6 +33,7 @@ class AccountPaymentReconciliation(models.AbstractModel):
 
         # Get incoming payments (customer payments) with invoice allocations
         # rct2.baseabs links to oinv.docentry, invtype=13 is for A/R invoices
+        # rct2.docnum links to orct.docentry (the payment header)
         ctx.cr.execute(
             """
             SELECT 
@@ -47,7 +48,7 @@ class AccountPaymentReconciliation(models.AbstractModel):
                 a.sumapplied,
                 'customer' as payment_type
             FROM orct p
-            JOIN rct2 a ON p.docentry = a.docentry
+            JOIN rct2 a ON p.docentry = a.docnum
             WHERE a.invtype = '13' AND a.baseabs IS NOT NULL
             """
         )
@@ -205,7 +206,6 @@ class AccountPaymentReconciliation(models.AbstractModel):
         moves_by_id = {m.id: m for m in moves}
 
         reconciled_count = 0
-        skipped_already_paid = 0
         skipped_no_line = 0
 
         for data in reconciliation_data:
@@ -217,11 +217,6 @@ class AccountPaymentReconciliation(models.AbstractModel):
             payment_type = data["payment_type"]
             payment_date = data["payment_date"]
             payment_ref = data["payment_ref"]
-
-            # Skip if already reconciled
-            if move.payment_state in ["paid", "in_payment"]:
-                skipped_already_paid += 1
-                continue
 
             # Find the receivable/payable line to reconcile
             line_to_reconcile = move.line_ids.filtered(
@@ -284,5 +279,5 @@ class AccountPaymentReconciliation(models.AbstractModel):
 
         _logger.info(
             f"[PaymentReconciliation] Chunk complete: {reconciled_count} reconciled, "
-            f"{skipped_already_paid} already paid, {skipped_no_line} no line to reconcile"
+            f"{skipped_no_line} no line to reconcile"
         )

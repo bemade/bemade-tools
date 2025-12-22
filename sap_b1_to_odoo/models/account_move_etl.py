@@ -112,7 +112,7 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
         lines_dict = data.get("lines", {})
 
         if not headers:
-            return []
+            return {"move_vals": [], "lookups": {}}
 
         metadata = extracted["extract_metadata"]
         partners_id_dict = metadata["partners"]
@@ -142,21 +142,24 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
             self._normalize_move_type(vals, "out_invoice", "out_refund")
             moves_vals.append(vals)
 
-        return moves_vals
+        return {"move_vals": moves_vals, "lookups": lookups}
 
     @ETL.load()
     def load_invoices(self, ctx: ETLContext, transformed):
         """Create and post account.move invoices, then recompute order invoiced qty."""
-        move_vals = transformed.get("transform_invoices", [])
+        data = transformed.get("transform_invoices", {})
+        move_vals = data.get("move_vals", [])
+        lookups = data.get("lookups", {})
+
         if not move_vals:
             return
+
+        # Batch-create any pending currency rates before creating moves
+        self._create_pending_currency_rates(lookups)
 
         moves = ctx.env["account.move"].create(move_vals)
         ctx.env.flush_all()
         moves.action_post()
-
-        # import_order_invoiced_qty should run once after all chunks complete
-        # For now, order line invoiced quantities will be computed by Odoo's standard logic
 
     @api.model
     def _trigger_recomputation(self, lines):

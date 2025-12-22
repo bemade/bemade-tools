@@ -103,20 +103,22 @@ class AccountMoveCommon(models.AbstractModel):
         products_dict = lookups["products"]
         product_id = products_dict.get(row["itemcode"])
 
-        # For service/expense lines with zero quantity, use linetotal as price_unit
+        # Always derive effective price from SAP's linetotal (the authoritative final amount)
+        # rather than trusting price + discprcnt which can have bogus values
         quantity = row["quantity"] if row["quantity"] else 0.0
-        price_unit = row["price"]
+        linetotal = row.get("linetotal") or 0.0
 
-        if quantity == 0.0 and row.get("linetotal"):
+        if quantity and quantity != 0:
+            price_unit = linetotal / quantity
+        else:
             # Service/expense line: set quantity to 1 and use linetotal as price
             quantity = 1.0
-            price_unit = row["linetotal"]
+            price_unit = linetotal
 
         vals = {
             "product_id": product_id,
             "quantity": quantity,
             "price_unit": price_unit,
-            "discount": row["discprcnt"],
             "sap_line_num": (row["linenum"] or 0) + 2,  # Increment by 2 to avoid 0
             "sap_aftlinenum": 0,  # Product lines don't have aftlinenum, use 0 as null
             "sap_lineseq": 0,  # Product lines don't have lineseq, use 0 as null
@@ -502,30 +504,22 @@ class AccountMoveCommon(models.AbstractModel):
         # Odoo stores it as 1 / that rate
         rate = order.get("docrate", 1.0)
         if rate and rate != 1.0:
-            # Create a rate for this specific date if it doesn't exist
             date = fix_tz(order["docdate"])
             currency_rates = lookups.get("currency_rates", {})
-            rate_key = (currency_id, date)
+            rate_key = (currency_id, str(date))
             if rate_key not in currency_rates:
-                # Need to create the rate - this is unavoidable but rare
-                existing_rate = self.env["res.currency.rate"].search(
-                    [
-                        ("currency_id", "=", currency_id),
-                        ("company_id", "=", self.env.company.id),
-                        ("name", "=", date),
-                    ],
-                    limit=1,
+                # Collect missing rate for batch creation later
+                # Store as (currency_id, date, rate) tuple in pending_rates
+                pending_rates = lookups.setdefault("pending_rates", [])
+                pending_rates.append(
+                    {
+                        "currency_id": currency_id,
+                        "rate": 1.0 / rate,  # Invert the rate for Odoo
+                        "name": date,
+                        "company_id": lookups.get("company_id", self.env.company.id),
+                    }
                 )
-                if not existing_rate:
-                    self.env["res.currency.rate"].create(
-                        {
-                            "currency_id": currency_id,
-                            "rate": 1.0 / rate,  # Invert the rate for Odoo
-                            "name": date,
-                            "company_id": self.env.company.id,
-                        }
-                    )
-                # Cache it for future lookups in this batch
+                # Mark as pending so we don't add duplicates
                 currency_rates[rate_key] = True
 
         vals = {
@@ -543,6 +537,33 @@ class AccountMoveCommon(models.AbstractModel):
         }
 
         return vals
+
+    @api.model
+    def _create_pending_currency_rates(self, lookups):
+        """Batch-create any pending currency rates collected during transform.
+
+        This should be called before creating account.move records to ensure
+        the currency rates exist.
+        """
+        pending_rates = lookups.get("pending_rates", [])
+        if not pending_rates:
+            return
+
+        # Deduplicate by (currency_id, name) - keep first occurrence
+        seen = set()
+        unique_rates = []
+        for rate in pending_rates:
+            key = (rate["currency_id"], str(rate["name"]))
+            if key not in seen:
+                seen.add(key)
+                unique_rates.append(rate)
+
+        if unique_rates:
+            _logger.info(f"Batch-creating {len(unique_rates)} currency rates")
+            self.env["res.currency.rate"].create(unique_rates)
+
+        # Clear pending rates
+        lookups["pending_rates"] = []
 
     @api.model
     def _build_lookups(self):
@@ -579,6 +600,17 @@ class AccountMoveCommon(models.AbstractModel):
         )
         currencies_dict = {c["name"]: c["id"] for c in currencies}
 
+        # Pre-fetch existing currency rates to avoid per-document lookups
+        company_id = self.env.company.id
+        existing_rates = self.env["res.currency.rate"].search_read(
+            [("company_id", "=", company_id)],
+            ["currency_id", "name"],
+        )
+        # Key: (currency_id, date_string), Value: True (exists)
+        currency_rates_dict = {
+            (r["currency_id"][0], str(r["name"])): True for r in existing_rates
+        }
+
         # Accounts (for vendor bills)
         accounts = self.env["account.account"].search_read(
             [("sap_acct_code", "!=", False)],
@@ -605,11 +637,12 @@ class AccountMoveCommon(models.AbstractModel):
             "products": products_dict,
             "users": users_dict,
             "currencies": currencies_dict,
-            "currency_rates": {},  # Mutable, populated during transform
+            "currency_rates": currency_rates_dict,
             "accounts": accounts_dict,
             "taxes": taxes_dict,
             "unit_uom_id": unit_uom_id,
             "company_currency_id": company_currency_id,
+            "company_id": company_id,
         }
 
     @api.model
