@@ -39,10 +39,10 @@ class StockQuantImporter(models.AbstractModel):
         products = ctx.env["product.product"].search([("sap_item_code", "!=", False)])
         product_map = {product.sap_item_code: product.id for product in products}
 
-        # Get warehouses and their stock locations
+        # Get warehouses and their stock locations - map by SAP warehouse code
         warehouses = ctx.env["stock.warehouse"].search([("active", "=", True)])
         warehouse_location_map = {
-            wh.code: wh.lot_stock_id.id for wh in warehouses if wh.code
+            wh.sap_whs_code: wh.lot_stock_id.id for wh in warehouses if wh.sap_whs_code
         }
 
         # Query SAP OITW (warehouse item stock)

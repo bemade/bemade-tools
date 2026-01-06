@@ -1,11 +1,21 @@
 import logging
 from typing import Dict, List
 
-from odoo import models
+from odoo import fields, models
 
 from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
+
+
+class StockWarehouse(models.Model):
+    _inherit = "stock.warehouse"
+
+    sap_whs_code = fields.Char(
+        string="SAP Warehouse Code",
+        index=True,
+        help="Original warehouse code from SAP B1 (OWHS.WhsCode)",
+    )
 
 
 @ETL.pipeline(
@@ -31,12 +41,15 @@ class StockWarehouseImporter(models.AbstractModel):
         """
         company_id = ctx.env.company.id
 
-        # Get existing warehouses by code and name
+        # Get existing warehouses by SAP code and name
         existing_warehouses = ctx.env["stock.warehouse"].search(
             [("company_id", "=", company_id)]
         )
-        existing_codes = {wh.code for wh in existing_warehouses}
-        existing_names = {wh.name for wh in existing_warehouses}
+        existing_sap_codes = {
+            wh.sap_whs_code for wh in existing_warehouses if wh.sap_whs_code
+        }
+        # Map name to warehouse for updating existing ones missing sap_whs_code
+        name_to_warehouse = {wh.name: wh for wh in existing_warehouses}
 
         sql = """
             SELECT whscode, whsname
@@ -46,25 +59,42 @@ class StockWarehouseImporter(models.AbstractModel):
         ctx.cr.execute(sql)
         sap_warehouses = ctx.cr.dictfetchall()
 
-        # Filter out existing warehouses (by code or name - unique constraint is on name)
+        # Separate into new warehouses and existing ones needing sap_whs_code update
         new_warehouses = []
+        warehouses_to_update = []
         for wh in sap_warehouses:
-            code = (wh.get("whscode") or "").strip()
-            name = (wh.get("whsname") or code).strip()
-            if code and code not in existing_codes and name not in existing_names:
+            sap_code = (wh.get("whscode") or "").strip()
+            name = (wh.get("whsname") or sap_code).strip()
+            if not sap_code:
+                continue
+            if sap_code in existing_sap_codes:
+                # Already has SAP code set
+                continue
+            if name in name_to_warehouse:
+                # Exists by name but missing sap_whs_code - update it
+                warehouses_to_update.append(
+                    {
+                        "warehouse": name_to_warehouse[name],
+                        "sap_whs_code": sap_code,
+                    }
+                )
+            else:
+                # New warehouse
                 new_warehouses.append(wh)
 
         _logger.info(
             f"Extracted {len(new_warehouses)} new warehouses from SAP OWHS "
-            f"(filtered from {len(sap_warehouses)} total)."
+            f"(filtered from {len(sap_warehouses)} total). "
+            f"{len(warehouses_to_update)} existing warehouses need sap_whs_code update."
         )
         return {
             "warehouses": new_warehouses,
+            "warehouses_to_update": warehouses_to_update,
             "company_id": company_id,
         }
 
     @ETL.transform()
-    def transform_warehouses(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+    def transform_warehouses(self, ctx: ETLContext, extracted: Dict) -> Dict:
         """Transform SAP warehouses into Odoo stock.warehouse values.
 
         Args:
@@ -80,18 +110,24 @@ class StockWarehouseImporter(models.AbstractModel):
 
         warehouse_vals = []
         for sap_wh in sap_warehouses:
-            code = (sap_wh.get("whscode") or "").strip()
-            name = (sap_wh.get("whsname") or code).strip()
+            sap_code = (sap_wh.get("whscode") or "").strip()
+            name = (sap_wh.get("whsname") or sap_code).strip()
+            # Odoo warehouse code is max 5 chars, so truncate
+            odoo_code = sap_code[:5]
 
             vals = {
                 "name": name,
-                "code": code,
+                "code": odoo_code,
+                "sap_whs_code": sap_code,
                 "company_id": company_id,
             }
             warehouse_vals.append(vals)
 
         _logger.info(f"Transformed {len(warehouse_vals)} warehouse records.")
-        return warehouse_vals
+        return {
+            "warehouse_vals": warehouse_vals,
+            "warehouses_to_update": data.get("warehouses_to_update", []),
+        }
 
     @ETL.load()
     def load_warehouses(self, ctx: ETLContext, transformed: Dict) -> None:
@@ -101,7 +137,26 @@ class StockWarehouseImporter(models.AbstractModel):
             ctx: ETL context.
             transformed: Dictionary containing transformed data.
         """
-        warehouse_vals = transformed.get("transform_warehouses") or []
+        # Get data from transform phase
+        transform_data = transformed.get("transform_warehouses") or {}
+        warehouses_to_update = transform_data.get("warehouses_to_update") or []
+        warehouse_vals = transform_data.get("warehouse_vals") or []
+
+        # Update existing warehouses with missing sap_whs_code
+        for update_info in warehouses_to_update:
+            warehouse = update_info["warehouse"]
+            sap_code = update_info["sap_whs_code"]
+            warehouse.write({"sap_whs_code": sap_code})
+            _logger.info(
+                f"Updated warehouse {warehouse.name} with sap_whs_code={sap_code}"
+            )
+
+        if warehouses_to_update:
+            _logger.info(
+                f"Updated {len(warehouses_to_update)} existing warehouses with sap_whs_code"
+            )
+
+        # Create new warehouses
 
         if not warehouse_vals:
             _logger.info("No new warehouses to create.")

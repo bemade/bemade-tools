@@ -77,6 +77,17 @@
         </field>
     </record>
 
+    <record id="view_product_product_stock_search_sap_inherit" model="ir.ui.view">
+        <field name="name">product.product.stock.search.sap.inherit</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="stock.stock_product_search_form_view"/>
+        <field name="arch" type="xml">
+            <field name="name" position="after">
+                <field name="sap_item_code"/>
+            </field>
+        </field>
+    </record>
+
     <record id="view_purchase_order_view_list_sap_inherit" model="ir.ui.view">
         <field name="name">purchase.order.view.list.sap.inherit</field>
         <field name="model">purchase.order</field>
