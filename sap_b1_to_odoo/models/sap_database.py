@@ -6,7 +6,12 @@ from odoo import _, api, fields, models
 from odoo.exceptions import UserError, ValidationError
 from odoo.sql_db import db_connect
 
-from odoo.addons.sap_b1_to_odoo.etl_framework import ETLContext, PipelineOrchestrator
+from odoo.addons.sap_b1_to_odoo.etl_framework import (
+    ETL,
+    ETLContext,
+    ETLExecutor,
+    PipelineOrchestrator,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -129,236 +134,177 @@ class SapDatabase(models.Model):
     # Public Action Methods (Called from UI)
     ##################################################################
 
-    def action_init_pricelists(self) -> dict:
-        """Initialize default pricelists for all active currencies using ETL framework."""
-        # Note: This doesn't use SAP cursor, just Odoo data
-        from odoo.addons.sap_b1_to_odoo.etl_framework import (
-            ETL,
-            ETLExecutor,
-            ETLContext,
-        )
+    def _execute_pipeline(self, pipeline_name: str) -> dict:
+        """Execute a single ETL pipeline by name."""
+        with self.get_cursor() as cr:
+            pipeline = ETL.get_pipeline(pipeline_name)
+            if not pipeline:
+                raise UserError(_(f"{pipeline_name} ETL pipeline not found"))
 
-        # Get the registered pipeline
+            importer = self.env[pipeline_name].with_company(self.env.company)
+            ctx = ETLContext(cr=cr, env=self.env)
+            executor = ETLExecutor(pipeline, ctx, importer)
+            executor.execute()
+            self.env.cr.commit()
+
+        return self._success_notification()
+
+    def _execute_pipelines(self, pipeline_names: list) -> dict:
+        """Execute multiple ETL pipelines using the orchestrator."""
+        with self.get_cursor() as cr:
+            orchestrator = PipelineOrchestrator(self.env)
+            orchestrator.execute_pipelines(cr, pipeline_names)
+        return self._success_notification()
+
+    def action_init_pricelists(self) -> dict:
+        """Initialize default pricelists for all active currencies."""
         pipeline = ETL.get_pipeline("product.pricelist.importer")
         if not pipeline:
             raise UserError(_("product.pricelist.importer ETL pipeline not found"))
 
-        # Get importer instance
         importer = self.env["product.pricelist.importer"].with_company(self.env.company)
-
-        # Create context (no SAP cursor needed for this one)
         ctx = ETLContext(cr=None, env=self.env)
         executor = ETLExecutor(pipeline, ctx, importer)
-
-        # Execute pipeline
         executor.execute()
         self.env.cr.commit()
 
         return self._success_notification()
 
     def action_import_users(self) -> dict:
-        """Import SAP salespeople as Odoo users using ETL framework."""
-        with self.get_cursor() as cr:
-            from odoo.addons.sap_b1_to_odoo.etl_framework import (
-                ETL,
-                ETLExecutor,
-                ETLContext,
-            )
-
-            # Get the registered pipeline
-            pipeline = ETL.get_pipeline("res.users.importer")
-            if not pipeline:
-                raise UserError(_("res.users.importer ETL pipeline not found"))
-
-            # Get importer instance
-            importer = self.env["res.users.importer"].with_company(self.env.company)
-
-            # Create context and executor
-            ctx = ETLContext(cr=cr, env=self.env)
-            executor = ETLExecutor(pipeline, ctx, importer)
-
-            # Execute pipeline
-            executor.execute()
-            self.env.cr.commit()
-
-        return self._success_notification()
+        """Import SAP salespeople as Odoo users."""
+        return self._execute_pipeline("res.users.importer")
 
     def action_import_partners(self) -> dict:
         """Import SAP business partners (companies, contacts, addresses)."""
-        with self.get_cursor() as cr:
-            self.env["sap.res.partner.importer"].with_company(
-                self.env.company
-            ).import_partners_concurrent(cr)
-        return self._success_notification()
+        return self._execute_pipelines(
+            [
+                "res.partner.company.importer",
+                "res.partner.contact.importer",
+                "res.partner.address.importer",
+            ]
+        )
 
     def action_import_carrier_accounts(self) -> dict:
-        """Import SAP delivery carriers and carrier accounts using ETL framework."""
-        with self.get_cursor() as cr:
-            from odoo.addons.sap_b1_to_odoo.etl_framework import (
-                ETL,
-                ETLExecutor,
-                ETLContext,
-            )
-
-            # Get the registered pipeline
-            pipeline = ETL.get_pipeline("delivery.carrier.importer")
-            if not pipeline:
-                raise UserError(_("delivery.carrier.importer ETL pipeline not found"))
-
-            # Get importer instance
-            importer = self.env["delivery.carrier.importer"].with_company(
-                self.env.company
-            )
-
-            # Create context and executor
-            ctx = ETLContext(cr=cr, env=self.env)
-            executor = ETLExecutor(pipeline, ctx, importer)
-
-            # Execute pipeline
-            executor.execute()
-            self.env.cr.commit()
-
-        return self._success_notification()
+        """Import SAP delivery carriers and carrier accounts."""
+        return self._execute_pipeline("delivery.carrier.importer")
 
     def action_import_products(self) -> dict:
         """Import SAP products and product categories."""
-        with self.get_cursor() as cr:
-            self.env["sap.product.importer"].with_company(
-                self.env.company
-            ).import_products(cr)
-        return self._success_notification()
+        return self._execute_pipelines(
+            [
+                "product.category.importer",
+                "product.product.importer",
+            ]
+        )
 
     def action_import_boms(self) -> dict:
-        """Import SAP bills of materials."""
-        with self.get_cursor() as cr:
-            self.env["sap.bom.importer"].with_company(self.env.company).import_boms(cr)
-        return self._success_notification()
+        """Import SAP bills of materials and manufacturing orders."""
+        return self._execute_pipelines(
+            [
+                "mrp.workcenter.importer",
+                "mrp.production.importer",
+                "mrp.consumption.importer",
+                "mrp.workorder.time.updater",
+                "mrp.production.postprocess",
+            ]
+        )
 
     def action_import_payment_terms(self) -> dict:
-        """Import SAP payment terms using ETL framework."""
-        with self.get_cursor() as cr:
-            from odoo.addons.sap_b1_to_odoo.etl_framework import (
-                ETL,
-                ETLExecutor,
-                ETLContext,
-            )
-
-            # Get the registered pipeline
-            pipeline = ETL.get_pipeline("account.payment.term.importer")
-            if not pipeline:
-                raise UserError(
-                    _("account.payment.term.importer ETL pipeline not found")
-                )
-
-            # Get importer instance
-            importer = self.env["account.payment.term.importer"].with_company(
-                self.env.company
-            )
-
-            # Create context and executor
-            ctx = ETLContext(cr=cr, env=self.env)
-            executor = ETLExecutor(pipeline, ctx, importer)
-
-            # Execute pipeline
-            executor.execute()
-            self.env.cr.commit()
-
-        return self._success_notification()
+        """Import SAP payment terms."""
+        return self._execute_pipeline("account.payment.term.importer")
 
     def action_import_sales_orders(self) -> dict:
         """Import SAP sales orders."""
-        with self.get_cursor() as cr:
-            self.env["sap.sale.order.importer"].with_company(
-                self.env.company
-            ).import_sales_orders(cr)
-        return self._success_notification()
+        return self._execute_pipelines(
+            [
+                "sale.order.header.importer",
+                "sale.order.line.importer",
+                "sale.order.text.line.importer",
+                "sale.order.post.processor",
+            ]
+        )
 
     def action_import_quotations(self) -> dict:
         """Import SAP quotations."""
-        with self.get_cursor() as cr:
-            self.env["sap.sale.quotation.importer"].with_company(
-                self.env.company
-            ).import_quotations(cr)
-        return self._success_notification()
+        return self._execute_pipelines(
+            [
+                "sale.quotation.header.importer",
+                "sale.quotation.line.importer",
+                "sale.quotation.text.line.importer",
+            ]
+        )
 
     def action_import_purchase_orders(self) -> dict:
         """Import SAP purchase orders."""
-        with self.get_cursor() as cr:
-            self.env["sap.purchase.order.importer"].with_company(
-                self.env.company
-            ).import_purchase_orders(cr)
-        return self._success_notification()
+        return self._execute_pipelines(
+            [
+                "purchase.order.header.importer",
+                "purchase.order.line.importer",
+                "purchase.order.text.line.importer",
+                "purchase.order.post.processor",
+            ]
+        )
 
+    def action_import_purchase_requisitions(self) -> dict:
+        """Import SAP purchase requisitions (blanket agreements)."""
+        return self._execute_pipeline("purchase.requisition.importer")
+
+    def action_import_product_pricelist(self) -> dict:
+        """Import SAP product pricelists."""
+        return self._execute_pipeline("product.pricelist.item.importer")
+
+    def action_import_invoices(self) -> dict:
+        """Import SAP customer invoices."""
+        return self._execute_pipelines(
+            [
+                "account.move.invoice.importer",
+                "account.move.invoice.post.processor",
+            ]
+        )
+
+    def action_import_bills(self) -> dict:
+        """Import SAP vendor bills."""
+        return self._execute_pipeline("account.move.bill.importer")
+
+    def action_import_inventory(self) -> dict:
+        """Import SAP inventory valuations and stock quantities."""
+        return self._execute_pipelines(
+            [
+                "stock.quant.importer",
+                "stock.valuation.layer.importer",
+            ]
+        )
+
+    def action_import_accounts(self) -> dict:
+        """Import SAP chart of accounts."""
+        return self._execute_pipelines(
+            [
+                "account.account.importer",
+                "account.journal.setup",
+            ]
+        )
+
+    def action_import_taxes(self) -> dict:
+        """Import SAP tax codes."""
+        return self._execute_pipeline("account.tax.importer")
+
+    def action_reconcile_payments(self) -> dict:
+        """Reconcile SAP payments with invoices/bills."""
+        return self._execute_pipelines(
+            [
+                "account.payment.reconciliation",
+                "account.credit.memo.reconciliation",
+                "account.internal.reconciliation",
+            ]
+        )
+
+    # Legacy methods - no ETL pipeline yet
     def action_import_customer_product_codes(self) -> None:
         """Import SAP customer-specific product codes."""
         with self.get_cursor() as cr:
             self.env["sap.customer.product.code.importer"].with_company(
                 self.env.company
             ).import_customer_product_codes(cr)
-
-    def action_import_product_pricelist(self) -> dict:
-        """Import SAP product pricelists."""
-        with self.get_cursor() as cr:
-            self.env["sap.product.pricelist.importer"].with_company(
-                self.env.company
-            ).import_all(cr)
-        return self._success_notification()
-
-    def action_import_orderpoints(self) -> dict:
-        """Import SAP stock reordering rules."""
-        with self.get_cursor() as cr:
-            self.env["sap.product.importer"].with_company(
-                self.env.company
-            ).import_orderpoints(cr)
-        return self._success_notification()
-
-    def action_import_invoices(self) -> None:
-        """Import SAP customer invoices."""
-        with self.get_cursor() as cr:
-            from odoo.addons.sap_b1_to_odoo.etl_framework import (
-                ETL,
-                ETLExecutor,
-                ETLContext,
-            )
-
-            pipeline = ETL.get_pipeline("account.move.invoice.importer")
-            if not pipeline:
-                raise UserError(
-                    _("account.move.invoice.importer ETL pipeline not found")
-                )
-
-            importer = self.env["account.move.invoice.importer"].with_company(
-                self.env.company
-            )
-
-            ctx = ETLContext(cr=cr, env=self.env)
-            executor = ETLExecutor(pipeline, ctx, importer)
-            executor.execute()
-            self.env.cr.commit()
-
-        return self._success_notification()
-
-    def action_import_bills(self) -> None:
-        """Import SAP vendor bills."""
-        with self.get_cursor() as cr:
-            from odoo.addons.sap_b1_to_odoo.etl_framework import (
-                ETL,
-                ETLExecutor,
-                ETLContext,
-            )
-
-            pipeline = ETL.get_pipeline("account.move.bill.importer")
-            if not pipeline:
-                raise UserError(_("account.move.bill.importer ETL pipeline not found"))
-
-            importer = self.env["account.move.bill.importer"].with_company(
-                self.env.company
-            )
-
-            ctx = ETLContext(cr=cr, env=self.env)
-            executor = ETLExecutor(pipeline, ctx, importer)
-            executor.execute()
-            self.env.cr.commit()
 
     def action_import_attachments(self) -> None:
         """Import SAP file attachments."""
@@ -370,14 +316,6 @@ class SapDatabase(models.Model):
             self.env["sap.ir.attachment.importer"].with_company(
                 self.env.company
             ).import_attachments(cr, self.filestore_path)
-
-    def action_import_inventory(self) -> dict:
-        """Import SAP inventory valuations and stock quantities."""
-        with self.get_cursor() as cr:
-            self.env["sap.product.importer"].with_company(
-                self.env.company
-            ).import_inventory(cr)
-        return self._success_notification()
 
     def action_import_all(self) -> dict:
         """Import all SAP data in the correct order."""
@@ -457,50 +395,63 @@ class SapDatabase(models.Model):
         _logger.info("Beginning SAP record import using ETL framework.")
 
         with self.get_cursor() as cr:
-            # Create orchestrator
             orchestrator = PipelineOrchestrator(self.env)
-
-            # Execute all registered pipelines
-            # Note: Only res.users is migrated so far, others will use old methods
             try:
                 orchestrator.execute_all(cr)
             except Exception as e:
                 _logger.error(f"ETL pipeline execution failed: {e}", exc_info=True)
                 raise
 
-        # TODO: Remove these as models are migrated to ETL framework
-        # Commented out to allow iterative testing of ETL framework migrations
-        _logger.info("Legacy import methods (commented out during ETL migration)...")
-        # self.action_init_pricelists()
-        # self.env.cr.commit()
-        # self.action_import_partners()
-        # self.env.cr.commit()
-        # self.action_import_products()
-        # self.env.cr.commit()
-        # self.action_import_boms()
-        # self.env.cr.commit()
-        # self.action_import_carrier_accounts()
-        # self.env.cr.commit()
-        # self.action_import_inventory()
-        # self.env.cr.commit()
-        # self.action_import_product_pricelist()
-        # self.env.cr.commit()
-        # NOTE: action_import_payment_terms is now handled by ETL framework
-        # self.action_import_sales_orders()
-        # self.env.cr.commit()
-        # self.action_import_purchase_orders()
-        # self.env.cr.commit()
-
-        _logger.info("Successfully completed SAP record import (ETL framework only).")
+        _logger.info("Successfully completed SAP record import.")
 
     def _delete_all(self) -> None:
         """Internal method to delete all SAP-imported records.
 
         Warning: This is a destructive operation.
+        TODO: Implement proper deletion using ETL framework metadata.
         """
         self.ensure_one()
         _logger.info("Deleting all SAP records.")
-        self.env["sap.res.partner.importer"]._delete_all()
-        self.env["sap.product.importer"]._delete_all()
-        self.env["sap.bom.importer"]._delete_all()
-        # self.env["sap.sale.order.importer"]._delete_all()
+
+        # Delete in reverse dependency order
+        models_to_delete = [
+            "stock.valuation.layer",
+            "stock.quant",
+            "account.move",
+            "sale.order",
+            "purchase.order",
+            "mrp.production",
+            "product.product",
+            "product.category",
+            "res.partner",
+            "res.users",
+        ]
+
+        for model_name in models_to_delete:
+            try:
+                model = self.env[model_name]
+                # Find records with SAP identifiers
+                sap_field = self._get_sap_identifier_field(model_name)
+                if sap_field and sap_field in model._fields:
+                    records = model.search([(sap_field, "!=", False)])
+                    if records:
+                        _logger.info(f"Deleting {len(records)} {model_name} records")
+                        records.unlink()
+            except Exception as e:
+                _logger.warning(f"Could not delete {model_name}: {e}")
+
+    def _get_sap_identifier_field(self, model_name: str) -> Optional[str]:
+        """Get the SAP identifier field name for a model."""
+        field_mapping = {
+            "res.partner": "sap_card_code",
+            "res.users": "sap_slpcode",
+            "product.product": "sap_item_code",
+            "product.category": "sap_itms_grp_cod",
+            "sale.order": "sap_doc_entry",
+            "purchase.order": "sap_doc_entry",
+            "account.move": "sap_doc_entry",
+            "mrp.production": "sap_doc_entry",
+            "stock.quant": None,  # No direct SAP field
+            "stock.valuation.layer": None,  # No direct SAP field
+        }
+        return field_mapping.get(model_name)

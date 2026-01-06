@@ -45,6 +45,31 @@ class AccountJournalSetup(models.AbstractModel):
             :1
         ]
 
+        # Find the most common inventory valuation account from SAP categories
+        # Query SAP OITB for the most used balinvntac (inventory account)
+        ctx.cr.execute(
+            """
+            SELECT a.formatcode, COUNT(*) as cnt
+            FROM oitb o
+            JOIN oact a ON o.balinvntac = a.acctcode
+            WHERE o.balinvntac IS NOT NULL AND o.balinvntac != ''
+            GROUP BY a.formatcode
+            ORDER BY cnt DESC
+            LIMIT 1
+        """
+        )
+        row = ctx.cr.fetchone()
+        stock_valuation_account = None
+        if row:
+            sap_acct_code = row[0]
+            stock_valuation_account = ctx.env["account.account"].search(
+                [
+                    ("sap_acct_code", "=", sap_acct_code),
+                    ("company_ids", "in", [ctx.env.company.id]),
+                ],
+                limit=1,
+            )
+
         # Find default income/expense accounts - use the top-level (shortest code) in each category
         # Sort by: 1) code length (shortest first), 2) alphanumeric order
         # This gets the first root account (e.g., "400000" before "410000", "5" before "6")
@@ -72,6 +97,7 @@ class AccountJournalSetup(models.AbstractModel):
             "ap_account": ap_account,
             "income_account": income_account,
             "expense_account": expense_account,
+            "stock_valuation_account": stock_valuation_account,
         }
 
     @ETL.transform()
@@ -83,6 +109,7 @@ class AccountJournalSetup(models.AbstractModel):
         ap_account = data.get("ap_account")
         income_account = data.get("income_account")
         expense_account = data.get("expense_account")
+        stock_valuation_account = data.get("stock_valuation_account")
 
         # Check existing journals (including archived ones to avoid unique constraint violations)
         existing_journals = (
@@ -170,7 +197,18 @@ class AccountJournalSetup(models.AbstractModel):
             journal_vals.append(vals)
             _logger.info("Will create SAP Payment Reconciliation journal (SAPRC)")
 
-        # 5. Bank Journals (one per cash account)
+        # 5. Stock Journal for inventory valuation
+        if "STJ" not in existing_codes:
+            vals = {
+                "name": "Stock Journal",
+                "code": "STJ",
+                "type": "general",
+                "company_id": ctx.env.company.id,
+            }
+            journal_vals.append(vals)
+            _logger.info("Will create Stock journal (STJ)")
+
+        # 6. Bank Journals (one per cash account)
         for idx, cash_account in enumerate(cash_accounts or [], start=1):
             journal_code = f"BNK{idx}"
             if journal_code in existing_codes:
@@ -189,12 +227,17 @@ class AccountJournalSetup(models.AbstractModel):
             )
 
         _logger.info(f"Prepared {len(journal_vals)} journals to create")
-        return journal_vals
+        return {
+            "journal_vals": journal_vals,
+            "stock_valuation_account": stock_valuation_account,
+        }
 
     @ETL.load()
     def load_journals(self, ctx: ETLContext, transformed):
         """Create account.journal records and mark chart template as installed."""
-        journal_vals = transformed.get("transform_journals", [])
+        data = transformed.get("transform_journals") or {}
+        journal_vals = data.get("journal_vals", [])
+        stock_valuation_account = data.get("stock_valuation_account")
 
         if not journal_vals:
             _logger.info(
@@ -206,11 +249,29 @@ class AccountJournalSetup(models.AbstractModel):
                 f"Created {len(journals)} account.journal records: {', '.join(journals.mapped('code'))}"
             )
 
-        # Mark chart template as installed to prevent Odoo from auto-installing
-        # its default chart template after module loading completes
+        # Set company stock valuation account and journal
         company = ctx.env.company
-        if not company.chart_template:
-            company.chart_template = "sap_imported"
+        company_vals = {}
+
+        # Set stock valuation account from SAP
+        if stock_valuation_account and not company.account_stock_valuation_id:
+            company_vals["account_stock_valuation_id"] = stock_valuation_account.id
             _logger.info(
-                "Marked chart template as 'sap_imported' to prevent auto-installation"
+                f"Setting company stock valuation account to {stock_valuation_account.code} ({stock_valuation_account.name})"
             )
+
+        # Set stock journal
+        stock_journal = ctx.env["account.journal"].search(
+            [("code", "=", "STJ"), ("company_id", "=", company.id)], limit=1
+        )
+        if stock_journal and not company.account_stock_journal_id:
+            company_vals["account_stock_journal_id"] = stock_journal.id
+            _logger.info(f"Setting company stock journal to {stock_journal.code}")
+
+        if company_vals:
+            company.write(company_vals)
+
+        # Note: chart_template field is a dynamic selection - only valid template codes
+        # from installed modules are allowed. We don't set it here since SAP import
+        # provides its own CoA. Odoo will not auto-install a chart template if accounts
+        # already exist for the company.

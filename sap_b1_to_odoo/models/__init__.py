@@ -2,7 +2,10 @@ from . import sap_database
 from . import res_partner
 from . import res_partner_etl
 from . import product_product
+from . import product_category_etl
 from . import product_product_etl
+from . import stock_warehouse_etl
+from . import stock_quant_etl
 from . import mrp_bom
 from . import mrp_bom_etl
 from . import mrp_production

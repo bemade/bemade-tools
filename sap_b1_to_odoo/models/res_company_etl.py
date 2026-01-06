@@ -113,6 +113,24 @@ class ResCompanyImporter(models.AbstractModel):
         if tax_id:
             vals["vat"] = tax_id
 
+        # Inventory costing method from SAP OADM.InvntSystm
+        # A = Moving Average, S = Standard, F = FIFO
+        invnt_system = (oadm.get("invntsystm") or "").strip().upper()
+        cost_method_map = {
+            "A": "average",  # Moving Average -> AVCO
+            "S": "standard",  # Standard Price
+            "F": "fifo",  # FIFO
+        }
+        vals["cost_method"] = cost_method_map.get(invnt_system, "fifo")
+
+        # Perpetual vs Periodic inventory from SAP OADM.ContInvnt
+        # Y = Perpetual (real_time), N = Periodic
+        cont_invnt = (oadm.get("continvnt") or "").strip().upper()
+        if cont_invnt == "Y":
+            vals["inventory_valuation"] = "real_time"  # Perpetual
+        else:
+            vals["inventory_valuation"] = "periodic"  # Non-perpetual
+
         return vals
 
     @ETL.load()

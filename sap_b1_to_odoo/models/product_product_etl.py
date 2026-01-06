@@ -1,94 +1,13 @@
 import logging
 from typing import Dict, List
 
-from odoo import api, models
+from odoo import models
 from odoo.sql_db import SQL
 
 from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 
 _logger = logging.getLogger(__name__)
-
-
-@ETL.pipeline(
-    target_model="product.category",
-    importer_name="product.category.importer",
-    sap_source="oitb",
-    depends_on=[],
-)
-class ProductCategoryImporter(models.AbstractModel):
-    _name = "product.category.importer"
-    _description = "SAP Product Category Importer (OITB)"
-
-    @ETL.extract("oitb")
-    def extract_categories(self, ctx: ETLContext) -> List[Dict]:
-        """Extract product categories from SAP OITB table.
-
-        Args:
-            ctx: ETL context with SAP cursor and Odoo environment.
-
-        Returns:
-            List of category dictionaries from SAP.
-        """
-        # Get existing categories to avoid duplicates
-        ctx.env.cr.execute(
-            "SELECT sap_itms_grp_cod FROM product_category WHERE sap_itms_grp_cod IS NOT NULL"
-        )
-        existing_codes = tuple(row[0] for row in ctx.env.cr.fetchall())
-
-        # Query SAP - filter out empty names
-        sql = "SELECT * FROM oitb WHERE itmsgrpnam <> '' AND itmsgrpnam IS NOT NULL"
-        if existing_codes:
-            sql += " AND itmsgrpcod NOT IN %s"
-            ctx.cr.execute(SQL(sql, existing_codes))
-        else:
-            ctx.cr.execute(sql)
-
-        sap_categories = ctx.cr.dictfetchall()
-        _logger.info(f"Extracted {len(sap_categories)} categories from SAP OITB.")
-        return sap_categories
-
-    @ETL.transform()
-    def transform_categories(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
-        """Transform SAP categories into Odoo category values.
-
-        Args:
-            ctx: ETL context.
-            extracted: Dictionary containing extracted data.
-
-        Returns:
-            List of category value dictionaries ready for creation.
-        """
-        sap_categories = extracted["extract_categories"]
-
-        category_vals = []
-        for sap_cat in sap_categories:
-            category_vals.append(
-                {
-                    "sap_itms_grp_cod": sap_cat["itmsgrpcod"],
-                    "name": fix_quotes(sap_cat["itmsgrpnam"]),
-                    "property_cost_method": "fifo",
-                }
-            )
-
-        _logger.info(f"Transformed {len(category_vals)} category records.")
-        return category_vals
-
-    @ETL.load()
-    def load_categories(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Load categories into Odoo.
-
-        Args:
-            ctx: ETL context.
-            transformed: Dictionary containing transformed data.
-        """
-        category_vals = transformed["transform_categories"]
-
-        if category_vals:
-            categories = ctx.env["product.category"].create(category_vals)
-            _logger.info(f"Created {len(categories)} product categories.")
-        else:
-            _logger.info("No new categories to create.")
 
 
 @ETL.pipeline(

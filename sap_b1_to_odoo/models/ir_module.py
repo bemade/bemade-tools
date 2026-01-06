@@ -25,13 +25,10 @@ class IrModuleModule(models.Model):
                 limit=1,
             )
 
-            if sap_accounts:
+            if sap_accounts and not company.chart_template:
                 _logger.info(
-                    "SAP CoA detected - skipping chart template auto-installation "
-                    "to avoid duplicate journals/accounts"
+                    "SAP CoA detected - chart template already configured or will be set by ETL"
                 )
-                # Mark chart template as installed by setting the flag
-                company.chart_template = "skip"
 
         # Run SAP import if SAP_AUTO_IMPORT is enabled
         # This works on both install and update (-u)

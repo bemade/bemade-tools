@@ -120,7 +120,7 @@ class MultiprocessingConfig:
         if self.max_workers is not None:
             return self.max_workers
         cpu_count = os.cpu_count()
-        return (cpu_count - 1) if cpu_count and cpu_count > 1 else 1
+        return max(1, cpu_count - 2 if cpu_count else 0)
 
 
 @dataclass
@@ -799,6 +799,46 @@ class PipelineOrchestrator:
 
         _logger.info("Completed ETL orchestration for all pipelines")
 
+    def execute_pipelines(self, cr: Any, pipeline_names: List[str]) -> None:
+        """Execute specific pipelines in dependency order.
+
+        Args:
+            cr: SAP database cursor.
+            pipeline_names: List of importer names to execute.
+        """
+        _logger.info(f"Starting ETL orchestration for pipelines: {pipeline_names}")
+
+        # Filter to only requested pipelines and resolve their dependencies
+        execution_order = self._resolve_dependencies_for(pipeline_names)
+        _logger.info(f"Execution order: {execution_order}")
+
+        # Execute each pipeline
+        ctx = ETLContext(cr=cr, env=self.env)
+
+        for importer_name in execution_order:
+            pipeline = self.pipelines.get(importer_name)
+            if not pipeline:
+                _logger.warning(f"Pipeline for {importer_name} not found, skipping")
+                continue
+
+            # Get importer instance using the importer name
+            importer = self.env[importer_name]
+
+            _logger.info(
+                f"Starting ETL pipeline for {pipeline.target_model} (importer: {importer_name})"
+            )
+
+            # Execute pipeline
+            executor = ETLExecutor(pipeline, ctx, importer)
+            executor.execute()
+
+            # Commit after each pipeline
+            self.env.cr.commit()
+
+        _logger.info(
+            f"Completed ETL orchestration for {len(execution_order)} pipelines"
+        )
+
     def _resolve_dependencies(self) -> List[str]:
         """Resolve pipeline dependencies using topological sort.
 
@@ -848,5 +888,70 @@ class PipelineOrchestrator:
                 f"Unresolved pipelines ({len(unresolved)}):\n" + "\n".join(cycle_info)
             )
             raise ValueError(error_msg)
+
+        return result
+
+    def _resolve_dependencies_for(self, pipeline_names: List[str]) -> List[str]:
+        """Resolve dependencies for specific pipelines using topological sort.
+
+        Only includes the requested pipelines and their dependencies in the result.
+
+        Args:
+            pipeline_names: List of importer names to resolve dependencies for.
+
+        Returns:
+            List of importer names in execution order (including dependencies).
+
+        Raises:
+            ValueError: If circular dependencies are detected.
+        """
+        # First, collect all required pipelines (requested + their dependencies)
+        required = set(pipeline_names)
+        to_check = list(pipeline_names)
+
+        while to_check:
+            name = to_check.pop()
+            pipeline = self.pipelines.get(name)
+            if pipeline:
+                for dep in pipeline.depends_on:
+                    if dep not in required:
+                        required.add(dep)
+                        to_check.append(dep)
+
+        # Build dependency graph for only required pipelines
+        graph = {}
+        for importer_name in required:
+            pipeline = self.pipelines.get(importer_name)
+            if pipeline:
+                # Only include dependencies that are in our required set
+                graph[importer_name] = [d for d in pipeline.depends_on if d in required]
+            else:
+                graph[importer_name] = []
+
+        # Topological sort (Kahn's algorithm)
+        in_degree = {name: len(deps) for name, deps in graph.items()}
+        queue = [name for name, degree in in_degree.items() if degree == 0]
+        result = []
+
+        while queue:
+            importer_name = queue.pop(0)
+            result.append(importer_name)
+
+            for other_importer, deps in graph.items():
+                if importer_name in deps:
+                    in_degree[other_importer] -= 1
+                    if in_degree[other_importer] == 0:
+                        queue.append(other_importer)
+
+        if len(result) != len(graph):
+            unresolved = set(graph.keys()) - set(result)
+            cycle_info = [
+                f"  {p} depends on: {', '.join(sorted(graph.get(p, [])))}"
+                for p in unresolved
+            ]
+            raise ValueError(
+                f"Circular dependency detected.\n"
+                f"Unresolved: {len(unresolved)}:\n" + "\n".join(cycle_info)
+            )
 
         return result
