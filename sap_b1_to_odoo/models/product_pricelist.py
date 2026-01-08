@@ -13,13 +13,11 @@ class ProductPricelist(models.Model):
     )
     sap_loginstanc = fields.Integer(index="btree")
     sap_listnum = fields.Integer(index="btree")  # ID in OPLN table
-    _sql_constraints = [
-        (
-            "sap_abs_id_loginstanc_exclude",
-            "EXCLUDE USING btree (sap_abs_id WITH =, sap_loginstanc WITH =) WHERE (sap_abs_id != 0 AND sap_loginstanc != 0)",
-            "sap_abs_id and sap_loginstance must be unique together when both are set",
-        )
-    ]
+
+    _sap_abs_id_loginstanc_exclude = models.Constraint(
+        "EXCLUDE USING btree (sap_abs_id WITH =, sap_loginstanc WITH =) WHERE (sap_abs_id != 0 AND sap_loginstanc != 0)",
+        "sap_abs_id and sap_loginstance must be unique together when both are set",
+    )
 
     @api.model_create_multi
     def create(self, vals_list):

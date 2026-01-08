@@ -8,15 +8,6 @@ from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
 _logger = logging.getLogger(__name__)
 
 
-class StockWarehouse(models.Model):
-    _inherit = "stock.warehouse"
-
-    sap_whs_code = fields.Char(
-        string="SAP Warehouse Code",
-        index=True,
-        help="Original warehouse code from SAP B1 (OWHS.WhsCode)",
-    )
-
 
 @ETL.pipeline(
     target_model="stock.warehouse",

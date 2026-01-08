@@ -52,18 +52,18 @@ class PurchaseOrderHeaderImporter(models.AbstractModel):
         # Uppercase cardcodes for consistency
         ctx.cr.execute("UPDATE opor SET cardcode = UPPER(cardcode)")
 
-        # Get existing orders (idempotence)
+        # Get existing orders (idempotence) - use docentry as unique key
         ctx.env.cr.execute(
-            "SELECT DISTINCT sap_docnum FROM purchase_order WHERE sap_docnum IS NOT NULL"
+            "SELECT DISTINCT sap_docentry FROM purchase_order WHERE sap_docentry IS NOT NULL"
         )
-        existing_docnums = tuple(row[0] for row in ctx.env.cr.fetchall())
-        _logger.info(f"Found {len(existing_docnums)} existing purchases orders.")
+        existing_docentries = tuple(row[0] for row in ctx.env.cr.fetchall())
+        _logger.info(f"Found {len(existing_docentries)} existing purchases orders.")
 
         # Extract new order headers
         sql = "SELECT * FROM opor"
-        if existing_docnums:
-            sql += " WHERE docnum NOT IN %s"
-            ctx.cr.execute(SQL(sql, existing_docnums))
+        if existing_docentries:
+            sql += " WHERE docentry NOT IN %s"
+            ctx.cr.execute(SQL(sql, existing_docentries))
         else:
             ctx.cr.execute(sql)
 

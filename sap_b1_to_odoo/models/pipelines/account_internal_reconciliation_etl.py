@@ -75,9 +75,26 @@ class AccountInternalReconciliation(models.AbstractModel):
             f"{len(vendor_itr)} vendor ITR entries in SAP"
         )
 
+        # Check for already-imported ITR entries
+        # We use sap_table='itr1' and sap_docentry=reconnum to track
+        already_imported = ctx.env["account.move"].search([("sap_table", "=", "itr1")])
+        imported_reconnums = {m.sap_docentry for m in already_imported}
+
+        # Filter out already-imported entries
+        new_itr = [e for e in all_itr if e["reconnum"] not in imported_reconnums]
+
+        _logger.info(
+            f"[InternalReconciliation] {len(all_itr) - len(new_itr)} already imported, "
+            f"{len(new_itr)} new ITR entries to process"
+        )
+
+        all_itr = new_itr
+
         # Pre-load all invoices and bills - build ID maps
-        invoice_docentries = [e["doc_id"] for e in customer_itr]
-        bill_docentries = [e["doc_id"] for e in vendor_itr]
+        invoice_docentries = [
+            e["doc_id"] for e in all_itr if e["itr_type"] == "customer"
+        ]
+        bill_docentries = [e["doc_id"] for e in all_itr if e["itr_type"] == "vendor"]
 
         # Map sap_docentry -> move_id for invoices
         invoices_map = {}
@@ -175,12 +192,14 @@ class AccountInternalReconciliation(models.AbstractModel):
                             str(entry["recon_date"]) if entry["recon_date"] else None
                         ),
                         "recon_refs": [],
+                        "reconnums": [],  # Track all reconnums for this aggregation
                         "itr_type": itr_type,
                     }
                 doc_totals[key]["reconciled_amount"] += float(
                     entry["reconciled_amount"]
                 )
                 doc_totals[key]["recon_refs"].append(str(entry["reconnum"]))
+                doc_totals[key]["reconnums"].append(entry["reconnum"])
 
         # Convert to list and create combined ref
         reconciliation_data = []
@@ -269,10 +288,16 @@ class AccountInternalReconciliation(models.AbstractModel):
             # (bills may have different payable accounts)
             reconcile_account_id = line_to_reconcile[0].account_id.id
 
+            # Track with sap_table='itr1' and sap_docentry=first reconnum
+            reconnums = data.get("reconnums", [])
+            first_reconnum = reconnums[0] if reconnums else None
+
             recon_vals = {
                 "journal_id": journal_id,
                 "date": recon_date or move.date,
                 "ref": recon_ref,
+                "sap_table": "itr1",
+                "sap_docentry": first_reconnum,
                 "line_ids": [
                     (
                         0,

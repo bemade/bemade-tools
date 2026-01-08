@@ -6,6 +6,7 @@ class MrpProduction(models.Model):
 
     sap_docentry = fields.Integer("SAP DocEntry", index=True, copy=False)
     sap_docnum = fields.Char("SAP DocNum", index=True, copy=False)
+    sap_atcentry = fields.Integer(index="btree", copy=False)
 
 
 class StockMove(models.Model):

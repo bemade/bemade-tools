@@ -8,13 +8,10 @@ class SalesOrder(models.Model):
     sap_docnum = fields.Integer(index="btree", copy=False)
     sap_atcentry = fields.Integer(index="btree", copy=False)
 
-    _sql_constraints = [
-        (
-            "sap_docnum_unique",
-            "EXCLUDE USING btree (sap_docnum WITH =) WHERE (sap_docnum != 0)",
-            "Another sale order with this docnum already exists when set",
-        )
-    ]
+    _sap_docnum_unique = models.Constraint(
+        "EXCLUDE USING btree (sap_docnum WITH =) WHERE (sap_docnum != 0)",
+        "Another sale order with this docnum already exists when set",
+    )
 
 
 class SaleOrderLine(models.Model):
@@ -28,21 +25,17 @@ class SaleOrderLine(models.Model):
     sap_table = fields.Char(index="btree", copy=False)
     sap_qty_invoiced = fields.Float(copy=False)
 
-    _sql_constraints = [
-        (
-            "sap_line_type_check",
-            """CHECK(
-                (sap_line_num != 0 AND sap_lineseq = 0 AND sap_aftlinenum = 0) OR  -- Product lines have line_num
-                (sap_line_num = 0 AND sap_aftlinenum != 0 AND sap_lineseq != 0)     -- Text lines have aftlinenum and lineseq
-            )""",
-            "A line must have either a line_num (for product lines) or an aftlinenum (for text lines), but not both.",
-        ),
-        (
-            "sap_line_docentry_table_unique",
-            "UNIQUE(sap_line_num, sap_aftlinenum, sap_lineseq, sap_docentry, sap_table)",
-            "Another line with this line number and docentry already exists for this SAP table.",
-        ),
-    ]
+    _sap_line_type_check = models.Constraint(
+        """CHECK(
+            (sap_line_num != 0 AND sap_lineseq = 0 AND sap_aftlinenum = 0) OR
+            (sap_line_num = 0 AND sap_aftlinenum != 0 AND sap_lineseq != 0)
+        )""",
+        "A line must have either a line_num (for product lines) or an aftlinenum (for text lines), but not both.",
+    )
+    _sap_line_docentry_table_unique = models.Constraint(
+        "UNIQUE(sap_line_num, sap_aftlinenum, sap_lineseq, sap_docentry, sap_table)",
+        "Another line with this line number and docentry already exists for this SAP table.",
+    )
 
     @api.depends("invoice_lines.move_id.state", "invoice_lines.quantity")
     def _compute_qty_invoiced(self):

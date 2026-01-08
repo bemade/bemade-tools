@@ -38,7 +38,7 @@ class MrpBomImporter(models.AbstractModel):
         _logger.info(f"Found {len(existing_codes)} existing BOMs.")
 
         # Extract BOMs and BOM lines
-        ctx.cr.execute("SELECT * FROM oitt")
+        ctx.cr.execute("SELECT *, atcentry FROM oitt")
         all_boms = ctx.cr.dictfetchall()
 
         ctx.cr.execute("SELECT * FROM itt1")
@@ -129,6 +129,7 @@ class MrpBomImporter(models.AbstractModel):
                     "product_qty": bom["qauntity"],  # Note: SAP typo in field name
                     "type": "phantom" if bom["treetype"] == "A" else "normal",
                     "sap_code": bom["code"],
+                    "sap_atcentry": bom.get("atcentry") or 0,
                     "company_id": company_id,
                 }
             )

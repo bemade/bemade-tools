@@ -78,10 +78,19 @@ class ETLContext:
     Attributes:
         cr: SAP database cursor for querying source data.
         env: Odoo environment for creating/updating records.
+        sap_db: SAP database record (sap.database) with connection settings.
     """
 
     cr: Any  # SAP database cursor
     env: Any  # Odoo environment
+    sap_db_id: Optional[int] = None  # SAP database record ID (for pickling)
+
+    @property
+    def sap_db(self):
+        """Get the sap.database record from the ID."""
+        if self.sap_db_id and self.env:
+            return self.env["sap.database"].browse(self.sap_db_id)
+        return None
 
 
 @dataclass
@@ -753,13 +762,15 @@ class PipelineOrchestrator:
         pipelines: Dictionary of all registered pipelines.
     """
 
-    def __init__(self, env: Any):
+    def __init__(self, env: Any, sap_db_id: Optional[int] = None):
         """Initialize the orchestrator.
 
         Args:
             env: Odoo environment.
+            sap_db_id: ID of the sap.database record.
         """
         self.env = env
+        self.sap_db_id = sap_db_id
         self.pipelines = ETL.get_all_pipelines()
 
     def execute_all(self, cr: Any) -> None:
@@ -775,7 +786,7 @@ class PipelineOrchestrator:
         _logger.info(f"Execution order: {execution_order}")
 
         # Execute each pipeline
-        ctx = ETLContext(cr=cr, env=self.env)
+        ctx = ETLContext(cr=cr, env=self.env, sap_db_id=self.sap_db_id)
 
         for importer_name in execution_order:
             pipeline = self.pipelines.get(importer_name)
@@ -813,7 +824,7 @@ class PipelineOrchestrator:
         _logger.info(f"Execution order: {execution_order}")
 
         # Execute each pipeline
-        ctx = ETLContext(cr=cr, env=self.env)
+        ctx = ETLContext(cr=cr, env=self.env, sap_db_id=self.sap_db_id)
 
         for importer_name in execution_order:
             pipeline = self.pipelines.get(importer_name)

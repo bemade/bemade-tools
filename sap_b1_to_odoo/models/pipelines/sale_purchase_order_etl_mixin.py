@@ -2,20 +2,15 @@
 
 Shared helper methods and base logic for sales and purchase order ETL pipelines.
 """
-import logging
-from typing import Dict, Any, List
-from fuzzywuzzy import process
 
+from typing import Dict
 from odoo import models
-from odoo.tools.sql import SQL
-from odoo.addons.sap_b1_to_odoo.tools import fix_tz
-
-_logger = logging.getLogger(__name__)
+from fuzzywuzzy import process
 
 
 class SalePurchaseOrderETLMixin(models.AbstractModel):
     """Mixin with shared methods for sale and purchase order ETL pipelines.
-    
+
     Subclasses should define:
     - _sap_header_table: SAP table name (e.g., 'ordr', 'opor')
     - _sap_lines_table: SAP lines table (e.g., 'rdr1', 'por1')
@@ -26,10 +21,10 @@ class SalePurchaseOrderETLMixin(models.AbstractModel):
     - _qty_received_delivered_field: Field for received/delivered qty
     - _status_field: Status field name (e.g., 'delivery_status', 'receipt_status')
     """
-    
+
     _name = "sale.purchase.order.etl.mixin"
     _description = "Sale/Purchase Order ETL Mixin"
-    
+
     # Subclasses must define these
     _sap_header_table = None
     _sap_lines_table = None

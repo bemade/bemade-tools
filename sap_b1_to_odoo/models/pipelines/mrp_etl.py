@@ -137,7 +137,7 @@ class MrpProductionETLImporter(models.AbstractModel):
         sql = """
             SELECT docentry, docnum, itemcode, status,
                    plannedqty, cmpltqty, postdate, duedate, startdate, warehouse,
-                   origintype, originnum
+                   origintype, originnum, atcentry
             FROM owor
         """
         if existing_docnums:
@@ -203,6 +203,7 @@ class MrpProductionETLImporter(models.AbstractModel):
             vals = {
                 "sap_docentry": order["docentry"],
                 "sap_docnum": order["docnum"],
+                "sap_atcentry": order.get("atcentry") or 0,
                 "product_id": product_id,
                 "product_qty": order["plannedqty"] or 0.0,
                 "date_start": date_start,

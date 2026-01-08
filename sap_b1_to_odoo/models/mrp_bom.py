@@ -5,6 +5,7 @@ class MrpBom(models.Model):
     _inherit = "mrp.bom"
 
     sap_code = fields.Char(index="btree", copy=False)
+    sap_atcentry = fields.Integer(index="btree", copy=False)
 
 
 class MrpBomLine(models.Model):

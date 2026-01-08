@@ -142,7 +142,7 @@ class SapDatabase(models.Model):
                 raise UserError(_(f"{pipeline_name} ETL pipeline not found"))
 
             importer = self.env[pipeline_name].with_company(self.env.company)
-            ctx = ETLContext(cr=cr, env=self.env)
+            ctx = ETLContext(cr=cr, env=self.env, sap_db_id=self.id)
             executor = ETLExecutor(pipeline, ctx, importer)
             executor.execute()
             self.env.cr.commit()
@@ -152,7 +152,7 @@ class SapDatabase(models.Model):
     def _execute_pipelines(self, pipeline_names: list) -> dict:
         """Execute multiple ETL pipelines using the orchestrator."""
         with self.get_cursor() as cr:
-            orchestrator = PipelineOrchestrator(self.env)
+            orchestrator = PipelineOrchestrator(self.env, sap_db_id=self.id)
             orchestrator.execute_pipelines(cr, pipeline_names)
         return self._success_notification()
 
@@ -298,24 +298,17 @@ class SapDatabase(models.Model):
             ]
         )
 
-    # Legacy methods - no ETL pipeline yet
-    def action_import_customer_product_codes(self) -> None:
+    def action_import_customer_product_codes(self) -> dict:
         """Import SAP customer-specific product codes."""
-        with self.get_cursor() as cr:
-            self.env["sap.customer.product.code.importer"].with_company(
-                self.env.company
-            ).import_customer_product_codes(cr)
+        return self._execute_pipeline("customer.product.code.importer")
 
-    def action_import_attachments(self) -> None:
+    def action_import_attachments(self) -> dict:
         """Import SAP file attachments."""
         if not self.filestore_path:
             raise UserError(
                 _("No filestore path specified. Cannot import attachments.")
             )
-        with self.get_cursor() as cr:
-            self.env["sap.ir.attachment.importer"].with_company(
-                self.env.company
-            ).import_attachments(cr, self.filestore_path)
+        return self._execute_pipeline("ir.attachment.importer")
 
     def action_import_all(self) -> dict:
         """Import all SAP data in the correct order."""
@@ -395,7 +388,7 @@ class SapDatabase(models.Model):
         _logger.info("Beginning SAP record import using ETL framework.")
 
         with self.get_cursor() as cr:
-            orchestrator = PipelineOrchestrator(self.env)
+            orchestrator = PipelineOrchestrator(self.env, sap_db_id=self.id)
             try:
                 orchestrator.execute_all(cr)
             except Exception as e:

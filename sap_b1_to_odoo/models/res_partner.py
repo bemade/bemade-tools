@@ -13,15 +13,11 @@ class ResPartner(models.Model):
     sap_atcentry = fields.Integer(index="btree", copy=False)
     sap_partner_type = fields.Char(index="btree", copy=False)
 
-    _sql_constraints = [
-        (
-            "sap_cardcode_unique",
-            "unique (sap_card_code)",
-            "An partner with that SAP cardcode already exists.",
-        ),
-        (
-            "sap_cntct_code_unique",
-            "unique (sap_cntct_code)",
-            "A partner with that SAP Contact Code already exists.",
-        ),
-    ]
+    _sap_cardcode_unique = models.Constraint(
+        "unique (sap_card_code)",
+        "A partner with that SAP cardcode already exists.",
+    )
+    _sap_cntct_code_unique = models.Constraint(
+        "unique (sap_cntct_code)",
+        "A partner with that SAP Contact Code already exists.",
+    )
