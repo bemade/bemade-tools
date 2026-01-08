@@ -6,7 +6,7 @@ from odoo import api, models
 from odoo.tools import email_normalize
 from odoo.tools.sql import SQL
 
-from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 
 _logger = logging.getLogger(__name__)

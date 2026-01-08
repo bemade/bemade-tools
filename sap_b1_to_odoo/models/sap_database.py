@@ -6,7 +6,7 @@ from odoo import _, api, fields, models
 from odoo.exceptions import UserError, ValidationError
 from odoo.sql_db import db_connect
 
-from odoo.addons.sap_b1_to_odoo.etl_framework import (
+from odoo.addons.etl_framework import (
     ETL,
     ETLContext,
     ETLExecutor,
@@ -134,6 +134,19 @@ class SapDatabase(models.Model):
     # Public Action Methods (Called from UI)
     ##################################################################
 
+    def _get_source_config(self) -> dict:
+        """Build source configuration dictionary for ETL framework.
+
+        Returns:
+            Dictionary with source-specific configuration values.
+        """
+        self.ensure_one()
+        return {
+            "source_id": self.id,
+            "source_model": "sap.database",
+            "filestore_path": self.filestore_path,
+        }
+
     def _execute_pipeline(self, pipeline_name: str) -> dict:
         """Execute a single ETL pipeline by name."""
         with self.get_cursor() as cr:
@@ -142,7 +155,9 @@ class SapDatabase(models.Model):
                 raise UserError(_(f"{pipeline_name} ETL pipeline not found"))
 
             importer = self.env[pipeline_name].with_company(self.env.company)
-            ctx = ETLContext(cr=cr, env=self.env, sap_db_id=self.id)
+            ctx = ETLContext(
+                cr=cr, env=self.env, source_config=self._get_source_config()
+            )
             executor = ETLExecutor(pipeline, ctx, importer)
             executor.execute()
             self.env.cr.commit()
@@ -152,7 +167,9 @@ class SapDatabase(models.Model):
     def _execute_pipelines(self, pipeline_names: list) -> dict:
         """Execute multiple ETL pipelines using the orchestrator."""
         with self.get_cursor() as cr:
-            orchestrator = PipelineOrchestrator(self.env, sap_db_id=self.id)
+            orchestrator = PipelineOrchestrator(
+                self.env, source_config=self._get_source_config()
+            )
             orchestrator.execute_pipelines(cr, pipeline_names)
         return self._success_notification()
 
@@ -388,7 +405,9 @@ class SapDatabase(models.Model):
         _logger.info("Beginning SAP record import using ETL framework.")
 
         with self.get_cursor() as cr:
-            orchestrator = PipelineOrchestrator(self.env, sap_db_id=self.id)
+            orchestrator = PipelineOrchestrator(
+                self.env, source_config=self._get_source_config()
+            )
             try:
                 orchestrator.execute_all(cr)
             except Exception as e:

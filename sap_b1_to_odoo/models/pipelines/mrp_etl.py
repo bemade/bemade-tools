@@ -94,7 +94,7 @@ from typing import Dict, List, Any
 from odoo import api, fields, models
 from odoo.tools import mute_logger
 
-from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
 

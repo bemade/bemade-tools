@@ -8,7 +8,7 @@ from typing import Dict, List
 from odoo import models
 from odoo.tools.sql import SQL
 
-from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
 
@@ -48,12 +48,8 @@ class IrAttachmentImporter(models.AbstractModel):
         Returns:
             List of attachment records with all necessary metadata.
         """
-        # Get filestore_path from sap.database record via context
-        if not ctx.sap_db:
-            _logger.warning("No sap.database in context, skipping attachment import")
-            return []
-
-        filestore_path = ctx.sap_db.filestore_path
+        # Get filestore_path from source config
+        filestore_path = ctx.get_config("filestore_path")
         if not filestore_path:
             _logger.warning(
                 "No filestore_path configured on sap.database, skipping attachment import"

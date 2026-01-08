@@ -1,8 +1,8 @@
 """
-ETL Framework for SAP B1 to Odoo Data Migration
+ETL Framework for Odoo Data Migration
 
 This module provides a declarative, self-optimizing ETL (Extract, Transform, Load)
-framework for migrating data from SAP Business One to Odoo.
+framework for migrating data from external sources to Odoo.
 
 Key Features:
 - Declarative pipeline definition using decorators
@@ -10,29 +10,44 @@ Key Features:
 - Dependency resolution between models
 - Memory-efficient execution
 - Clear separation of Extract, Transform, and Load phases
+- Generic source configuration for any external database
 
 Usage Example:
     @ETL.pipeline(
         target_model='product.product',
-        sap_source='oitm',
-        depends_on=['product.category'],
+        importer_name='my.product.importer',
+        sap_source='products',  # Source table name
+        depends_on=['product.category.importer'],
         multiprocessing_threshold=1000,
     )
-    class SapProductImporter(models.AbstractModel):
-        _name = 'sap.product.importer'
+    class ProductImporter(models.AbstractModel):
+        _name = 'my.product.importer'
 
-        @ETL.extract('oitm')
+        @ETL.extract('products')
         def extract_products(self, ctx: ETLContext):
-            ctx.cr.execute("SELECT * FROM oitm")
+            ctx.cr.execute("SELECT * FROM products")
             return ctx.cr.dictfetchall()
 
         @ETL.transform()
-        def transform_products(self, ctx: ETLContext, sap_products):
-            return [{"name": p["itemname"]} for p in sap_products]
+        def transform_products(self, ctx: ETLContext, extracted):
+            products = extracted.get('extract_products', [])
+            return [{"name": p["name"]} for p in products]
 
         @ETL.load()
-        def load_products(self, ctx: ETLContext, product_vals):
+        def load_products(self, ctx: ETLContext, transformed):
+            product_vals = transformed.get('transform_products', [])
             ctx.env['product.product'].create(product_vals)
+
+Source Configuration:
+    The ETLContext accepts a source_config dictionary for source-specific settings:
+
+    source_config = {
+        'source_id': 1,           # ID of source database record
+        'source_model': 'my.db',  # Odoo model for source config
+        'filestore_path': '/path/to/files',  # Optional file path
+    }
+
+    Access in pipelines via: ctx.get_config('filestore_path')
 """
 
 import logging
@@ -76,21 +91,30 @@ class ETLContext:
     not actual data. This prevents memory overload when processing large datasets.
 
     Attributes:
-        cr: SAP database cursor for querying source data.
+        cr: Source database cursor for querying source data.
         env: Odoo environment for creating/updating records.
-        sap_db: SAP database record (sap.database) with connection settings.
+        source_config: Optional dictionary of source-specific configuration.
+            This can contain any key-value pairs needed by pipelines.
+            Common keys: 'filestore_path', 'source_model', 'source_id'.
     """
 
-    cr: Any  # SAP database cursor
+    cr: Any  # Source database cursor
     env: Any  # Odoo environment
-    sap_db_id: Optional[int] = None  # SAP database record ID (for pickling)
+    source_config: Optional[Dict[str, Any]] = None  # Source-specific config
 
-    @property
-    def sap_db(self):
-        """Get the sap.database record from the ID."""
-        if self.sap_db_id and self.env:
-            return self.env["sap.database"].browse(self.sap_db_id)
-        return None
+    def get_config(self, key: str, default: Any = None) -> Any:
+        """Get a configuration value from source_config.
+
+        Args:
+            key: Configuration key to retrieve.
+            default: Default value if key not found.
+
+        Returns:
+            The configuration value or default.
+        """
+        if self.source_config:
+            return self.source_config.get(key, default)
+        return default
 
 
 @dataclass
@@ -760,24 +784,25 @@ class PipelineOrchestrator:
     Attributes:
         env: Odoo environment.
         pipelines: Dictionary of all registered pipelines.
+        source_config: Optional source-specific configuration dictionary.
     """
 
-    def __init__(self, env: Any, sap_db_id: Optional[int] = None):
+    def __init__(self, env: Any, source_config: Optional[Dict[str, Any]] = None):
         """Initialize the orchestrator.
 
         Args:
             env: Odoo environment.
-            sap_db_id: ID of the sap.database record.
+            source_config: Optional dictionary of source-specific configuration.
         """
         self.env = env
-        self.sap_db_id = sap_db_id
+        self.source_config = source_config
         self.pipelines = ETL.get_all_pipelines()
 
     def execute_all(self, cr: Any) -> None:
         """Execute all registered pipelines in dependency order.
 
         Args:
-            cr: SAP database cursor.
+            cr: Source database cursor.
         """
         _logger.info("Starting ETL orchestration for all pipelines")
 
@@ -786,7 +811,7 @@ class PipelineOrchestrator:
         _logger.info(f"Execution order: {execution_order}")
 
         # Execute each pipeline
-        ctx = ETLContext(cr=cr, env=self.env, sap_db_id=self.sap_db_id)
+        ctx = ETLContext(cr=cr, env=self.env, source_config=self.source_config)
 
         for importer_name in execution_order:
             pipeline = self.pipelines.get(importer_name)
@@ -814,7 +839,7 @@ class PipelineOrchestrator:
         """Execute specific pipelines in dependency order.
 
         Args:
-            cr: SAP database cursor.
+            cr: Source database cursor.
             pipeline_names: List of importer names to execute.
         """
         _logger.info(f"Starting ETL orchestration for pipelines: {pipeline_names}")
@@ -824,7 +849,7 @@ class PipelineOrchestrator:
         _logger.info(f"Execution order: {execution_order}")
 
         # Execute each pipeline
-        ctx = ETLContext(cr=cr, env=self.env, sap_db_id=self.sap_db_id)
+        ctx = ETLContext(cr=cr, env=self.env, source_config=self.source_config)
 
         for importer_name in execution_order:
             pipeline = self.pipelines.get(importer_name)

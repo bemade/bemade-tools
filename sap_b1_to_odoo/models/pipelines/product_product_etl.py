@@ -4,7 +4,7 @@ from typing import Dict, List
 from odoo import models
 from odoo.sql_db import SQL
 
-from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 
 _logger = logging.getLogger(__name__)

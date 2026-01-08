@@ -1,6 +1,6 @@
 # SAP B1 to Odoo Migration Module
 
-Automated data migration from SAP Business One to Odoo using a declarative ETL framework.
+Automated data migration from SAP Business One to Odoo using the [ETL Framework](../etl_framework/README.md).
 
 ---
 
@@ -190,16 +190,18 @@ Adjust multiprocessing settings in pipeline decorators:
 
 ---
 
-## Adding New Models
+## Adding New Pipelines
 
-See `ETL_FRAMEWORK.md` for complete documentation. Quick template:
+See the [ETL Framework README](../etl_framework/README.md) for complete documentation. Quick template:
 
 ```python
+from odoo.addons.etl_framework import ETL, ETLContext
+
 @ETL.pipeline(
     target_model='your.model',
     importer_name='your.model.importer',
     sap_source='sap_table',
-    depends_on=['dependency.model'],
+    depends_on=['dependency.importer'],
 )
 class YourModelImporter(models.AbstractModel):
     _name = 'your.model.importer'
@@ -220,12 +222,4 @@ class YourModelImporter(models.AbstractModel):
 
 ---
 
-## Documentation
-
-- **ETL_FRAMEWORK.md** - Framework architecture and API
-- **MIGRATION_ROADMAP.md** - Implementation status and learnings
-- **SESSION_SUMMARY.md** - Latest session changes
-
----
-
-**Last Updated:** November 7, 2025
+**Last Updated:** January 8, 2026

@@ -14,7 +14,7 @@ from typing import Dict, List, Any
 from odoo import api, models, Command
 from odoo.tools.sql import SQL
 
-from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext
 from odoo.addons.sap_b1_to_odoo.tools import fix_tz
 
 _logger = logging.getLogger(__name__)

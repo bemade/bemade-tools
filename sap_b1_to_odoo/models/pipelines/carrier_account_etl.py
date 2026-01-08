@@ -6,7 +6,7 @@ from fuzzywuzzy import process
 from odoo import Command, api, models
 from odoo.tools.sql import SQL
 
-from odoo.addons.sap_b1_to_odoo.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
 

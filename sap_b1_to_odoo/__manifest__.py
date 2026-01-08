@@ -42,6 +42,7 @@
         "purchase_delivery_carrier",
         "picking_policy_per_customer",
         "accountant",
+        "etl_framework",
     ],
     "data": [
         "security/ir.model.access.csv",
