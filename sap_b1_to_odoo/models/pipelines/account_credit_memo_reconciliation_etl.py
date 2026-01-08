@@ -171,9 +171,18 @@ class AccountCreditMemoReconciliation(models.AbstractModel):
         already_reconciled = 0
         failed = 0
 
+        # Batch fetch all moves needed
+        all_move_ids = list({p["cm_id"] for p in pairs} | {p["inv_id"] for p in pairs})
+        all_moves = ctx.env["account.move"].browse(all_move_ids)
+        moves_by_id = {m.id: m for m in all_moves}
+
         for pair in pairs:
-            cm = ctx.env["account.move"].browse(pair["cm_id"])
-            inv = ctx.env["account.move"].browse(pair["inv_id"])
+            cm = moves_by_id.get(pair["cm_id"])
+            inv = moves_by_id.get(pair["inv_id"])
+
+            if not cm or not inv:
+                failed += 1
+                continue
 
             if pair["type"] == "customer":
                 account_type = "asset_receivable"

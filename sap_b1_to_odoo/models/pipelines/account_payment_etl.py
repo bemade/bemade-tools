@@ -1,9 +1,18 @@
 import logging
 
+import psycopg2
+
 from odoo import api, models
 from odoo.addons.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
+
+# Errors that should bubble up for retry by the orchestrator
+RETRYABLE_ERRORS = (
+    psycopg2.errors.SerializationFailure,
+    psycopg2.errors.DeadlockDetected,
+    psycopg2.extensions.TransactionRollbackError,
+)
 
 
 @ETL.pipeline(
@@ -290,8 +299,9 @@ class AccountPaymentReconciliation(models.AbstractModel):
         moves = ctx.env["account.move"].browse(move_ids)
         moves_by_id = {m.id: m for m in moves}
 
-        reconciled_count = 0
-        skipped_no_line = 0
+        # Phase 1: Prepare all payment journal entry values
+        payment_vals_list = []
+        reconciliation_pairs = []  # (original_line, payment_vals_index)
 
         for data in reconciliation_data:
             move = moves_by_id.get(data["move_id"])
@@ -311,14 +321,9 @@ class AccountPaymentReconciliation(models.AbstractModel):
             )
 
             if not line_to_reconcile:
-                skipped_no_line += 1
                 continue
 
             # Determine debit/credit based on document type (invtype)
-            # invtype 13: A/R Invoice - credit receivable (customer pays us)
-            # invtype 14: A/R Credit Memo - debit receivable (we apply credit to customer)
-            # invtype 18: A/P Invoice - debit payable (we pay vendor)
-            # invtype 19: A/P Credit Memo - credit payable (vendor credit applied)
             if invtype == 13:  # A/R Invoice
                 recv_debit, recv_credit = 0, payment_amount
                 bank_debit, bank_credit = payment_amount, 0
@@ -335,8 +340,6 @@ class AccountPaymentReconciliation(models.AbstractModel):
                 _logger.warning(f"Unknown invtype {invtype}, skipping")
                 continue
 
-            # Create journal entry for the payment
-            # Track with sap_table, sap_docentry, sap_docnum for preexistence check
             payment_vals = {
                 "journal_id": journal_id,
                 "date": payment_date,
@@ -370,20 +373,46 @@ class AccountPaymentReconciliation(models.AbstractModel):
                 ],
             }
 
-            payment_move = ctx.env["account.move"].create(payment_vals)
-            payment_move.action_post()
+            payment_vals_list.append(payment_vals)
+            reconciliation_pairs.append((line_to_reconcile, len(payment_vals_list) - 1))
 
-            # Reconcile the payment with the invoice/bill
+        if not payment_vals_list:
+            _logger.info("[PaymentReconciliation] No valid payments to create")
+            return
+
+        # Phase 2: Batch create all payment journal entries
+        _logger.info(
+            f"[PaymentReconciliation] Batch creating {len(payment_vals_list)} payment entries"
+        )
+        payment_moves = ctx.env["account.move"].create(payment_vals_list)
+
+        # Phase 3: Batch post all payment journal entries
+        _logger.info(
+            f"[PaymentReconciliation] Batch posting {len(payment_moves)} payment entries"
+        )
+        payment_moves.action_post()
+
+        # Phase 4: Reconcile each pair (can't be batched)
+        reconciled_count = 0
+        for line_to_reconcile, payment_idx in reconciliation_pairs:
+            payment_move = payment_moves[payment_idx]
+
             payment_line = payment_move.line_ids.filtered(
                 lambda l: l.account_id.account_type
                 in ["asset_receivable", "liability_payable"]
             )
 
             if payment_line and line_to_reconcile:
-                (line_to_reconcile + payment_line).reconcile()
-                reconciled_count += 1
+                try:
+                    (line_to_reconcile + payment_line).reconcile()
+                    reconciled_count += 1
+                except RETRYABLE_ERRORS:
+                    # Let serialization/deadlock errors bubble up for orchestrator retry
+                    raise
+                except Exception as e:
+                    _logger.warning(f"[PaymentReconciliation] Reconcile failed: {e}")
 
         _logger.info(
-            f"[PaymentReconciliation] Chunk complete: {reconciled_count} reconciled, "
-            f"{skipped_no_line} no line to reconcile"
+            f"[PaymentReconciliation] Chunk complete: {reconciled_count} reconciled "
+            f"out of {len(reconciliation_pairs)} pairs"
         )

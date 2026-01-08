@@ -113,6 +113,99 @@ class AccountMoveCommon(models.AbstractModel):
         return vals
 
     @api.model
+    def _get_cogs_line_vals(self, row, lookups):
+        """Generate COGS journal entry lines from SAP's stockvalue.
+
+        For customer invoices, SAP stores the historical COGS value in stockvalue.
+        We create two lines:
+        1. Credit to Stock Valuation account (inventory reduction)
+        2. Debit to COGS account (expense recognition)
+
+        Args:
+            row: SAP line dict with stockvalue, stockprice, cogs_formatcode
+            lookups: Pre-computed lookup dicts
+
+        Returns:
+            List of line value dicts (empty if no COGS needed)
+        """
+        # Skip text lines or lines without stock value
+        if "linetext" in row or not row.get("stockvalue"):
+            return []
+
+        stockvalue = row.get("stockvalue") or 0.0
+        if stockvalue == 0:
+            return []
+
+        # Get the unit cost from SAP (for price_unit field)
+        stockprice = row.get("stockprice") or 0.0
+        quantity = row.get("quantity") or 0.0
+
+        # Look up COGS account from SAP's cogs_formatcode
+        cogs_formatcode = row.get("cogs_formatcode")
+        accounts_dict = lookups.get("accounts", {})
+
+        cogs_account_info = (
+            accounts_dict.get(cogs_formatcode) if cogs_formatcode else None
+        )
+        if not cogs_account_info:
+            _logger.warning(
+                f"COGS account not found for SAP code {cogs_formatcode}, "
+                f"docentry={row.get('docentry')}, linenum={row.get('linenum')}"
+            )
+            return []
+
+        cogs_account_id = cogs_account_info[0]
+
+        # Get stock valuation account from product category
+        # For now, use a lookup by common stock account codes
+        stock_account_id = None
+        for code, (acc_id, acc_type) in accounts_dict.items():
+            if acc_type == "asset_current" and "107" in str(code):
+                stock_account_id = acc_id
+                break
+
+        if not stock_account_id:
+            _logger.warning(
+                f"Stock valuation account not found, skipping COGS for "
+                f"docentry={row.get('docentry')}, linenum={row.get('linenum')}"
+            )
+            return []
+
+        # Get product_id for the COGS lines
+        products_dict = lookups.get("products", {})
+        product_id = products_dict.get(row.get("itemcode"))
+
+        # Create two COGS lines with display_type='cogs' to match Odoo's format
+        # Line 1: Credit Stock Valuation (reduce inventory)
+        # Line 2: Debit COGS (recognize expense)
+        cogs_lines = [
+            {
+                "name": row.get("dscription", "")[:64] if row.get("dscription") else "",
+                "product_id": product_id,
+                "quantity": quantity,
+                "price_unit": stockprice,  # Unit cost, not total
+                "debit": 0.0,
+                "credit": stockvalue,
+                "account_id": stock_account_id,
+                "display_type": "cogs",
+                "tax_ids": [],
+            },
+            {
+                "name": row.get("dscription", "")[:64] if row.get("dscription") else "",
+                "product_id": product_id,
+                "quantity": quantity,
+                "price_unit": -stockprice,  # Negative for expense side
+                "debit": stockvalue,
+                "credit": 0.0,
+                "account_id": cogs_account_id,
+                "display_type": "cogs",
+                "tax_ids": [],
+            },
+        ]
+
+        return cogs_lines
+
+    @api.model
     def _lookup_tax(self, row, sap_table, taxes_dict):
         """Look up Odoo tax ID by SAP tax code using pre-computed dict.
 
@@ -352,15 +445,17 @@ class AccountMoveCommon(models.AbstractModel):
     @api.model
     def _get_lines(self, cr, lines_table, sap_orders):
         docentries = [order["docentry"] for order in sap_orders]
-        # Get product lines with account formatcode
+        # Get product lines with account formatcode and COGS account
         query = SQL(
             """
             SELECT 
                 l.*, 
                 'product' as line_type,
-                a.formatcode as acct_formatcode
+                a.formatcode as acct_formatcode,
+                cogs.formatcode as cogs_formatcode
             FROM %s l
             LEFT JOIN oact a ON l.acctcode = a.acctcode
+            LEFT JOIN oact cogs ON l.cogsacct = cogs.acctcode
             WHERE l.docentry in %s 
             ORDER BY l.docentry, l.linenum
             """,
@@ -423,17 +518,24 @@ class AccountMoveCommon(models.AbstractModel):
                 - company_currency_id: ID of company currency
         """
         if order["docentry"] in lines:
-            move_lines = [
-                Command.create(
-                    self._get_row_vals(
-                        line,
-                        sap_line_table,
-                        order_lines_dict,
-                        lookups,
+            move_lines = []
+            for line in lines[order["docentry"]]:
+                # Add revenue/expense line
+                move_lines.append(
+                    Command.create(
+                        self._get_row_vals(
+                            line,
+                            sap_line_table,
+                            order_lines_dict,
+                            lookups,
+                        )
                     )
                 )
-                for line in lines[order["docentry"]]
-            ]
+                # Add COGS lines for customer invoices (inv1) with stockvalue
+                if "inv" in sap_line_table.lower():
+                    cogs_lines = self._get_cogs_line_vals(line, lookups)
+                    for cogs_vals in cogs_lines:
+                        move_lines.append(Command.create(cogs_vals))
         else:
             move_lines = []
 

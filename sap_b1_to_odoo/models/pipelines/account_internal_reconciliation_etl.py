@@ -1,9 +1,18 @@
 import logging
 
+import psycopg2
+
 from odoo import api, models
 from odoo.addons.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
+
+# Errors that should bubble up for retry by the orchestrator
+RETRYABLE_ERRORS = (
+    psycopg2.errors.SerializationFailure,
+    psycopg2.errors.DeadlockDetected,
+    psycopg2.extensions.TransactionRollbackError,
+)
 
 
 @ETL.pipeline(
@@ -12,6 +21,7 @@ _logger = logging.getLogger(__name__)
     sap_source="itr1",
     depends_on=[
         "account.move.invoice.post.processor",
+        "account.move.bill.importer",
     ],
     multiprocessing_threshold=500,
     chunk_size=200,
@@ -243,10 +253,11 @@ class AccountInternalReconciliation(models.AbstractModel):
         moves = ctx.env["account.move"].browse(move_ids)
         moves_by_id = {m.id: m for m in moves}
 
-        reconciled_count = 0
-        skipped_no_line = 0
+        # Phase 1: Prepare all journal entry values and track reconciliation pairs
+        recon_vals_list = []
+        reconciliation_pairs = []  # (original_line, recon_data_index, itr_type)
 
-        for data in reconciliation_data:
+        for idx, data in enumerate(reconciliation_data):
             move = moves_by_id.get(data["move_id"])
             if not move:
                 continue
@@ -259,10 +270,8 @@ class AccountInternalReconciliation(models.AbstractModel):
             # Determine account type based on document type
             if itr_type == "customer":
                 account_type = "asset_receivable"
-                offset_account_id = receivable_account_id
             else:
                 account_type = "liability_payable"
-                offset_account_id = payable_account_id
 
             # Find the receivable/payable line to reconcile
             line_to_reconcile = move.line_ids.filtered(
@@ -271,12 +280,9 @@ class AccountInternalReconciliation(models.AbstractModel):
             )
 
             if not line_to_reconcile:
-                skipped_no_line += 1
                 continue
 
             # Create journal entry for the internal reconciliation
-            # For customer: credit receivable, debit offset
-            # For vendor: debit payable, credit offset
             if itr_type == "customer":
                 line1_debit, line1_credit = 0, reconciled_amount
                 line2_debit, line2_credit = reconciled_amount, 0
@@ -284,11 +290,7 @@ class AccountInternalReconciliation(models.AbstractModel):
                 line1_debit, line1_credit = reconciled_amount, 0
                 line2_debit, line2_credit = 0, reconciled_amount
 
-            # Use the same account for both sides to ensure reconciliation works
-            # (bills may have different payable accounts)
             reconcile_account_id = line_to_reconcile[0].account_id.id
-
-            # Track with sap_table='itr1' and sap_docentry=first reconnum
             reconnums = data.get("reconnums", [])
             first_reconnum = reconnums[0] if reconnums else None
 
@@ -324,10 +326,32 @@ class AccountInternalReconciliation(models.AbstractModel):
                 ],
             }
 
-            recon_move = ctx.env["account.move"].create(recon_vals)
-            recon_move.action_post()
+            recon_vals_list.append(recon_vals)
+            reconciliation_pairs.append(
+                (line_to_reconcile, len(recon_vals_list) - 1, itr_type)
+            )
 
-            # Reconcile with the invoice/bill
+        if not recon_vals_list:
+            _logger.info("[InternalReconciliation] No valid reconciliations to create")
+            return
+
+        # Phase 2: Batch create all journal entries
+        _logger.info(
+            f"[InternalReconciliation] Batch creating {len(recon_vals_list)} journal entries"
+        )
+        recon_moves = ctx.env["account.move"].create(recon_vals_list)
+
+        # Phase 3: Batch post all journal entries
+        _logger.info(
+            f"[InternalReconciliation] Batch posting {len(recon_moves)} journal entries"
+        )
+        recon_moves.action_post()
+
+        # Phase 4: Reconcile each pair (can't be batched)
+        reconciled_count = 0
+        for line_to_reconcile, recon_idx, itr_type in reconciliation_pairs:
+            recon_move = recon_moves[recon_idx]
+
             if itr_type == "customer":
                 recon_line = recon_move.line_ids.filtered(
                     lambda l: l.account_id.account_type == "asset_receivable"
@@ -340,10 +364,16 @@ class AccountInternalReconciliation(models.AbstractModel):
                 )
 
             if recon_line and line_to_reconcile:
-                (line_to_reconcile + recon_line).reconcile()
-                reconciled_count += 1
+                try:
+                    (line_to_reconcile + recon_line).reconcile()
+                    reconciled_count += 1
+                except RETRYABLE_ERRORS:
+                    # Let serialization/deadlock errors bubble up for orchestrator retry
+                    raise
+                except Exception as e:
+                    _logger.warning(f"[InternalReconciliation] Reconcile failed: {e}")
 
         _logger.info(
-            f"[InternalReconciliation] Chunk complete: {reconciled_count} reconciled, "
-            f"{skipped_no_line} no line to reconcile"
+            f"[InternalReconciliation] Chunk complete: {reconciled_count} reconciled "
+            f"out of {len(reconciliation_pairs)} pairs"
         )

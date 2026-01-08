@@ -16,6 +16,16 @@ class AccountMove(models.Model):
         "SAP docnum must be unique when set!",
     )
 
+    def _stock_account_prepare_realtime_out_lines_vals(self):
+        """Override to skip COGS generation when importing from SAP.
+
+        When context has 'skip_cogs_generation', we've already added COGS lines
+        from SAP's historical data, so skip Odoo's automatic COGS calculation.
+        """
+        if self.env.context.get("skip_cogs_generation"):
+            return []
+        return super()._stock_account_prepare_realtime_out_lines_vals()
+
 
 class AccountMoveLine(models.Model):
     _inherit = "account.move.line"

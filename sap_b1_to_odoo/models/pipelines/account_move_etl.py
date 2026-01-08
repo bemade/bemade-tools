@@ -159,7 +159,8 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
 
         moves = ctx.env["account.move"].create(move_vals)
         ctx.env.flush_all()
-        moves.action_post()
+        # Skip Odoo's automatic COGS generation - we've imported COGS from SAP
+        moves.with_context(skip_cogs_generation=True).action_post()
 
     @api.model
     def _trigger_recomputation(self, lines):
