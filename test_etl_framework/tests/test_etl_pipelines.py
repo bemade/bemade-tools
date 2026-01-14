@@ -47,7 +47,7 @@ class TestMultiprocessingConfig(TransactionCase):
 
         config = MultiprocessingConfig()
         cpu_count = os.cpu_count() or 1
-        expected = max(1, cpu_count - 1)
+        expected = max(1, cpu_count - 2)
         self.assertEqual(config.get_workers(), expected)
 
     def test_get_workers_explicit(self):

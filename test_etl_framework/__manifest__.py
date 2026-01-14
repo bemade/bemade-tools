@@ -1,6 +1,6 @@
 {
     "name": "ETL Framework Tests",
-    "version": "18.0.1.0.0",
+    "version": "19.0.1.0.0",
     "category": "Technical",
     "summary": "Test module for ETL Framework",
     "description": """
