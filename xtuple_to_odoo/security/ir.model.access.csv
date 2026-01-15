@@ -1,0 +1,3 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_xtuple_database_user,xtuple.database.user,model_xtuple_database,base.group_user,1,0,0,0
+access_xtuple_database_manager,xtuple.database.manager,model_xtuple_database,base.group_system,1,1,1,1
