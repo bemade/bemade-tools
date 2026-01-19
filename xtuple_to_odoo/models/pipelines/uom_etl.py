@@ -77,7 +77,7 @@ class XtupleUomPrecisionImporter(models.AbstractModel):
             if precision_record:
                 if precision_record.digits != max_precision:
                     old_digits = precision_record.digits
-                    precision_record.digits = max_precision
+                    precision_record.sudo().digits = max_precision
                     _logger.info(
                         f"Updated '{precision_name}' precision from {old_digits} to {max_precision}"
                     )
@@ -86,7 +86,7 @@ class XtupleUomPrecisionImporter(models.AbstractModel):
                         f"'{precision_name}' precision already set to {max_precision}"
                     )
             else:
-                ctx.env["decimal.precision"].create(
+                ctx.env["decimal.precision"].sudo().create(
                     {
                         "name": precision_name,
                         "digits": max_precision,
