@@ -38,6 +38,7 @@
     "depends": ["mrp", "base", "contacts", "account", "purchase", "etl_framework"],
     "data": [
         "security/ir.model.access.csv",
+        "views/xtuple_database_views.xml",
         "data/xtuple_database_setup.xml",
     ],
     "post_init_hook": "post_init_hook",
