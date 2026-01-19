@@ -114,7 +114,7 @@ class XtupleProductCategoryImporter(models.AbstractModel):
         categories = extracted.get("extract_categories", [])
 
         parent_category = ctx.env.ref(
-            "product.product_category_all", raise_if_not_found=False
+            "product.product_category_goods", raise_if_not_found=False
         )
 
         category_vals = []
@@ -226,7 +226,7 @@ class XtupleProductImporter(models.AbstractModel):
 
         # Get default category
         all_category = ctx.env.ref(
-            "product.product_category_all", raise_if_not_found=False
+            "product.product_category_goods", raise_if_not_found=False
         )
 
         product_vals = []
