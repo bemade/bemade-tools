@@ -8,9 +8,9 @@ class HrExpense(models.Model):
 
     _inherit = "hr.expense"
 
-    qbo_purchase_id = fields.Integer(
-        string="QBO Purchase ID",
+    qbo_expense_id = fields.Integer(
+        string="QBO Expense ID",
         index=True,
         copy=False,
-        help="QuickBooks Online Purchase ID (expense transaction)",
+        help="QuickBooks Online Expense ID",
     )

@@ -37,7 +37,7 @@ pattern for Odoo 19.0 compatibility.
 
 ## Done - Phase 4 (Extended) [NEEDS TESTING]
 - hr.employee (qbo_employee_id) - Employee
-- hr.expense (qbo_purchase_id) - Purchase → hr.expense
+- hr.expense (qbo_expense_id) - Expense → hr.expense
 
-Note: QBO Purchase entity (checks, credit cards, cash) maps to hr.expense in Odoo.
+Note: QBO Expense entity represents employee expense reports, mapping to hr.expense in Odoo.
 Department is not a separate entity in QBO - employees don't have department assignments.
