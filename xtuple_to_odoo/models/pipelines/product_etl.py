@@ -181,6 +181,39 @@ class XtupleProductImporter(models.AbstractModel):
             f"Found {len(existing_default_codes)} existing products by default_code for deduplication"
         )
 
+        # Build category lookup dict (needed for transform, done here for multiprocessing)
+        ctx.env.cr.execute(
+            "SELECT xtuple_prodcat_id, id FROM product_category WHERE xtuple_prodcat_id IS NOT NULL"
+        )
+        category_dict = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+
+        # Get default category ID (needed for transform, done here for multiprocessing)
+        all_category = ctx.env.ref(
+            "product.product_category_goods", raise_if_not_found=False
+        )
+        default_category_id = all_category.id if all_category else False
+
+        # Build UoM lookup dict (needed for transform, done here for multiprocessing)
+        uom_xmlid_mapping = {
+            4: "uom.product_uom_unit",  # EA -> Unit
+            5: "uom.product_uom_unit",  # CS (Case) -> Unit
+            6: "uom.product_uom_unit",  # PL (Pallet) -> Unit
+            7: "uom.product_uom_kgm",  # KG -> kg
+            8: "uom.product_uom_litre",  # L -> Liter
+            9: "uom.product_uom_lb",  # LB -> lb
+            10: "uom.product_uom_gal",  # USGAL -> gal
+            11: "uom.product_uom_gal",  # IMP GAL -> gal
+            12: "uom.product_uom_ton",  # THSND -> Ton
+            13: "uom.product_uom_yard",  # YD -> Yard
+            14: "uom.product_uom_foot",  # FT -> Foot
+        }
+        default_uom = ctx.env.ref("uom.product_uom_unit", raise_if_not_found=False)
+        default_uom_id = default_uom.id if default_uom else False
+        uom_dict = {}
+        for xtuple_id, xmlid in uom_xmlid_mapping.items():
+            uom = ctx.env.ref(xmlid, raise_if_not_found=False)
+            uom_dict[xtuple_id] = uom.id if uom else default_uom_id
+
         select_clause = f"""
         SELECT
             {PRODUCT_SELECT}
@@ -198,6 +231,13 @@ class XtupleProductImporter(models.AbstractModel):
             ctx.cr.execute(select_clause)
 
         products = ctx.cr.dictfetchall()
+
+        # Embed lookup data in each product record for multiprocessing compatibility
+        for product in products:
+            prodcat_id = product.get("item_prodcat_id")
+            product["_category_id"] = category_dict.get(prodcat_id, default_category_id)
+            inv_uom_id = product.get("item_inv_uom_id")
+            product["_uom_id"] = uom_dict.get(inv_uom_id, default_uom_id)
 
         # Filter out products that match existing by item_number (deduplication)
         deduped_products = [
@@ -217,17 +257,6 @@ class XtupleProductImporter(models.AbstractModel):
     def transform_products(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
         """Transform xTuple products into Odoo product values."""
         products = extracted.get("extract_products", [])
-
-        # Build category lookup dict
-        ctx.env.cr.execute(
-            "SELECT xtuple_prodcat_id, id FROM product_category WHERE xtuple_prodcat_id IS NOT NULL"
-        )
-        category_dict = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
-
-        # Get default category
-        all_category = ctx.env.ref(
-            "product.product_category_goods", raise_if_not_found=False
-        )
 
         product_vals = []
         for product in products:
@@ -266,14 +295,9 @@ class XtupleProductImporter(models.AbstractModel):
 
             description = product.get("item_descrip2", "")
 
-            # Get category
-            category_id = category_dict.get(product.get("item_prodcat_id"))
-            if not category_id:
-                category_id = all_category and all_category.id or False
-
-            # Get UoM
-            uom = self._map_xtuple_uom_to_odoo(ctx, product.get("item_inv_uom_id"))
-            uom_id = uom and uom.id or False
+            # Get category and UoM (lookup done in extract phase)
+            category_id = product.get("_category_id")
+            uom_id = product.get("_uom_id")
 
             # Get price and cost
             list_price = product.get("item_listprice", 0.0)
@@ -306,40 +330,6 @@ class XtupleProductImporter(models.AbstractModel):
 
         _logger.info(f"Transformed {len(product_vals)} product records")
         return product_vals
-
-    def _map_xtuple_uom_to_odoo(self, ctx: ETLContext, xtuple_uom_id):
-        """Map xTuple UoM IDs to Odoo UoM records.
-
-        In Odoo 19, UoM categories were removed. We map to standard UoMs only.
-        """
-        default_uom = ctx.env.ref("uom.product_uom_unit", raise_if_not_found=False)
-
-        if not xtuple_uom_id:
-            return default_uom
-
-        # Map xTuple UoM IDs to Odoo XML IDs
-        # For custom UoMs (Case, Pallet, etc.), fall back to Unit
-        uom_mapping = {
-            4: "uom.product_uom_unit",  # EA -> Unit
-            5: "uom.product_uom_unit",  # CS (Case) -> Unit (no standard equivalent)
-            6: "uom.product_uom_unit",  # PL (Pallet) -> Unit (no standard equivalent)
-            7: "uom.product_uom_kgm",  # KG -> kg
-            8: "uom.product_uom_litre",  # L -> Liter
-            9: "uom.product_uom_lb",  # LB -> lb
-            10: "uom.product_uom_gal",  # USGAL -> gal (US)
-            11: "uom.product_uom_gal",  # IMP GAL -> gal (US) as fallback
-            12: "uom.product_uom_ton",  # THSND -> Ton
-            13: "uom.product_uom_yard",  # YD -> Yard
-            14: "uom.product_uom_foot",  # FT -> Foot
-        }
-
-        xmlid = uom_mapping.get(xtuple_uom_id)
-        if not xmlid:
-            _logger.warning(f"No mapping found for xTuple UoM ID: {xtuple_uom_id}")
-            return default_uom
-
-        uom = ctx.env.ref(xmlid, raise_if_not_found=False)
-        return uom or default_uom
 
     @ETL.load()
     def load_products(self, ctx: ETLContext, transformed: Dict) -> None:

@@ -372,6 +372,13 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
             f"Found {len(existing_names)} existing partners by name for deduplication"
         )
 
+        # Get customer ID to partner ID mapping (needed for transform, done here for multiprocessing)
+        # This is used to check if a vendor is also a customer
+        ctx.env.cr.execute(
+            "SELECT xtuple_cust_id, id FROM res_partner WHERE xtuple_cust_id IS NOT NULL"
+        )
+        cust_id_to_partner = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+
         select_clause = f"""
         SELECT
             {VENDOR_SELECT},
@@ -390,6 +397,12 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
 
         ctx.cr.execute(sql)
         vendors = ctx.cr.dictfetchall()
+
+        # Embed existing customer partner ID in each vendor record for multiprocessing
+        for vendor in vendors:
+            vend_id = vendor.get("vend_id")
+            if vend_id in cust_id_to_partner:
+                vendor["_existing_customer_partner_id"] = cust_id_to_partner[vend_id]
 
         # Filter out vendors that match existing partners by name (deduplication)
         deduped_vendors = [
@@ -417,16 +430,12 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
         partner_vals = []
 
         for vendor in vendors:
-            # Check if this vendor is also a customer
-            ctx.env.cr.execute(
-                "SELECT id FROM res_partner WHERE xtuple_cust_id = %s",
-                (vendor.get("vend_id"),),
-            )
-            existing_customer = ctx.env.cr.fetchone()
+            # Check if this vendor is also a customer (lookup done in extract phase)
+            existing_customer_id = vendor.get("_existing_customer_partner_id")
 
-            if existing_customer:
+            if existing_customer_id:
                 vendor_ids_to_update.append(
-                    (existing_customer[0], int(vendor.get("vend_id")))
+                    (existing_customer_id, int(vendor.get("vend_id")))
                 )
                 continue
 
@@ -701,7 +710,7 @@ class XtuplePartnerShiptoImporter(models.AbstractModel):
     _inherit = "xtuple.partner.import.mixin"
 
     @ETL.extract("shiptoinfo")
-    def extract_shiptos(self, ctx: ETLContext) -> Dict[str, Any]:
+    def extract_shiptos(self, ctx: ETLContext) -> List[Dict]:
         """Extract ship-to addresses from xTuple shiptoinfo table."""
         ctx.env.cr.execute(
             "SELECT xtuple_shipto_id FROM res_partner WHERE xtuple_shipto_id IS NOT NULL"
@@ -710,6 +719,14 @@ class XtuplePartnerShiptoImporter(models.AbstractModel):
         _logger.info(
             f"Found {len(existing_shipto_ids)} existing ship-to addresses in Odoo"
         )
+
+        # Get customer mapping for parent lookup (needed for transform, done here for multiprocessing)
+        ctx.env.cr.execute(
+            "SELECT xtuple_cust_id, id, name FROM res_partner WHERE xtuple_cust_id IS NOT NULL"
+        )
+        customer_map = {
+            row[0]: {"id": row[1], "name": row[2]} for row in ctx.env.cr.fetchall()
+        }
 
         select_clause = f"""
         SELECT
@@ -727,28 +744,27 @@ class XtuplePartnerShiptoImporter(models.AbstractModel):
         ctx.cr.execute(sql)
         shiptos = ctx.cr.dictfetchall()
 
-        # Get customer mapping for parent lookup
-        ctx.env.cr.execute(
-            "SELECT xtuple_cust_id, id FROM res_partner WHERE xtuple_cust_id IS NOT NULL"
-        )
-        customer_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+        # Embed parent info in each shipto record for multiprocessing compatibility
+        for shipto in shiptos:
+            cust_id = shipto.get("shipto_cust_id")
+            if cust_id in customer_map:
+                shipto["_parent_id"] = customer_map[cust_id]["id"]
+                shipto["_parent_name"] = customer_map[cust_id]["name"]
 
         _logger.info(f"Extracted {len(shiptos)} new ship-to addresses from xTuple")
-        return {"shiptos": shiptos, "customer_map": customer_map}
+        return shiptos
 
     @ETL.transform()
     def transform_shiptos(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
         """Transform xTuple ship-to addresses into Odoo partner values."""
-        data = extracted.get("extract_shiptos", {})
-        shiptos = data.get("shiptos", [])
-        customer_map = data.get("customer_map", {})
+        shiptos = extracted.get("extract_shiptos", [])
         countries_dict = self._get_countries_dict()
         states_dict = self._get_states_dict()
         company_id = ctx.env.company.id
 
         partner_vals = []
         for address in shiptos:
-            parent_id = customer_map.get(address.get("shipto_cust_id"))
+            parent_id = address.get("_parent_id")
             if not parent_id:
                 _logger.warning(
                     f"Parent customer not found for ship-to {address.get('shipto_id')}"
@@ -763,10 +779,7 @@ class XtuplePartnerShiptoImporter(models.AbstractModel):
             if not name:
                 name = self._get_contact_name(address)
             if not name:
-                ctx.env.cr.execute(
-                    "SELECT name FROM res_partner WHERE id = %s", (parent_id,)
-                )
-                parent_name = ctx.env.cr.fetchone()[0]
+                parent_name = address.get("_parent_name", "Unknown")
                 name = f"{parent_name} - Shipping Address"
 
             vals = self._build_partner_vals(
