@@ -975,14 +975,24 @@ class XtuplePartnerCustomerLinker(models.AbstractModel):
         )
         partner_by_name = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
 
+        # Get customer IDs already assigned to partners (to avoid duplicates)
+        ctx.env.cr.execute(
+            "SELECT xtuple_cust_id FROM res_partner WHERE xtuple_cust_id IS NOT NULL"
+        )
+        existing_cust_ids = {row[0] for row in ctx.env.cr.fetchall()}
+
         link_updates = []
         for customer in customers:
+            cust_id = customer.get("cust_id")
+            # Skip if this customer ID is already assigned to another partner
+            if cust_id in existing_cust_ids:
+                continue
             name = customer.get("cust_name", "")
             if name and name.lower() in partner_by_name:
                 link_updates.append(
                     {
                         "partner_id": partner_by_name[name.lower()],
-                        "xtuple_cust_id": customer.get("cust_id"),
+                        "xtuple_cust_id": cust_id,
                         "name": name,
                     }
                 )
@@ -1069,14 +1079,24 @@ class XtuplePartnerVendorLinker(models.AbstractModel):
         )
         partner_by_name = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
 
+        # Get vendor IDs already assigned to partners (to avoid duplicates)
+        ctx.env.cr.execute(
+            "SELECT xtuple_vend_id FROM res_partner WHERE xtuple_vend_id IS NOT NULL"
+        )
+        existing_vend_ids = {row[0] for row in ctx.env.cr.fetchall()}
+
         link_updates = []
         for vendor in vendors:
+            vend_id = vendor.get("vend_id")
+            # Skip if this vendor ID is already assigned to another partner
+            if vend_id in existing_vend_ids:
+                continue
             name = vendor.get("vend_name", "")
             if name and name.lower() in partner_by_name:
                 link_updates.append(
                     {
                         "partner_id": partner_by_name[name.lower()],
-                        "xtuple_vend_id": vendor.get("vend_id"),
+                        "xtuple_vend_id": vend_id,
                         "name": name,
                     }
                 )
