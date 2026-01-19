@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- QBO Connection Form View -->
+    <record id="qbo_connection_view_form" model="ir.ui.view">
+        <field name="name">qbo.connection.form</field>
+        <field name="model">qbo.connection</field>
+        <field name="arch" type="xml">
+            <form string="QuickBooks Online Connection">
+                <header>
+                    <button name="action_authorize" 
+                            string="Authorize" 
+                            type="object" 
+                            class="btn-primary"
+                            invisible="state == 'connected'"/>
+                    <button name="action_test_connection" 
+                            string="Test Connection" 
+                            type="object"
+                            invisible="state != 'connected'"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,connected"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name" placeholder="Connection Name"/>
+                        </h1>
+                    </div>
+                    <group>
+                        <group string="OAuth2 Credentials">
+                            <field name="client_id"/>
+                            <field name="client_secret" password="True"/>
+                            <field name="realm_id"/>
+                            <field name="redirect_uri" placeholder="https://your-odoo.com/qbo/callback"/>
+                            <field name="sandbox_mode"/>
+                        </group>
+                        <group string="Token Information">
+                            <field name="access_token" password="True" readonly="1"/>
+                            <field name="refresh_token" password="True" readonly="1"/>
+                            <field name="token_expiry" readonly="1"/>
+                        </group>
+                    </group>
+                    <group string="Default Accounts for Partners">
+                        <group>
+                            <field name="default_receivable_account_id"/>
+                            <field name="default_payable_account_id"/>
+                        </group>
+                        <group>
+                            <p class="text-muted">
+                                These accounts are auto-detected after importing Chart of Accounts.
+                                You can also set them manually.
+                            </p>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Import Actions" invisible="state != 'connected'">
+                            <group>
+                                <button name="action_import_accounts" 
+                                        string="Import Chart of Accounts" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_import_categories" 
+                                        string="Import Product Categories" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_import_customers" 
+                                        string="Import Customers" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_import_vendors" 
+                                        string="Import Vendors" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_import_products" 
+                                        string="Import Products/Services" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_import_journal_entries" 
+                                        string="Import Journal Entries" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_import_payment_terms" 
+                                        string="Import Payment Terms" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_import_taxes" 
+                                        string="Import Taxes" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_import_invoices" 
+                                        string="Import Invoices" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_import_bills" 
+                                        string="Import Bills" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_import_payments" 
+                                        string="Import Payments" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_create_bank_journals" 
+                                        string="Create Bank Journals" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                                <button name="action_reconcile_payments" 
+                                        string="Reconcile Payments" 
+                                        type="object" 
+                                        class="btn-secondary"/>
+                            </group>
+                            <group>
+                                <button name="action_import_all" 
+                                        string="Import All Data" 
+                                        type="object" 
+                                        class="btn-primary"/>
+                            </group>
+                        </page>
+                        <page string="Sync History">
+                            <group>
+                                <field name="last_account_sync" readonly="1"/>
+                                <field name="last_customer_sync" readonly="1"/>
+                                <field name="last_vendor_sync" readonly="1"/>
+                                <field name="last_product_sync" readonly="1"/>
+                                <field name="last_invoice_sync" readonly="1"/>
+                                <field name="last_bill_sync" readonly="1"/>
+                                <field name="last_journal_entry_sync" readonly="1"/>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- QBO Connection Tree View -->
+    <record id="qbo_connection_view_tree" model="ir.ui.view">
+        <field name="name">qbo.connection.tree</field>
+        <field name="model">qbo.connection</field>
+        <field name="arch" type="xml">
+            <list string="QuickBooks Online Connections">
+                <field name="name"/>
+                <field name="realm_id"/>
+                <field name="sandbox_mode"/>
+                <field name="state"/>
+                <field name="token_expiry"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- QBO Connection Action -->
+    <record id="qbo_connection_action" model="ir.actions.act_window">
+        <field name="name">QuickBooks Online</field>
+        <field name="res_model">qbo.connection</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                Configure your QuickBooks Online connection
+            </p>
+            <p>
+                Connect to QuickBooks Online to import your accounting data including
+                Chart of Accounts, Customers, Vendors, Products, and Journal Entries.
+            </p>
+        </field>
+    </record>
+
+    <!-- Menu Items -->
+    <menuitem id="qbo_menu_root"
+              name="QuickBooks Online"
+              parent="account.menu_finance_configuration"
+              sequence="100"/>
+    
+    <menuitem id="qbo_menu_connection"
+              name="QBO Connection"
+              parent="qbo_menu_root"
+              action="qbo_connection_action"
+              sequence="10"/>
+</odoo>
