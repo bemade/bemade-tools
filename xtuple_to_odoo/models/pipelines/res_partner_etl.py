@@ -958,27 +958,8 @@ class XtuplePartnerCustomerLinker(models.AbstractModel):
     @ETL.extract("custinfo")
     def extract_customers_for_linking(self, ctx: ETLContext) -> List[Dict]:
         """Extract customers from xTuple that need linking."""
-        select_clause = """
-        SELECT
-            cust_id,
-            cust_name
-        FROM custinfo
-        WHERE cust_name IS NOT NULL AND cust_name != ''
-        """
-        ctx.cr.execute(select_clause)
-        customers = ctx.cr.dictfetchall()
-
-        _logger.info(f"Extracted {len(customers)} customers for linking")
-        return customers
-
-    @ETL.transform()
-    def transform_customers_for_linking(
-        self, ctx: ETLContext, extracted: Dict
-    ) -> List[Dict]:
-        """Find existing partners by name and prepare link updates."""
-        customers = extracted.get("extract_customers_for_linking", [])
-
         # Build lookup of existing partners by name that don't have xtuple_cust_id
+        # (needed for transform, done here for multiprocessing compatibility)
         ctx.env.cr.execute(
             """
             SELECT id, LOWER(name) FROM res_partner
@@ -994,19 +975,47 @@ class XtuplePartnerCustomerLinker(models.AbstractModel):
         )
         existing_cust_ids = {row[0] for row in ctx.env.cr.fetchall()}
 
-        link_updates = []
+        select_clause = """
+        SELECT
+            cust_id,
+            cust_name
+        FROM custinfo
+        WHERE cust_name IS NOT NULL AND cust_name != ''
+        """
+        ctx.cr.execute(select_clause)
+        customers = ctx.cr.dictfetchall()
+
+        # Embed lookup results in each customer record for multiprocessing
         for customer in customers:
             cust_id = customer.get("cust_id")
-            # Skip if this customer ID is already assigned to another partner
-            if cust_id in existing_cust_ids:
-                continue
             name = customer.get("cust_name", "")
-            if name and name.lower() in partner_by_name:
+            customer["_partner_id"] = (
+                partner_by_name.get(name.lower()) if name else None
+            )
+            customer["_already_linked"] = cust_id in existing_cust_ids
+
+        _logger.info(f"Extracted {len(customers)} customers for linking")
+        return customers
+
+    @ETL.transform()
+    def transform_customers_for_linking(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> List[Dict]:
+        """Find existing partners by name and prepare link updates."""
+        customers = extracted.get("extract_customers_for_linking", [])
+
+        link_updates = []
+        for customer in customers:
+            # Skip if this customer ID is already assigned to another partner (lookup done in extract)
+            if customer.get("_already_linked"):
+                continue
+            partner_id = customer.get("_partner_id")
+            if partner_id:
                 link_updates.append(
                     {
-                        "partner_id": partner_by_name[name.lower()],
-                        "xtuple_cust_id": cust_id,
-                        "name": name,
+                        "partner_id": partner_id,
+                        "xtuple_cust_id": customer.get("cust_id"),
+                        "name": customer.get("cust_name", ""),
                     }
                 )
 
@@ -1062,27 +1071,8 @@ class XtuplePartnerVendorLinker(models.AbstractModel):
     @ETL.extract("vendinfo")
     def extract_vendors_for_linking(self, ctx: ETLContext) -> List[Dict]:
         """Extract vendors from xTuple that need linking."""
-        select_clause = """
-        SELECT
-            vend_id,
-            vend_name
-        FROM vendinfo
-        WHERE vend_name IS NOT NULL AND vend_name != ''
-        """
-        ctx.cr.execute(select_clause)
-        vendors = ctx.cr.dictfetchall()
-
-        _logger.info(f"Extracted {len(vendors)} vendors for linking")
-        return vendors
-
-    @ETL.transform()
-    def transform_vendors_for_linking(
-        self, ctx: ETLContext, extracted: Dict
-    ) -> List[Dict]:
-        """Find existing partners by name and prepare link updates."""
-        vendors = extracted.get("extract_vendors_for_linking", [])
-
         # Build lookup of existing partners by name that don't have xtuple_vend_id
+        # (needed for transform, done here for multiprocessing compatibility)
         ctx.env.cr.execute(
             """
             SELECT id, LOWER(name) FROM res_partner
@@ -1098,19 +1088,45 @@ class XtuplePartnerVendorLinker(models.AbstractModel):
         )
         existing_vend_ids = {row[0] for row in ctx.env.cr.fetchall()}
 
-        link_updates = []
+        select_clause = """
+        SELECT
+            vend_id,
+            vend_name
+        FROM vendinfo
+        WHERE vend_name IS NOT NULL AND vend_name != ''
+        """
+        ctx.cr.execute(select_clause)
+        vendors = ctx.cr.dictfetchall()
+
+        # Embed lookup results in each vendor record for multiprocessing
         for vendor in vendors:
             vend_id = vendor.get("vend_id")
-            # Skip if this vendor ID is already assigned to another partner
-            if vend_id in existing_vend_ids:
-                continue
             name = vendor.get("vend_name", "")
-            if name and name.lower() in partner_by_name:
+            vendor["_partner_id"] = partner_by_name.get(name.lower()) if name else None
+            vendor["_already_linked"] = vend_id in existing_vend_ids
+
+        _logger.info(f"Extracted {len(vendors)} vendors for linking")
+        return vendors
+
+    @ETL.transform()
+    def transform_vendors_for_linking(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> List[Dict]:
+        """Find existing partners by name and prepare link updates."""
+        vendors = extracted.get("extract_vendors_for_linking", [])
+
+        link_updates = []
+        for vendor in vendors:
+            # Skip if this vendor ID is already assigned to another partner (lookup done in extract)
+            if vendor.get("_already_linked"):
+                continue
+            partner_id = vendor.get("_partner_id")
+            if partner_id:
                 link_updates.append(
                     {
-                        "partner_id": partner_by_name[name.lower()],
-                        "xtuple_vend_id": vend_id,
-                        "name": name,
+                        "partner_id": partner_id,
+                        "xtuple_vend_id": vendor.get("vend_id"),
+                        "name": vendor.get("vend_name", ""),
                     }
                 )
 

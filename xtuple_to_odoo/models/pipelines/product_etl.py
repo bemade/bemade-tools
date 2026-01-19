@@ -471,27 +471,8 @@ class XtupleProductLinker(models.AbstractModel):
     @ETL.extract("item")
     def extract_products_for_linking(self, ctx: ETLContext) -> List[Dict]:
         """Extract products from xTuple that need linking."""
-        select_clause = f"""
-        SELECT
-            item_id,
-            item_number
-        FROM item
-        WHERE item_number IS NOT NULL AND item_number != ''
-        """
-        ctx.cr.execute(select_clause)
-        products = ctx.cr.dictfetchall()
-
-        _logger.info(f"Extracted {len(products)} products with item_number for linking")
-        return products
-
-    @ETL.transform()
-    def transform_products_for_linking(
-        self, ctx: ETLContext, extracted: Dict
-    ) -> List[Dict]:
-        """Find existing products by default_code and prepare link updates."""
-        products = extracted.get("extract_products_for_linking", [])
-
         # Build lookup of existing products by default_code that don't have xtuple_item_id
+        # (needed for transform, done here for multiprocessing compatibility)
         ctx.env.cr.execute(
             """
             SELECT id, default_code FROM product_product
@@ -507,19 +488,45 @@ class XtupleProductLinker(models.AbstractModel):
         )
         existing_item_ids = {row[0] for row in ctx.env.cr.fetchall()}
 
+        select_clause = """
+        SELECT
+            item_id,
+            item_number
+        FROM item
+        WHERE item_number IS NOT NULL AND item_number != ''
+        """
+        ctx.cr.execute(select_clause)
+        products = ctx.cr.dictfetchall()
+
+        # Embed lookup results in each product record for multiprocessing
+        for product in products:
+            item_number = product.get("item_number")
+            item_id = product.get("item_id")
+            product["_odoo_product_id"] = product_by_code.get(item_number)
+            product["_already_linked"] = item_id in existing_item_ids
+
+        _logger.info(f"Extracted {len(products)} products with item_number for linking")
+        return products
+
+    @ETL.transform()
+    def transform_products_for_linking(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> List[Dict]:
+        """Find existing products by default_code and prepare link updates."""
+        products = extracted.get("extract_products_for_linking", [])
+
         link_updates = []
         for product in products:
-            item_id = product.get("item_id")
-            # Skip if this item ID is already assigned to another product
-            if item_id in existing_item_ids:
+            # Skip if this item ID is already assigned to another product (lookup done in extract)
+            if product.get("_already_linked"):
                 continue
-            item_number = product.get("item_number")
-            if item_number and item_number in product_by_code:
+            odoo_product_id = product.get("_odoo_product_id")
+            if odoo_product_id:
                 link_updates.append(
                     {
-                        "product_id": product_by_code[item_number],
-                        "xtuple_item_id": item_id,
-                        "xtuple_item_number": item_number,
+                        "product_id": odoo_product_id,
+                        "xtuple_item_id": product.get("item_id"),
+                        "xtuple_item_number": product.get("item_number"),
                     }
                 )
 
