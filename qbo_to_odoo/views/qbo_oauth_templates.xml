@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- OAuth Success Template -->
+    <template id="oauth_success" name="QBO OAuth Success">
+        <html>
+            <head>
+                <title>QuickBooks Online Connected</title>
+                <style>
+                    body {
+                        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        min-height: 100vh;
+                        margin: 0;
+                        background: #f8f9fa;
+                    }
+                    .container {
+                        text-align: center;
+                        padding: 40px;
+                        background: white;
+                        border-radius: 8px;
+                        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                        max-width: 500px;
+                    }
+                    .success-icon {
+                        font-size: 64px;
+                        color: #28a745;
+                        margin-bottom: 20px;
+                    }
+                    h1 { color: #333; margin-bottom: 10px; }
+                    p { color: #666; margin-bottom: 20px; }
+                    .close-note { font-size: 14px; color: #999; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="success-icon">✓</div>
+                    <h1>Connected Successfully!</h1>
+                    <p>QuickBooks Online has been connected to Odoo.</p>
+                    <p class="close-note">You can close this tab and return to Odoo.</p>
+                </div>
+            </body>
+        </html>
+    </template>
+
+    <!-- OAuth Error Template -->
+    <template id="oauth_error" name="QBO OAuth Error">
+        <html>
+            <head>
+                <title>QuickBooks Online Connection Error</title>
+                <style>
+                    body {
+                        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        min-height: 100vh;
+                        margin: 0;
+                        background: #f8f9fa;
+                    }
+                    .container {
+                        text-align: center;
+                        padding: 40px;
+                        background: white;
+                        border-radius: 8px;
+                        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                        max-width: 500px;
+                    }
+                    .error-icon {
+                        font-size: 64px;
+                        color: #dc3545;
+                        margin-bottom: 20px;
+                    }
+                    h1 { color: #333; margin-bottom: 10px; }
+                    .error-code { color: #dc3545; font-weight: bold; }
+                    .error-desc { color: #666; margin: 20px 0; }
+                    .close-note { font-size: 14px; color: #999; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="error-icon">✗</div>
+                    <h1>Connection Failed</h1>
+                    <p class="error-code"><t t-esc="error"/></p>
+                    <p class="error-desc"><t t-esc="error_description"/></p>
+                    <p class="close-note">Please close this tab and try again in Odoo.</p>
+                </div>
+            </body>
+        </html>
+    </template>
+</odoo>

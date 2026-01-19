@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+        <!-- Setup QBO connection from environment variables on module install -->
+        <function model="qbo.connection" name="setup_from_env"/>
+    </data>
+</odoo>

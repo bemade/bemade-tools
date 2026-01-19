@@ -1,0 +1,222 @@
+"""QuickBooks Online Journal Entry ETL Pipeline
+
+This module handles the migration of Journal Entries from QBO to Odoo
+using the ETL framework.
+"""
+
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from odoo import models
+
+from odoo.addons.etl_framework import ETL, ETLContext
+
+_logger = logging.getLogger(__name__)
+
+
+@ETL.pipeline(
+    target_model="account.move",
+    importer_name="qbo.journal.entry.importer",
+    sap_source="JournalEntry",
+    depends_on=["qbo.account.importer"],
+)
+class QboJournalEntryImporter(models.AbstractModel):
+    """ETL Pipeline for importing QBO Journal Entries."""
+
+    _name = "qbo.journal.entry.importer"
+    _description = "QBO Journal Entry Importer"
+
+    @ETL.extract("JournalEntry")
+    def extract_journal_entries(self, ctx: ETLContext) -> List[Dict]:
+        """Extract journal entries from QBO API."""
+        api_client = ctx.get_config("api_client")
+        if not api_client:
+            raise ValueError("API client not found in ETL context")
+
+        # Get existing QBO journal entry IDs
+        ctx.env.cr.execute(
+            "SELECT qbo_journal_entry_id FROM account_move "
+            "WHERE qbo_journal_entry_id IS NOT NULL"
+        )
+        existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
+        _logger.info(f"Found {len(existing_ids)} existing journal entries in Odoo")
+
+        # Fetch all journal entries from QBO
+        entries = api_client.query_all(entity="JournalEntry", order_by="Id")
+
+        # Filter out already imported
+        new_entries = [
+            entry for entry in entries if str(entry.get("Id")) not in existing_ids
+        ]
+
+        _logger.info(
+            f"Extracted {len(entries)} journal entries from QBO, "
+            f"{len(new_entries)} are new"
+        )
+        return new_entries
+
+    @ETL.transform()
+    def transform_journal_entries(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform QBO journal entries into Odoo account.move values."""
+        entries = extracted.get("extract_journal_entries", [])
+
+        # Build account lookup
+        ctx.env.cr.execute(
+            "SELECT qbo_id, id FROM account_account WHERE qbo_id IS NOT NULL"
+        )
+        account_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+
+        company = ctx.env.company
+        journal = ctx.env["account.journal"].search(
+            [
+                ("type", "=", "general"),
+                ("company_id", "=", company.id),
+            ],
+            limit=1,
+        )
+
+        if not journal:
+            raise ValueError("No general journal found for company")
+
+        move_vals = []
+        skipped = 0
+
+        for entry in entries:
+            # Parse date
+            txn_date = entry.get("TxnDate")
+            if txn_date:
+                try:
+                    date = datetime.strptime(txn_date, "%Y-%m-%d").date()
+                except ValueError:
+                    date = datetime.now().date()
+            else:
+                date = datetime.now().date()
+
+            # Get QBO exchange rate (use 1.0 if not present)
+            exchange_rate = float(entry.get("ExchangeRate", 1.0) or 1.0)
+
+            # Build line items
+            lines = entry.get("Line", [])
+            line_vals = []
+            has_error = False
+
+            for line in lines:
+                detail = line.get("JournalEntryLineDetail", {})
+                if not detail:
+                    continue
+
+                account_ref = detail.get("AccountRef", {})
+                if not account_ref:
+                    continue
+
+                # Skip zero-amount lines
+                amount = float(line.get("Amount", 0) or 0)
+                if amount == 0:
+                    continue
+
+                qbo_account_id = int(account_ref.get("value", 0))
+                account_id = account_map.get(qbo_account_id)
+
+                if not account_id:
+                    _logger.warning(
+                        f"Account not found for QBO ID {qbo_account_id} "
+                        f"in journal entry {entry.get('Id')}"
+                    )
+                    has_error = True
+                    break
+
+                posting_type = detail.get("PostingType", "")
+
+                # Apply QBO exchange rate to get home currency amount
+                balance = round(amount * exchange_rate, 2)
+
+                if posting_type == "Debit":
+                    debit = balance
+                    credit = 0.0
+                elif posting_type == "Credit":
+                    debit = 0.0
+                    credit = balance
+                else:
+                    continue
+
+                line_vals.append(
+                    (
+                        0,
+                        0,
+                        {
+                            "account_id": account_id,
+                            "name": line.get("Description", "")
+                            or entry.get("PrivateNote", "")
+                            or "/",
+                            "debit": debit,
+                            "credit": credit,
+                        },
+                    )
+                )
+
+            if has_error or not line_vals:
+                skipped += 1
+                continue
+
+            # Fix rounding differences by adjusting the last credit line
+            total_debit = sum(l[2]["debit"] for l in line_vals)
+            total_credit = sum(l[2]["credit"] for l in line_vals)
+            diff = round(total_debit - total_credit, 2)
+
+            if diff != 0:
+                # Find last credit line and adjust it
+                for i in range(len(line_vals) - 1, -1, -1):
+                    if line_vals[i][2]["credit"] > 0:
+                        line_vals[i][2]["credit"] = round(
+                            line_vals[i][2]["credit"] + diff, 2
+                        )
+                        _logger.debug(
+                            f"Adjusted credit by {diff} to balance JE {entry.get('Id')}"
+                        )
+                        break
+
+            move_vals.append(
+                {
+                    "move_type": "entry",
+                    "journal_id": journal.id,
+                    "date": date,
+                    "ref": f"QBO-{entry.get('Id')}",
+                    "narration": entry.get("PrivateNote", ""),
+                    "line_ids": line_vals,
+                    "qbo_journal_entry_id": int(entry.get("Id")),
+                }
+            )
+
+        _logger.info(f"Transformed {len(move_vals)} journal entries, skipped {skipped}")
+        return move_vals
+
+    @ETL.load()
+    def load_journal_entries(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load journal entries into Odoo."""
+        move_vals = transformed.get("transform_journal_entries", [])
+
+        if not move_vals:
+            _logger.info("No new journal entries to create")
+            return
+
+        # Create moves one by one to handle potential errors
+        created = 0
+        errors = 0
+
+        for vals in move_vals:
+            try:
+                move = ctx.env["account.move"].create(vals)
+                # Post the move
+                move.action_post()
+                created += 1
+            except Exception as e:
+                _logger.error(f"Failed to create journal entry {vals.get('ref')}: {e}")
+                errors += 1
+
+        _logger.info(f"Created {created} journal entries, {errors} errors")
+
+        # Update last sync timestamp
+        connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
+        if connection:
+            connection.last_journal_entry_sync = ctx.env.cr.now()
