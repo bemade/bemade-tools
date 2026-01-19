@@ -511,14 +511,24 @@ class XtupleProductLinker(models.AbstractModel):
         )
         product_by_code = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
 
+        # Get item IDs already assigned to products (to avoid duplicates)
+        ctx.env.cr.execute(
+            "SELECT xtuple_item_id FROM product_product WHERE xtuple_item_id IS NOT NULL"
+        )
+        existing_item_ids = {row[0] for row in ctx.env.cr.fetchall()}
+
         link_updates = []
         for product in products:
+            item_id = product.get("item_id")
+            # Skip if this item ID is already assigned to another product
+            if item_id in existing_item_ids:
+                continue
             item_number = product.get("item_number")
             if item_number and item_number in product_by_code:
                 link_updates.append(
                     {
                         "product_id": product_by_code[item_number],
-                        "xtuple_item_id": product.get("item_id"),
+                        "xtuple_item_id": item_id,
                         "xtuple_item_number": item_number,
                     }
                 )
