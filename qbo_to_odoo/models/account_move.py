@@ -26,3 +26,27 @@ class AccountMove(models.Model):
         copy=False,
         help="QuickBooks Online Bill ID",
     )
+    qbo_payment_id = fields.Integer(
+        string="QBO Payment ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online Payment ID (customer payments)",
+    )
+    qbo_bill_payment_id = fields.Integer(
+        string="QBO Bill Payment ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online BillPayment ID (vendor payments)",
+    )
+    qbo_credit_memo_id = fields.Integer(
+        string="QBO Credit Memo ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online CreditMemo ID (customer refunds)",
+    )
+    qbo_vendor_credit_id = fields.Integer(
+        string="QBO Vendor Credit ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online VendorCredit ID (vendor refunds)",
+    )

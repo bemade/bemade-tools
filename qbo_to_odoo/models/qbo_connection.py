@@ -569,6 +569,20 @@ class QboConnection(models.Model):
 
         return self._success_notification()
 
+    def _execute_all_pipelines(self) -> dict:
+        """Execute all QBO ETL pipelines using the orchestrator."""
+        self.ensure_one()
+
+        orchestrator = PipelineOrchestrator(
+            self.env,
+            source_config=self._get_source_config(),
+            module_filter="qbo_to_odoo",
+        )
+        # For QBO, we pass None as cr since we use API, not database cursor
+        orchestrator.execute_all(cr=None)
+
+        return self._success_notification()
+
     ##################################################################
     # Public Action Methods (Called from UI)
     ##################################################################
@@ -820,20 +834,4 @@ class QboConnection(models.Model):
 
     def action_import_all(self) -> dict:
         """Import all QBO data in the correct order."""
-        return self._execute_pipelines(
-            [
-                "qbo.account.importer",
-                "qbo.bank.journal.processor",  # Create bank journals after accounts
-                "qbo.term.importer",
-                "qbo.tax.importer",
-                "qbo.category.importer",
-                "qbo.customer.importer",
-                "qbo.vendor.importer",
-                "qbo.item.importer",
-                "qbo.invoice.importer",
-                "qbo.bill.importer",
-                "qbo.payment.importer",
-                "qbo.payment.reconciler",  # Reconcile payments after import
-                "qbo.journal.entry.importer",
-            ]
-        )
+        return self._execute_all_pipelines()

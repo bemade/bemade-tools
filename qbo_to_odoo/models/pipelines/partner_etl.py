@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.qbo_to_odoo.models.pipelines.utils import get_api_client
 
 _logger = logging.getLogger(__name__)
 
@@ -29,9 +30,7 @@ class QboCustomerImporter(models.AbstractModel):
     @ETL.extract("Customer")
     def extract_customers(self, ctx: ETLContext) -> List[Dict]:
         """Extract customers from QBO API."""
-        api_client = ctx.get_config("api_client")
-        if not api_client:
-            raise ValueError("API client not found in ETL context")
+        api_client = get_api_client(ctx)
 
         # Get existing QBO customer IDs
         ctx.env.cr.execute(
@@ -40,19 +39,36 @@ class QboCustomerImporter(models.AbstractModel):
         existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
         _logger.info(f"Found {len(existing_ids)} existing customers in Odoo")
 
+        # Get existing partner names for deduplication (cross-system matching)
+        ctx.env.cr.execute(
+            "SELECT LOWER(name) FROM res_partner WHERE name IS NOT NULL AND name != ''"
+        )
+        existing_names = {row[0] for row in ctx.env.cr.fetchall()}
+        _logger.info(
+            f"Found {len(existing_names)} existing partners by name for deduplication"
+        )
+
         # Fetch all customers from QBO
         customers = api_client.query_all(
             entity="Customer", where="Active IN (true, false)", order_by="Id"
         )
 
-        # Filter out already imported
+        # Filter out already imported by QBO ID
         new_customers = [c for c in customers if str(c.get("Id")) not in existing_ids]
 
+        # Filter out customers that match existing partners by name (deduplication)
+        def get_customer_name(c):
+            return (c.get("DisplayName") or c.get("CompanyName") or "").lower()
+
+        deduped_customers = [
+            c for c in new_customers if get_customer_name(c) not in existing_names
+        ]
+
         _logger.info(
-            f"Extracted {len(customers)} customers from QBO, "
-            f"{len(new_customers)} are new"
+            f"Extracted {len(customers)} customers from QBO, {len(new_customers)} new by ID, "
+            f"{len(deduped_customers)} after deduplication by name"
         )
-        return new_customers
+        return deduped_customers
 
     @ETL.transform()
     def transform_customers(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -180,9 +196,7 @@ class QboVendorImporter(models.AbstractModel):
     @ETL.extract("Vendor")
     def extract_vendors(self, ctx: ETLContext) -> List[Dict]:
         """Extract vendors from QBO API."""
-        api_client = ctx.get_config("api_client")
-        if not api_client:
-            raise ValueError("API client not found in ETL context")
+        api_client = get_api_client(ctx)
 
         # Get existing QBO vendor IDs
         ctx.env.cr.execute(
@@ -191,18 +205,36 @@ class QboVendorImporter(models.AbstractModel):
         existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
         _logger.info(f"Found {len(existing_ids)} existing vendors in Odoo")
 
+        # Get existing partner names for deduplication (cross-system matching)
+        ctx.env.cr.execute(
+            "SELECT LOWER(name) FROM res_partner WHERE name IS NOT NULL AND name != ''"
+        )
+        existing_names = {row[0] for row in ctx.env.cr.fetchall()}
+        _logger.info(
+            f"Found {len(existing_names)} existing partners by name for deduplication"
+        )
+
         # Fetch all vendors from QBO
         vendors = api_client.query_all(
             entity="Vendor", where="Active IN (true, false)", order_by="Id"
         )
 
-        # Filter out already imported
+        # Filter out already imported by QBO ID
         new_vendors = [v for v in vendors if str(v.get("Id")) not in existing_ids]
 
+        # Filter out vendors that match existing partners by name (deduplication)
+        def get_vendor_name(v):
+            return (v.get("DisplayName") or v.get("CompanyName") or "").lower()
+
+        deduped_vendors = [
+            v for v in new_vendors if get_vendor_name(v) not in existing_names
+        ]
+
         _logger.info(
-            f"Extracted {len(vendors)} vendors from QBO, " f"{len(new_vendors)} are new"
+            f"Extracted {len(vendors)} vendors from QBO, {len(new_vendors)} new by ID, "
+            f"{len(deduped_vendors)} after deduplication by name"
         )
-        return new_vendors
+        return deduped_vendors
 
     @ETL.transform()
     def transform_vendors(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -311,3 +343,169 @@ class QboVendorImporter(models.AbstractModel):
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
         if connection:
             connection.last_vendor_sync = ctx.env.cr.now()
+
+
+@ETL.pipeline(
+    target_model="res.partner",
+    importer_name="qbo.customer.linker",
+    sap_source="Customer",
+    depends_on=["qbo.customer.importer"],
+)
+class QboCustomerLinker(models.AbstractModel):
+    """ETL Pipeline for linking existing partners to QBO Customers by name."""
+
+    _name = "qbo.customer.linker"
+    _description = "QBO Customer Linker"
+
+    @ETL.extract("Customer")
+    def extract_customers_for_linking(self, ctx: ETLContext) -> List[Dict]:
+        """Extract customers from QBO API that need linking."""
+        api_client = get_api_client(ctx)
+
+        # Fetch all customers from QBO
+        customers = api_client.query_all(
+            entity="Customer", where="Active IN (true, false)", order_by="Id"
+        )
+
+        _logger.info(f"Extracted {len(customers)} customers for linking")
+        return customers
+
+    @ETL.transform()
+    def transform_customers_for_linking(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> List[Dict]:
+        """Find existing partners by name and prepare link updates."""
+        customers = extracted.get("extract_customers_for_linking", [])
+
+        # Build lookup of existing partners by name that don't have qbo_customer_id
+        ctx.env.cr.execute(
+            """
+            SELECT id, LOWER(name) FROM res_partner
+            WHERE name IS NOT NULL AND name != ''
+            AND qbo_customer_id IS NULL
+            """
+        )
+        partner_by_name = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
+
+        link_updates = []
+        for customer in customers:
+            name = customer.get("DisplayName") or customer.get("CompanyName") or ""
+            if name and name.lower() in partner_by_name:
+                link_updates.append(
+                    {
+                        "partner_id": partner_by_name[name.lower()],
+                        "qbo_customer_id": int(customer.get("Id")),
+                        "name": name,
+                    }
+                )
+
+        _logger.info(f"Found {len(link_updates)} partners to link as customers by name")
+        return link_updates
+
+    @ETL.load()
+    def load_customer_links(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Update existing partners with QBO customer IDs."""
+        link_updates = transformed.get("transform_customers_for_linking", [])
+
+        if not link_updates:
+            _logger.info("No partners to link as customers")
+            return
+
+        for update in link_updates:
+            ctx.env.cr.execute(
+                """
+                UPDATE res_partner
+                SET qbo_customer_id = %s, customer_rank = GREATEST(customer_rank, 1)
+                WHERE id = %s
+                """,
+                (update["qbo_customer_id"], update["partner_id"]),
+            )
+            _logger.debug(
+                f"Linked partner {update['partner_id']} (name={update['name']}) "
+                f"to QBO customer {update['qbo_customer_id']}"
+            )
+
+        _logger.info(f"Linked {len(link_updates)} existing partners to QBO customers")
+
+
+@ETL.pipeline(
+    target_model="res.partner",
+    importer_name="qbo.vendor.linker",
+    sap_source="Vendor",
+    depends_on=["qbo.vendor.importer"],
+)
+class QboVendorLinker(models.AbstractModel):
+    """ETL Pipeline for linking existing partners to QBO Vendors by name."""
+
+    _name = "qbo.vendor.linker"
+    _description = "QBO Vendor Linker"
+
+    @ETL.extract("Vendor")
+    def extract_vendors_for_linking(self, ctx: ETLContext) -> List[Dict]:
+        """Extract vendors from QBO API that need linking."""
+        api_client = get_api_client(ctx)
+
+        # Fetch all vendors from QBO
+        vendors = api_client.query_all(
+            entity="Vendor", where="Active IN (true, false)", order_by="Id"
+        )
+
+        _logger.info(f"Extracted {len(vendors)} vendors for linking")
+        return vendors
+
+    @ETL.transform()
+    def transform_vendors_for_linking(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> List[Dict]:
+        """Find existing partners by name and prepare link updates."""
+        vendors = extracted.get("extract_vendors_for_linking", [])
+
+        # Build lookup of existing partners by name that don't have qbo_vendor_id
+        ctx.env.cr.execute(
+            """
+            SELECT id, LOWER(name) FROM res_partner
+            WHERE name IS NOT NULL AND name != ''
+            AND qbo_vendor_id IS NULL
+            """
+        )
+        partner_by_name = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
+
+        link_updates = []
+        for vendor in vendors:
+            name = vendor.get("DisplayName") or vendor.get("CompanyName") or ""
+            if name and name.lower() in partner_by_name:
+                link_updates.append(
+                    {
+                        "partner_id": partner_by_name[name.lower()],
+                        "qbo_vendor_id": int(vendor.get("Id")),
+                        "name": name,
+                    }
+                )
+
+        _logger.info(f"Found {len(link_updates)} partners to link as vendors by name")
+        return link_updates
+
+    @ETL.load()
+    def load_vendor_links(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Update existing partners with QBO vendor IDs."""
+        link_updates = transformed.get("transform_vendors_for_linking", [])
+
+        if not link_updates:
+            _logger.info("No partners to link as vendors")
+            return
+
+        for update in link_updates:
+            ctx.env.cr.execute(
+                """
+                UPDATE res_partner
+                SET qbo_vendor_id = %s, supplier_rank = GREATEST(supplier_rank, 1)
+                WHERE id = %s
+                """,
+                (update["qbo_vendor_id"], update["partner_id"]),
+            )
+            _logger.debug(
+                f"Linked partner {update['partner_id']} (name={update['name']}) "
+                f"to QBO vendor {update['qbo_vendor_id']}"
+            )
+
+        _logger.info(f"Linked {len(link_updates)} existing partners to QBO vendors")

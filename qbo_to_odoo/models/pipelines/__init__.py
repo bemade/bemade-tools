@@ -6,8 +6,13 @@ from . import partner_etl
 from . import payment_term_etl
 from . import product_etl
 from . import tax_etl
+from . import estimate_etl
+from . import purchase_order_etl
 from . import invoice_etl
 from . import bill_etl
+from . import credit_memo_etl
+from . import vendor_credit_etl
 from . import payment_etl
-from . import payment_reconcile_etl
 from . import journal_entry_etl
+from . import employee_etl
+from . import expense_etl

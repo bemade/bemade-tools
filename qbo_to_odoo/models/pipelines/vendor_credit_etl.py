@@ -1,12 +1,12 @@
-"""QuickBooks Online Bill ETL Pipeline
+"""QuickBooks Online VendorCredit ETL Pipeline
 
-This module handles the migration of Bills (Vendor Bills) from QBO to Odoo
-using the ETL framework.
+This module handles the migration of VendorCredits from QBO to Odoo
+using the ETL framework. VendorCredits become in_refund account.move records.
 """
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from odoo import models
 
@@ -19,46 +19,46 @@ _logger = logging.getLogger(__name__)
 
 @ETL.pipeline(
     target_model="account.move",
-    importer_name="qbo.bill.importer",
-    sap_source="Bill",
-    depends_on=[
-        "qbo.vendor.importer",
-        "qbo.item.importer",
-        "qbo.tax.importer",
-        "qbo.purchase.order.importer",
-    ],
+    importer_name="qbo.vendor.credit.importer",
+    sap_source="VendorCredit",
+    depends_on=["qbo.vendor.importer", "qbo.item.importer", "qbo.tax.importer"],
 )
-class QboBillImporter(models.AbstractModel):
-    """ETL Pipeline for importing QBO Bills."""
+class QboVendorCreditImporter(models.AbstractModel):
+    """ETL Pipeline for importing QBO VendorCredits."""
 
-    _name = "qbo.bill.importer"
-    _description = "QBO Bill Importer"
+    _name = "qbo.vendor.credit.importer"
+    _description = "QBO Vendor Credit Importer"
 
-    @ETL.extract("Bill")
-    def extract_bills(self, ctx: ETLContext) -> List[Dict]:
-        """Extract bills from QBO API."""
+    @ETL.extract("VendorCredit")
+    def extract_vendor_credits(self, ctx: ETLContext) -> List[Dict]:
+        """Extract vendor credits from QBO API."""
         api_client = get_api_client(ctx)
 
-        # Get existing QBO bill IDs
+        # Get existing QBO vendor credit IDs
         ctx.env.cr.execute(
-            "SELECT qbo_bill_id FROM account_move WHERE qbo_bill_id IS NOT NULL"
+            "SELECT qbo_vendor_credit_id FROM account_move WHERE qbo_vendor_credit_id IS NOT NULL"
         )
         existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
-        _logger.info(f"Found {len(existing_ids)} existing bills in Odoo")
+        _logger.info(f"Found {len(existing_ids)} existing vendor credits in Odoo")
 
-        # Fetch all bills from QBO
-        bills = api_client.query_all(entity="Bill", order_by="Id")
+        # Fetch all vendor credits from QBO
+        vendor_credits = api_client.query_all(entity="VendorCredit", order_by="Id")
 
         # Filter out already imported
-        new_bills = [bill for bill in bills if str(bill.get("Id")) not in existing_ids]
+        new_vendor_credits = [
+            vc for vc in vendor_credits if str(vc.get("Id")) not in existing_ids
+        ]
 
-        _logger.info(f"Extracted {len(bills)} bills from QBO, {len(new_bills)} are new")
-        return new_bills
+        _logger.info(
+            f"Extracted {len(vendor_credits)} vendor credits from QBO, "
+            f"{len(new_vendor_credits)} are new"
+        )
+        return new_vendor_credits
 
     @ETL.transform()
-    def transform_bills(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
-        """Transform QBO bills into Odoo account.move values."""
-        bills = extracted.get("extract_bills", [])
+    def transform_vendor_credits(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform QBO vendor credits into Odoo account.move values."""
+        vendor_credits = extracted.get("extract_vendor_credits", [])
 
         # Build lookups
         ctx.env.cr.execute(
@@ -86,12 +86,6 @@ class QboBillImporter(models.AbstractModel):
         )
         tax_rate_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
 
-        # Build purchase order lookup for linking bills to POs
-        ctx.env.cr.execute(
-            "SELECT qbo_purchase_order_id, id FROM purchase_order WHERE qbo_purchase_order_id IS NOT NULL"
-        )
-        po_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
-
         company = ctx.env.company
 
         # Find purchase journal
@@ -105,24 +99,23 @@ class QboBillImporter(models.AbstractModel):
         move_vals = []
         skipped = 0
 
-        for bill in bills:
+        for vc in vendor_credits:
             try:
                 # Get vendor
-                vendor_ref = bill.get("VendorRef", {})
+                vendor_ref = vc.get("VendorRef", {})
                 qbo_vendor_id = int(vendor_ref.get("value", 0))
                 partner_id = vendor_map.get(qbo_vendor_id)
 
                 if not partner_id:
                     _logger.warning(
                         f"Vendor not found for QBO ID {qbo_vendor_id} "
-                        f"in bill {bill.get('Id')}"
+                        f"in vendor credit {vc.get('Id')}"
                     )
                     skipped += 1
                     continue
 
                 # Parse dates
-                txn_date = bill.get("TxnDate")
-                due_date = bill.get("DueDate")
+                txn_date = vc.get("TxnDate")
 
                 invoice_date = None
                 if txn_date:
@@ -131,18 +124,9 @@ class QboBillImporter(models.AbstractModel):
                     except ValueError:
                         invoice_date = datetime.now().date()
 
-                invoice_date_due = None
-                if due_date:
-                    try:
-                        invoice_date_due = datetime.strptime(
-                            due_date, "%Y-%m-%d"
-                        ).date()
-                    except ValueError:
-                        pass
-
                 # Get currency
                 currency_id = company.currency_id.id
-                currency_ref = bill.get("CurrencyRef", {})
+                currency_ref = vc.get("CurrencyRef", {})
                 if currency_ref:
                     currency_code = currency_ref.get("value")
                     if currency_code:
@@ -152,79 +136,52 @@ class QboBillImporter(models.AbstractModel):
                         if currency:
                             currency_id = currency.id
 
-                # Build bill lines
+                # Build vendor credit lines
                 line_vals = []
-                for line in bill.get("Line", []):
-                    line_data = self._transform_bill_line(
-                        line, product_map, account_map, tax_map, tax_rate_map, bill, ctx
+                for line in vc.get("Line", []):
+                    line_data = self._transform_vendor_credit_line(
+                        line, product_map, account_map, tax_map, tax_rate_map, vc, ctx
                     )
                     if line_data:
                         line_vals.append((0, 0, line_data))
 
                 if not line_vals:
-                    _logger.warning(f"No valid lines for bill {bill.get('Id')}")
+                    _logger.warning(f"No valid lines for vendor credit {vc.get('Id')}")
                     skipped += 1
                     continue
 
-                # Check total amount to determine if this is a refund
-                total_amt = float(bill.get("TotalAmt", 0) or 0)
-                move_type = "in_refund" if total_amt < 0 else "in_invoice"
-
-                # If refund, make line amounts positive
-                if move_type == "in_refund":
-                    for line_tuple in line_vals:
-                        line_data = line_tuple[2]
-                        if "price_unit" in line_data:
-                            line_data["price_unit"] = abs(line_data["price_unit"])
-
-                # Check for linked PurchaseOrder
-                purchase_order_id = None
-                for linked in bill.get("LinkedTxn", []):
-                    if linked.get("TxnType") == "PurchaseOrder":
-                        txn_id = str(linked.get("TxnId", ""))
-                        if txn_id in po_map:
-                            purchase_order_id = po_map[txn_id]
-                            break
-
                 vals = {
-                    "move_type": move_type,
+                    "move_type": "in_refund",
                     "journal_id": journal.id,
                     "partner_id": partner_id,
                     "invoice_date": invoice_date,
-                    "invoice_date_due": invoice_date_due,
                     "currency_id": currency_id,
-                    "ref": bill.get("DocNumber", ""),
-                    "narration": bill.get("Memo", ""),
+                    "ref": vc.get("DocNumber", ""),
+                    "narration": vc.get("Memo", ""),
                     "invoice_line_ids": line_vals,
-                    "qbo_bill_id": int(bill.get("Id")),
+                    "qbo_vendor_credit_id": int(vc.get("Id", 0)),
                 }
-
-                # Link to purchase order if found
-                if purchase_order_id:
-                    vals["invoice_origin"] = (
-                        ctx.env["purchase.order"].browse(purchase_order_id).name
-                    )
 
                 move_vals.append(vals)
 
             except Exception as e:
-                _logger.error(f"Error transforming bill {bill.get('Id')}: {e}")
+                _logger.error(f"Error transforming vendor credit {vc.get('Id')}: {e}")
                 skipped += 1
 
-        _logger.info(f"Transformed {len(move_vals)} bills, skipped {skipped}")
+        _logger.info(f"Transformed {len(move_vals)} vendor credits, skipped {skipped}")
         return move_vals
 
-    def _transform_bill_line(
+    def _transform_vendor_credit_line(
         self,
         line: Dict,
         product_map: Dict,
         account_map: Dict,
         tax_map: Dict,
         tax_rate_map: Dict,
-        bill: Dict,
+        vendor_credit: Dict,
         ctx: ETLContext,
     ) -> Optional[Dict]:
-        """Transform a single bill line."""
+        """Transform a single vendor credit line."""
         detail_type = line.get("DetailType", "")
 
         # Handle item-based expense lines
@@ -236,11 +193,10 @@ class QboBillImporter(models.AbstractModel):
             # Get product
             item_ref = detail.get("ItemRef", {})
             item_value = item_ref.get("value", "0") if item_ref else "0"
-            # Handle special QBO item IDs like SHIPPING_ITEM_ID
             try:
                 qbo_item_id = int(item_value)
             except ValueError:
-                qbo_item_id = 0  # Special items like SHIPPING_ITEM_ID
+                qbo_item_id = 0
             product_id = product_map.get(qbo_item_id)
 
             # Get quantity and price
@@ -250,6 +206,9 @@ class QboBillImporter(models.AbstractModel):
 
             if not unit_price and amount and qty:
                 unit_price = amount / qty
+
+            # Vendor credits should have positive amounts in Odoo
+            unit_price = abs(unit_price)
 
             # Get tax from TaxCodeRef
             tax_ids = []
@@ -288,6 +247,8 @@ class QboBillImporter(models.AbstractModel):
             account_id = account_map.get(qbo_account_id)
 
             amount = float(line.get("Amount", 0) or 0)
+            # Vendor credits should have positive amounts in Odoo
+            amount = abs(amount)
 
             # Get tax from TaxCodeRef
             tax_ids = []
@@ -319,12 +280,12 @@ class QboBillImporter(models.AbstractModel):
         return None
 
     @ETL.load()
-    def load_bills(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Load bills into Odoo."""
-        move_vals = transformed.get("transform_bills", [])
+    def load_vendor_credits(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Load vendor credits into Odoo."""
+        move_vals = transformed.get("transform_vendor_credits", [])
 
         if not move_vals:
-            _logger.info("No new bills to create")
+            _logger.info("No new vendor credits to create")
             return
 
         created = 0
@@ -336,20 +297,18 @@ class QboBillImporter(models.AbstractModel):
                 move = ctx.env["account.move"].create(vals)
                 created += 1
 
-                # Try to post the bill
                 try:
                     move.action_post()
                     posted += 1
                 except Exception as e:
-                    _logger.warning(f"Could not post bill {vals.get('ref')}: {e}")
+                    _logger.warning(
+                        f"Could not post vendor credit {vals.get('ref')}: {e}"
+                    )
 
             except Exception as e:
-                _logger.error(f"Failed to create bill {vals.get('ref')}: {e}")
+                _logger.error(f"Failed to create vendor credit {vals.get('ref')}: {e}")
                 errors += 1
 
-        _logger.info(f"Created {created} bills ({posted} posted), {errors} errors")
-
-        # Update last sync timestamp
-        connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
-        if connection:
-            connection.last_bill_sync = ctx.env.cr.now()
+        _logger.info(
+            f"Created {created} vendor credits ({posted} posted), {errors} errors"
+        )
