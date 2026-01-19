@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.qbo_to_odoo.models.pipelines.utils import get_api_client
 
 _logger = logging.getLogger(__name__)
 
@@ -29,9 +30,7 @@ class QboItemImporter(models.AbstractModel):
     @ETL.extract("Item")
     def extract_items(self, ctx: ETLContext) -> List[Dict]:
         """Extract items from QBO API."""
-        api_client = ctx.get_config("api_client")
-        if not api_client:
-            raise ValueError("API client not found in ETL context")
+        api_client = get_api_client(ctx)
 
         # Get existing QBO item IDs
         ctx.env.cr.execute(
@@ -40,18 +39,35 @@ class QboItemImporter(models.AbstractModel):
         existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
         _logger.info(f"Found {len(existing_ids)} existing items in Odoo")
 
+        # Get existing default_codes for deduplication (cross-system matching)
+        ctx.env.cr.execute(
+            "SELECT default_code FROM product_product WHERE default_code IS NOT NULL AND default_code != ''"
+        )
+        existing_default_codes = {row[0] for row in ctx.env.cr.fetchall()}
+        _logger.info(
+            f"Found {len(existing_default_codes)} existing products by default_code for deduplication"
+        )
+
         # Fetch all items from QBO
         items = api_client.query_all(
             entity="Item", where="Active IN (true, false)", order_by="Id"
         )
 
-        # Filter out already imported
+        # Filter out already imported by QBO ID
         new_items = [item for item in items if str(item.get("Id")) not in existing_ids]
 
+        # Filter out items that match existing products by SKU (deduplication)
+        deduped_items = [
+            item
+            for item in new_items
+            if not item.get("Sku") or item.get("Sku") not in existing_default_codes
+        ]
+
         _logger.info(
-            f"Extracted {len(items)} items from QBO, " f"{len(new_items)} are new"
+            f"Extracted {len(items)} items from QBO, {len(new_items)} new by ID, "
+            f"{len(deduped_items)} after deduplication by SKU"
         )
-        return new_items
+        return deduped_items
 
     @ETL.transform()
     def transform_items(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -152,3 +168,85 @@ class QboItemImporter(models.AbstractModel):
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
         if connection:
             connection.last_product_sync = ctx.env.cr.now()
+
+
+@ETL.pipeline(
+    target_model="product.product",
+    importer_name="qbo.item.linker",
+    sap_source="Item",
+    depends_on=["qbo.item.importer"],
+)
+class QboItemLinker(models.AbstractModel):
+    """ETL Pipeline for linking existing products to QBO Items by default_code."""
+
+    _name = "qbo.item.linker"
+    _description = "QBO Item Linker"
+
+    @ETL.extract("Item")
+    def extract_items_for_linking(self, ctx: ETLContext) -> List[Dict]:
+        """Extract items from QBO API that need linking."""
+        api_client = get_api_client(ctx)
+
+        # Fetch all items from QBO that have a SKU
+        items = api_client.query_all(
+            entity="Item", where="Active IN (true, false)", order_by="Id"
+        )
+
+        # Filter to items with SKU that don't have qbo_item_id set yet
+        items_with_sku = [item for item in items if item.get("Sku")]
+
+        _logger.info(f"Extracted {len(items_with_sku)} items with SKU for linking")
+        return items_with_sku
+
+    @ETL.transform()
+    def transform_items_for_linking(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> List[Dict]:
+        """Find existing products by default_code and prepare link updates."""
+        items = extracted.get("extract_items_for_linking", [])
+
+        # Build lookup of existing products by default_code that don't have qbo_item_id
+        ctx.env.cr.execute(
+            """
+            SELECT id, default_code FROM product_product
+            WHERE default_code IS NOT NULL AND default_code != ''
+            AND qbo_item_id IS NULL
+            """
+        )
+        product_by_code = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
+
+        link_updates = []
+        for item in items:
+            sku = item.get("Sku")
+            if sku and sku in product_by_code:
+                link_updates.append(
+                    {
+                        "product_id": product_by_code[sku],
+                        "qbo_item_id": int(item.get("Id")),
+                        "default_code": sku,
+                    }
+                )
+
+        _logger.info(f"Found {len(link_updates)} products to link by default_code")
+        return link_updates
+
+    @ETL.load()
+    def load_item_links(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Update existing products with QBO item IDs."""
+        link_updates = transformed.get("transform_items_for_linking", [])
+
+        if not link_updates:
+            _logger.info("No products to link")
+            return
+
+        for update in link_updates:
+            ctx.env.cr.execute(
+                "UPDATE product_product SET qbo_item_id = %s WHERE id = %s",
+                (update["qbo_item_id"], update["product_id"]),
+            )
+            _logger.debug(
+                f"Linked product {update['product_id']} (default_code={update['default_code']}) "
+                f"to QBO item {update['qbo_item_id']}"
+            )
+
+        _logger.info(f"Linked {len(link_updates)} existing products to QBO items")

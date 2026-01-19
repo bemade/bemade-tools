@@ -242,6 +242,15 @@ class XtuplePartnerCustomerImporter(models.AbstractModel):
         existing_cust_ids = tuple([row[0] for row in ctx.env.cr.fetchall()])
         _logger.info(f"Found {len(existing_cust_ids)} existing customers in Odoo")
 
+        # Get existing partner names for deduplication (cross-system matching)
+        ctx.env.cr.execute(
+            "SELECT LOWER(name) FROM res_partner WHERE name IS NOT NULL AND name != ''"
+        )
+        existing_names = {row[0] for row in ctx.env.cr.fetchall()}
+        _logger.info(
+            f"Found {len(existing_names)} existing partners by name for deduplication"
+        )
+
         select_clause = f"""
         SELECT
             {CUSTOMER_SELECT},
@@ -261,8 +270,19 @@ class XtuplePartnerCustomerImporter(models.AbstractModel):
         ctx.cr.execute(sql)
         customers = ctx.cr.dictfetchall()
 
-        _logger.info(f"Extracted {len(customers)} new customers from xTuple")
-        return customers
+        # Filter out customers that match existing partners by name (deduplication)
+        deduped_customers = [
+            c
+            for c in customers
+            if not c.get("cust_name")
+            or c.get("cust_name", "").lower() not in existing_names
+        ]
+
+        _logger.info(
+            f"Extracted {len(customers)} customers from xTuple, "
+            f"{len(deduped_customers)} after deduplication by name"
+        )
+        return deduped_customers
 
     @ETL.transform()
     def transform_customers(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -343,6 +363,15 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
         existing_vend_ids = tuple([row[0] for row in ctx.env.cr.fetchall()])
         _logger.info(f"Found {len(existing_vend_ids)} existing vendors in Odoo")
 
+        # Get existing partner names for deduplication (cross-system matching)
+        ctx.env.cr.execute(
+            "SELECT LOWER(name) FROM res_partner WHERE name IS NOT NULL AND name != ''"
+        )
+        existing_names = {row[0] for row in ctx.env.cr.fetchall()}
+        _logger.info(
+            f"Found {len(existing_names)} existing partners by name for deduplication"
+        )
+
         select_clause = f"""
         SELECT
             {VENDOR_SELECT},
@@ -362,8 +391,19 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
         ctx.cr.execute(sql)
         vendors = ctx.cr.dictfetchall()
 
-        _logger.info(f"Extracted {len(vendors)} new vendors from xTuple")
-        return vendors
+        # Filter out vendors that match existing partners by name (deduplication)
+        deduped_vendors = [
+            v
+            for v in vendors
+            if not v.get("vend_name")
+            or v.get("vend_name", "").lower() not in existing_names
+        ]
+
+        _logger.info(
+            f"Extracted {len(vendors)} vendors from xTuple, "
+            f"{len(deduped_vendors)} after deduplication by name"
+        )
+        return deduped_vendors
 
     @ETL.transform()
     def transform_vendors(self, ctx: ETLContext, extracted: Dict) -> Dict[str, Any]:
@@ -883,3 +923,194 @@ class XtuplePartnerPostprocessor(models.AbstractModel):
             """
         )
         _logger.info("Set partner ranks based on xTuple partner type")
+
+
+# =============================================================================
+# Partner Linker Pipelines (for deduplication)
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="res.partner",
+    importer_name="xtuple.partner.customer.linker",
+    sap_source="custinfo",
+    depends_on=["xtuple.partner.customer.importer"],
+)
+class XtuplePartnerCustomerLinker(models.AbstractModel):
+    """ETL Pipeline for linking existing partners to xTuple customers by name."""
+
+    _name = "xtuple.partner.customer.linker"
+    _description = "xTuple Customer Linker"
+
+    @ETL.extract("custinfo")
+    def extract_customers_for_linking(self, ctx: ETLContext) -> List[Dict]:
+        """Extract customers from xTuple that need linking."""
+        select_clause = """
+        SELECT
+            cust_id,
+            cust_name
+        FROM custinfo
+        WHERE cust_name IS NOT NULL AND cust_name != ''
+        """
+        ctx.cr.execute(select_clause)
+        customers = ctx.cr.dictfetchall()
+
+        _logger.info(f"Extracted {len(customers)} customers for linking")
+        return customers
+
+    @ETL.transform()
+    def transform_customers_for_linking(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> List[Dict]:
+        """Find existing partners by name and prepare link updates."""
+        customers = extracted.get("extract_customers_for_linking", [])
+
+        # Build lookup of existing partners by name that don't have xtuple_cust_id
+        ctx.env.cr.execute(
+            """
+            SELECT id, LOWER(name) FROM res_partner
+            WHERE name IS NOT NULL AND name != ''
+            AND xtuple_cust_id IS NULL
+            """
+        )
+        partner_by_name = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
+
+        link_updates = []
+        for customer in customers:
+            name = customer.get("cust_name", "")
+            if name and name.lower() in partner_by_name:
+                link_updates.append(
+                    {
+                        "partner_id": partner_by_name[name.lower()],
+                        "xtuple_cust_id": customer.get("cust_id"),
+                        "name": name,
+                    }
+                )
+
+        _logger.info(f"Found {len(link_updates)} partners to link as customers by name")
+        return link_updates
+
+    @ETL.load()
+    def load_customer_links(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Update existing partners with xTuple customer IDs."""
+        link_updates = transformed.get("transform_customers_for_linking", [])
+
+        if not link_updates:
+            _logger.info("No partners to link as customers")
+            return
+
+        for update in link_updates:
+            ctx.env.cr.execute(
+                """
+                UPDATE res_partner
+                SET xtuple_cust_id = %s, xtuple_partner_type = COALESCE(
+                    CASE
+                        WHEN xtuple_partner_type = 'vendor' THEN 'both'
+                        ELSE 'customer'
+                    END,
+                    'customer'
+                ), customer_rank = GREATEST(customer_rank, 1)
+                WHERE id = %s
+                """,
+                (update["xtuple_cust_id"], update["partner_id"]),
+            )
+            _logger.debug(
+                f"Linked partner {update['partner_id']} (name={update['name']}) "
+                f"to xTuple customer {update['xtuple_cust_id']}"
+            )
+
+        _logger.info(
+            f"Linked {len(link_updates)} existing partners to xTuple customers"
+        )
+
+
+@ETL.pipeline(
+    target_model="res.partner",
+    importer_name="xtuple.partner.vendor.linker",
+    sap_source="vendinfo",
+    depends_on=["xtuple.partner.vendor.importer"],
+)
+class XtuplePartnerVendorLinker(models.AbstractModel):
+    """ETL Pipeline for linking existing partners to xTuple vendors by name."""
+
+    _name = "xtuple.partner.vendor.linker"
+    _description = "xTuple Vendor Linker"
+
+    @ETL.extract("vendinfo")
+    def extract_vendors_for_linking(self, ctx: ETLContext) -> List[Dict]:
+        """Extract vendors from xTuple that need linking."""
+        select_clause = """
+        SELECT
+            vend_id,
+            vend_name
+        FROM vendinfo
+        WHERE vend_name IS NOT NULL AND vend_name != ''
+        """
+        ctx.cr.execute(select_clause)
+        vendors = ctx.cr.dictfetchall()
+
+        _logger.info(f"Extracted {len(vendors)} vendors for linking")
+        return vendors
+
+    @ETL.transform()
+    def transform_vendors_for_linking(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> List[Dict]:
+        """Find existing partners by name and prepare link updates."""
+        vendors = extracted.get("extract_vendors_for_linking", [])
+
+        # Build lookup of existing partners by name that don't have xtuple_vend_id
+        ctx.env.cr.execute(
+            """
+            SELECT id, LOWER(name) FROM res_partner
+            WHERE name IS NOT NULL AND name != ''
+            AND xtuple_vend_id IS NULL
+            """
+        )
+        partner_by_name = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
+
+        link_updates = []
+        for vendor in vendors:
+            name = vendor.get("vend_name", "")
+            if name and name.lower() in partner_by_name:
+                link_updates.append(
+                    {
+                        "partner_id": partner_by_name[name.lower()],
+                        "xtuple_vend_id": vendor.get("vend_id"),
+                        "name": name,
+                    }
+                )
+
+        _logger.info(f"Found {len(link_updates)} partners to link as vendors by name")
+        return link_updates
+
+    @ETL.load()
+    def load_vendor_links(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Update existing partners with xTuple vendor IDs."""
+        link_updates = transformed.get("transform_vendors_for_linking", [])
+
+        if not link_updates:
+            _logger.info("No partners to link as vendors")
+            return
+
+        for update in link_updates:
+            ctx.env.cr.execute(
+                """
+                UPDATE res_partner
+                SET xtuple_vend_id = %s, xtuple_partner_type = COALESCE(
+                    CASE
+                        WHEN xtuple_partner_type = 'customer' THEN 'both'
+                        ELSE 'vendor'
+                    END,
+                    'vendor'
+                ), supplier_rank = GREATEST(supplier_rank, 1)
+                WHERE id = %s
+                """,
+                (update["xtuple_vend_id"], update["partner_id"]),
+            )
+            _logger.debug(
+                f"Linked partner {update['partner_id']} (name={update['name']}) "
+                f"to xTuple vendor {update['xtuple_vend_id']}"
+            )
+
+        _logger.info(f"Linked {len(link_updates)} existing partners to xTuple vendors")

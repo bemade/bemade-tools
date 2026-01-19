@@ -297,7 +297,9 @@ class XtupleDatabase(models.Model):
 
         with self.get_cursor() as cr:
             orchestrator = PipelineOrchestrator(
-                self.env, source_config=self._get_source_config()
+                self.env,
+                source_config=self._get_source_config(),
+                module_filter="xtuple_to_odoo",
             )
             try:
                 orchestrator.execute_all(cr)

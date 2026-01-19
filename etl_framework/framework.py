@@ -181,6 +181,7 @@ class ETLPipeline:
         depends_on: List of Odoo model names this pipeline depends on.
         multiprocessing: Configuration for multiprocessing behavior.
         importer_model_name: Odoo model name of the importer (set by decorator).
+        source_module: Odoo addon module name (e.g., 'xtuple_to_odoo').
         extract_methods: List of registered extraction methods.
         transform_methods: List of registered transformation methods.
         load_methods: List of registered loading methods.
@@ -193,6 +194,7 @@ class ETLPipeline:
         default_factory=MultiprocessingConfig
     )
     importer_model_name: Optional[str] = None
+    source_module: Optional[str] = None
 
     # Registered methods (populated by decorators)
     extract_methods: List[ETLMethod] = field(default_factory=list)
@@ -291,11 +293,27 @@ class ETL:
                 chunk_size=chunk_size,
                 max_workers=max_workers,
             )
+
+            # Extract Odoo addon module name from class's __module__
+            # e.g., 'odoo.addons.xtuple_to_odoo.models.pipelines.product_etl'
+            #       -> 'xtuple_to_odoo'
+            class_module_attr = getattr(importer_class, "__module__", None)
+            class_module = (
+                class_module_attr if isinstance(class_module_attr, str) else ""
+            )
+            source_module = None
+            if class_module and ".addons." in class_module:
+                # Extract the addon name (part after 'addons.')
+                parts = class_module.split(".addons.")
+                if len(parts) > 1:
+                    source_module = parts[1].split(".")[0]
+
             pipeline = ETLPipeline(
                 target_model=target_model,
                 sap_source=sap_source or "",
                 depends_on=depends_on or [],
                 multiprocessing=mp_config,
+                source_module=source_module,
             )
 
             # Inject _name attribute
@@ -415,6 +433,22 @@ class ETL:
             Dictionary mapping model names to pipelines.
         """
         return cls._pipelines.copy()
+
+    @classmethod
+    def get_pipelines_by_module(cls, module_name: str) -> Dict[str, ETLPipeline]:
+        """Get all pipelines registered by a specific Odoo addon module.
+
+        Args:
+            module_name: Odoo addon module name (e.g., 'xtuple_to_odoo').
+
+        Returns:
+            Dictionary mapping importer names to pipelines for the given module.
+        """
+        return {
+            name: pipeline
+            for name, pipeline in cls._pipelines.items()
+            if pipeline.source_module == module_name
+        }
 
 
 # =============================================================================
@@ -785,18 +819,30 @@ class PipelineOrchestrator:
         env: Odoo environment.
         pipelines: Dictionary of all registered pipelines.
         source_config: Optional source-specific configuration dictionary.
+        module_filter: Optional Odoo addon module name to filter pipelines.
     """
 
-    def __init__(self, env: Any, source_config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        env: Any,
+        source_config: Optional[Dict[str, Any]] = None,
+        module_filter: Optional[str] = None,
+    ):
         """Initialize the orchestrator.
 
         Args:
             env: Odoo environment.
             source_config: Optional dictionary of source-specific configuration.
+            module_filter: Optional Odoo addon module name to filter pipelines.
+                          If provided, only pipelines from this module will be executed.
         """
         self.env = env
         self.source_config = source_config
-        self.pipelines = ETL.get_all_pipelines()
+        self.module_filter = module_filter
+        if module_filter:
+            self.pipelines = ETL.get_pipelines_by_module(module_filter)
+        else:
+            self.pipelines = ETL.get_all_pipelines()
 
     def execute_all(self, cr: Any) -> None:
         """Execute all registered pipelines in dependency order.

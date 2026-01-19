@@ -172,6 +172,15 @@ class XtupleProductImporter(models.AbstractModel):
         existing_item_ids = [row[0] for row in ctx.env.cr.fetchall()]
         _logger.info(f"Found {len(existing_item_ids)} existing products in Odoo")
 
+        # Get existing default_codes for deduplication (cross-system matching)
+        ctx.env.cr.execute(
+            "SELECT default_code FROM product_product WHERE default_code IS NOT NULL AND default_code != ''"
+        )
+        existing_default_codes = {row[0] for row in ctx.env.cr.fetchall()}
+        _logger.info(
+            f"Found {len(existing_default_codes)} existing products by default_code for deduplication"
+        )
+
         select_clause = f"""
         SELECT
             {PRODUCT_SELECT}
@@ -190,8 +199,19 @@ class XtupleProductImporter(models.AbstractModel):
 
         products = ctx.cr.dictfetchall()
 
-        _logger.info(f"Extracted {len(products)} new products from xTuple")
-        return products
+        # Filter out products that match existing by item_number (deduplication)
+        deduped_products = [
+            p
+            for p in products
+            if not p.get("item_number")
+            or p.get("item_number") not in existing_default_codes
+        ]
+
+        _logger.info(
+            f"Extracted {len(products)} products from xTuple, "
+            f"{len(deduped_products)} after deduplication by item_number"
+        )
+        return deduped_products
 
     @ETL.transform()
     def transform_products(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -439,3 +459,98 @@ class XtupleProductSupplierInfoImporter(models.AbstractModel):
             _logger.info(f"Created {len(supplierinfos)} product supplier records")
         else:
             _logger.info("No new supplier info to create")
+
+
+# =============================================================================
+# Product Linker Pipeline (for deduplication)
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="product.product",
+    importer_name="xtuple.product.linker",
+    sap_source="item",
+    depends_on=["xtuple.product.importer"],
+)
+class XtupleProductLinker(models.AbstractModel):
+    """ETL Pipeline for linking existing products to xTuple items by default_code."""
+
+    _name = "xtuple.product.linker"
+    _description = "xTuple Product Linker"
+
+    @ETL.extract("item")
+    def extract_products_for_linking(self, ctx: ETLContext) -> List[Dict]:
+        """Extract products from xTuple that need linking."""
+        select_clause = f"""
+        SELECT
+            item_id,
+            item_number
+        FROM item
+        WHERE item_number IS NOT NULL AND item_number != ''
+        """
+        ctx.cr.execute(select_clause)
+        products = ctx.cr.dictfetchall()
+
+        _logger.info(f"Extracted {len(products)} products with item_number for linking")
+        return products
+
+    @ETL.transform()
+    def transform_products_for_linking(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> List[Dict]:
+        """Find existing products by default_code and prepare link updates."""
+        products = extracted.get("extract_products_for_linking", [])
+
+        # Build lookup of existing products by default_code that don't have xtuple_item_id
+        ctx.env.cr.execute(
+            """
+            SELECT id, default_code FROM product_product
+            WHERE default_code IS NOT NULL AND default_code != ''
+            AND xtuple_item_id IS NULL
+            """
+        )
+        product_by_code = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
+
+        link_updates = []
+        for product in products:
+            item_number = product.get("item_number")
+            if item_number and item_number in product_by_code:
+                link_updates.append(
+                    {
+                        "product_id": product_by_code[item_number],
+                        "xtuple_item_id": product.get("item_id"),
+                        "xtuple_item_number": item_number,
+                    }
+                )
+
+        _logger.info(f"Found {len(link_updates)} products to link by default_code")
+        return link_updates
+
+    @ETL.load()
+    def load_product_links(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Update existing products with xTuple item IDs."""
+        link_updates = transformed.get("transform_products_for_linking", [])
+
+        if not link_updates:
+            _logger.info("No products to link")
+            return
+
+        for update in link_updates:
+            ctx.env.cr.execute(
+                """
+                UPDATE product_product
+                SET xtuple_item_id = %s, xtuple_item_number = %s
+                WHERE id = %s
+                """,
+                (
+                    update["xtuple_item_id"],
+                    update["xtuple_item_number"],
+                    update["product_id"],
+                ),
+            )
+            _logger.debug(
+                f"Linked product {update['product_id']} (default_code={update['xtuple_item_number']}) "
+                f"to xTuple item {update['xtuple_item_id']}"
+            )
+
+        _logger.info(f"Linked {len(link_updates)} existing products to xTuple items")
