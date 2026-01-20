@@ -12,18 +12,6 @@
                             type="object" 
                             class="btn-primary"
                             icon="fa-download"/>
-                    <button name="action_import_partners" 
-                            string="Import Partners" 
-                            type="object"
-                            icon="fa-users"/>
-                    <button name="action_import_products" 
-                            string="Import Products" 
-                            type="object"
-                            icon="fa-cube"/>
-                    <button name="action_import_boms" 
-                            string="Import BOMs" 
-                            type="object"
-                            icon="fa-sitemap"/>
                 </header>
                 <sheet>
                     <div class="oe_title">

@@ -87,83 +87,76 @@ class QboEstimateImporter(models.AbstractModel):
         skipped = 0
 
         for est in estimates:
-            try:
-                # Get customer
-                customer_ref = est.get("CustomerRef", {})
-                qbo_customer_id = int(customer_ref.get("value", 0))
-                partner_id = customer_map.get(qbo_customer_id)
+            # Get customer
+            customer_ref = est.get("CustomerRef", {})
+            qbo_customer_id = int(customer_ref.get("value", 0))
+            partner_id = customer_map.get(qbo_customer_id)
 
-                if not partner_id:
-                    _logger.warning(
-                        f"Customer not found for QBO ID {qbo_customer_id} "
-                        f"in estimate {est.get('Id')}"
-                    )
-                    skipped += 1
-                    continue
-
-                # Parse date
-                txn_date = est.get("TxnDate")
-                order_date = None
-                if txn_date:
-                    try:
-                        order_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
-                    except ValueError:
-                        order_date = datetime.now().date()
-
-                # Parse expiration date
-                expiry_date = est.get("ExpirationDate")
-                validity_date = None
-                if expiry_date:
-                    try:
-                        validity_date = datetime.strptime(
-                            expiry_date, "%Y-%m-%d"
-                        ).date()
-                    except ValueError:
-                        pass
-
-                # Get currency
-                currency_id = company.currency_id.id
-                currency_ref = est.get("CurrencyRef", {})
-                if currency_ref:
-                    currency_code = currency_ref.get("value")
-                    if currency_code:
-                        currency = ctx.env["res.currency"].search(
-                            [("name", "=", currency_code)], limit=1
-                        )
-                        if currency:
-                            currency_id = currency.id
-
-                # Build order lines
-                line_vals = []
-                for line in est.get("Line", []):
-                    line_data = self._transform_estimate_line(
-                        line, product_map, tax_map, tax_rate_map, est, ctx
-                    )
-                    if line_data:
-                        line_vals.append((0, 0, line_data))
-
-                if not line_vals:
-                    _logger.warning(f"No valid lines for estimate {est.get('Id')}")
-                    skipped += 1
-                    continue
-
-                vals = {
-                    "partner_id": partner_id,
-                    "date_order": order_date,
-                    "validity_date": validity_date,
-                    "currency_id": currency_id,
-                    "client_order_ref": est.get("DocNumber", ""),
-                    "note": est.get("CustomerMemo", {}).get("value", ""),
-                    "order_line": line_vals,
-                    "qbo_estimate_id": int(est.get("Id", 0)),
-                    "company_id": company.id,
-                }
-
-                order_vals.append(vals)
-
-            except Exception as e:
-                _logger.error(f"Error transforming estimate {est.get('Id')}: {e}")
+            if not partner_id:
+                _logger.warning(
+                    f"Customer not found for QBO ID {qbo_customer_id} "
+                    f"in estimate {est.get('Id')}"
+                )
                 skipped += 1
+                continue
+
+            # Parse date
+            txn_date = est.get("TxnDate")
+            order_date = None
+            if txn_date:
+                try:
+                    order_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
+                except ValueError:
+                    order_date = datetime.now().date()
+
+            # Parse expiration date
+            expiry_date = est.get("ExpirationDate")
+            validity_date = None
+            if expiry_date:
+                try:
+                    validity_date = datetime.strptime(expiry_date, "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+
+            # Get currency
+            currency_id = company.currency_id.id
+            currency_ref = est.get("CurrencyRef", {})
+            if currency_ref:
+                currency_code = currency_ref.get("value")
+                if currency_code:
+                    currency = ctx.env["res.currency"].search(
+                        [("name", "=", currency_code)], limit=1
+                    )
+                    if currency:
+                        currency_id = currency.id
+
+            # Build order lines
+            line_vals = []
+            for line in est.get("Line", []):
+                line_data = self._transform_estimate_line(
+                    line, product_map, tax_map, tax_rate_map, est, ctx
+                )
+                if line_data:
+                    line_vals.append((0, 0, line_data))
+
+            if not line_vals:
+                _logger.warning(f"No valid lines for estimate {est.get('Id')}")
+                skipped += 1
+                continue
+
+            vals = {
+                "partner_id": partner_id,
+                "date_order": order_date,
+                "validity_date": validity_date,
+                "currency_id": currency_id,
+                "client_order_ref": est.get("DocNumber", ""),
+                "note": est.get("CustomerMemo", {}).get("value", ""),
+                "order_line": line_vals,
+                "qbo_estimate_id": int(est.get("Id", 0)),
+                "company_id": company.id,
+            }
+
+            order_vals.append(vals)
 
         _logger.info(f"Transformed {len(order_vals)} estimates, skipped {skipped}")
         return order_vals
@@ -235,7 +228,7 @@ class QboEstimateImporter(models.AbstractModel):
             line_vals["product_id"] = product_id
 
         if tax_ids:
-            line_vals["tax_id"] = [(6, 0, tax_ids)]
+            line_vals["tax_ids"] = [(6, 0, tax_ids)]
 
         return line_vals
 
@@ -248,19 +241,6 @@ class QboEstimateImporter(models.AbstractModel):
             _logger.info("No new estimates to create")
             return
 
-        created = 0
-        errors = 0
-
-        for vals in order_vals:
-            try:
-                order = ctx.env["sale.order"].create(vals)
-                created += 1
-                _logger.debug(f"Created sale.order {order.name} from QBO estimate")
-
-            except Exception as e:
-                _logger.error(
-                    f"Failed to create estimate {vals.get('client_order_ref')}: {e}"
-                )
-                errors += 1
-
-        _logger.info(f"Created {created} sale orders from estimates, {errors} errors")
+        # Batch create sale orders
+        orders = ctx.env["sale.order"].create(order_vals)
+        _logger.info(f"Created {len(orders)} sale orders from estimates")

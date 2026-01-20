@@ -163,37 +163,20 @@ class XtupleProductImporter(models.AbstractModel):
     _name = "xtuple.product.importer"
     _description = "xTuple Product Importer"
 
-    @ETL.extract("item")
-    def extract_products(self, ctx: ETLContext) -> List[Dict]:
-        """Extract products from xTuple item table."""
-        ctx.env.cr.execute(
-            "SELECT xtuple_item_id FROM product_product WHERE xtuple_item_id IS NOT NULL"
-        )
-        existing_item_ids = [row[0] for row in ctx.env.cr.fetchall()]
-        _logger.info(f"Found {len(existing_item_ids)} existing products in Odoo")
-
-        # Get existing default_codes for deduplication (cross-system matching)
-        ctx.env.cr.execute(
-            "SELECT default_code FROM product_product WHERE default_code IS NOT NULL AND default_code != ''"
-        )
-        existing_default_codes = {row[0] for row in ctx.env.cr.fetchall()}
-        _logger.info(
-            f"Found {len(existing_default_codes)} existing products by default_code for deduplication"
-        )
-
-        # Build category lookup dict (needed for transform, done here for multiprocessing)
+    def _get_lookup_dicts(self, ctx: ETLContext):
+        """Build lookup dicts for category and UoM mapping."""
+        # Build category lookup dict
         ctx.env.cr.execute(
             "SELECT xtuple_prodcat_id, id FROM product_category WHERE xtuple_prodcat_id IS NOT NULL"
         )
         category_dict = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
 
-        # Get default category ID (needed for transform, done here for multiprocessing)
         all_category = ctx.env.ref(
             "product.product_category_goods", raise_if_not_found=False
         )
         default_category_id = all_category.id if all_category else False
 
-        # Build UoM lookup dict (needed for transform, done here for multiprocessing)
+        # Build UoM lookup dict
         uom_xmlid_mapping = {
             4: "uom.product_uom_unit",  # EA -> Unit
             5: "uom.product_uom_unit",  # CS (Case) -> Unit
@@ -214,6 +197,25 @@ class XtupleProductImporter(models.AbstractModel):
             uom = ctx.env.ref(xmlid, raise_if_not_found=False)
             uom_dict[xtuple_id] = uom.id if uom else default_uom_id
 
+        return category_dict, default_category_id, uom_dict, default_uom_id
+
+    @ETL.extract("item")
+    def extract_new_products(self, ctx: ETLContext) -> List[Dict]:
+        """Extract new products from xTuple that don't exist in Odoo."""
+        ctx.env.cr.execute(
+            "SELECT xtuple_item_id FROM product_product WHERE xtuple_item_id IS NOT NULL"
+        )
+        existing_item_ids = [row[0] for row in ctx.env.cr.fetchall()]
+
+        ctx.env.cr.execute(
+            "SELECT default_code FROM product_product WHERE default_code IS NOT NULL AND default_code != ''"
+        )
+        existing_default_codes = {row[0] for row in ctx.env.cr.fetchall()}
+
+        category_dict, default_category_id, uom_dict, default_uom_id = (
+            self._get_lookup_dicts(ctx)
+        )
+
         select_clause = f"""
         SELECT
             {PRODUCT_SELECT}
@@ -232,95 +234,148 @@ class XtupleProductImporter(models.AbstractModel):
 
         products = ctx.cr.dictfetchall()
 
-        # Embed lookup data in each product record for multiprocessing compatibility
+        # Embed lookup data and filter to only new products
+        new_products = []
         for product in products:
+            item_number = product.get("item_number")
+            if item_number and item_number in existing_default_codes:
+                continue  # Skip - will be handled by extract_products_to_update
+
             prodcat_id = product.get("item_prodcat_id")
             product["_category_id"] = category_dict.get(prodcat_id, default_category_id)
             inv_uom_id = product.get("item_inv_uom_id")
             product["_uom_id"] = uom_dict.get(inv_uom_id, default_uom_id)
+            new_products.append(product)
 
-        # Filter out products that match existing by item_number (deduplication)
-        deduped_products = [
+        _logger.info(f"Extracted {len(new_products)} new products from xTuple")
+        return new_products
+
+    @ETL.extract("item_update")
+    def extract_products_to_update(self, ctx: ETLContext) -> List[Dict]:
+        """Extract products that exist in Odoo by default_code but need xTuple fields."""
+        ctx.env.cr.execute(
+            "SELECT xtuple_item_id FROM product_product WHERE xtuple_item_id IS NOT NULL"
+        )
+        existing_item_ids = set(row[0] for row in ctx.env.cr.fetchall())
+
+        ctx.env.cr.execute(
+            "SELECT default_code FROM product_product WHERE default_code IS NOT NULL AND default_code != ''"
+        )
+        existing_default_codes = {row[0] for row in ctx.env.cr.fetchall()}
+
+        select_clause = f"""
+        SELECT
+            {PRODUCT_SELECT}
+        FROM item
+        LEFT JOIN uom invuom ON (item_inv_uom_id = invuom.uom_id)
+        LEFT JOIN uom priceuom ON (item_price_uom_id = priceuom.uom_id)
+        LEFT JOIN prodcat ON (item_prodcat_id = prodcat_id)
+        LEFT JOIN classcode ON (item_classcode_id = classcode_id)
+        """
+
+        if existing_item_ids:
+            where_clause = "WHERE item_id NOT IN %s"
+            ctx.cr.execute(select_clause + where_clause, (tuple(existing_item_ids),))
+        else:
+            ctx.cr.execute(select_clause)
+
+        products = ctx.cr.dictfetchall()
+
+        # Filter to only products that exist by default_code (need update)
+        products_to_update = [
             p
             for p in products
-            if not p.get("item_number")
-            or p.get("item_number") not in existing_default_codes
+            if p.get("item_number") and p.get("item_number") in existing_default_codes
         ]
 
         _logger.info(
-            f"Extracted {len(products)} products from xTuple, "
-            f"{len(deduped_products)} after deduplication by item_number"
+            f"Extracted {len(products_to_update)} products to update with xTuple fields"
         )
-        return deduped_products
+        return products_to_update
 
-    @ETL.transform()
-    def transform_products(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
-        """Transform xTuple products into Odoo product values."""
-        products = extracted.get("extract_products", [])
+    def _transform_product(self, product: Dict) -> Dict:
+        """Transform a single xTuple product into Odoo product values."""
+        item_type = product.get("item_type", "")
+        product_type = "consu"
+        is_storable = False
+        tracking = "none"
 
-        product_vals = []
-        for product in products:
-            # Determine product type based on xTuple item_type
-            item_type = product.get("item_type", "")
+        if item_type == "P":  # Purchased
+            product_type = "consu"
+            is_storable = True
+        elif item_type == "M":  # Manufactured
+            product_type = "consu"
+            is_storable = True
+        elif item_type == "F":  # Phantom
             product_type = "consu"
             is_storable = False
-            tracking = "none"
+        elif item_type in ("R", "S", "O"):  # Reference, Service, Outside Processing
+            product_type = "service"
+            is_storable = False
+        elif item_type in ("K", "C", "Y"):  # Kit, Co-Product, By-Product
+            product_type = "consu"
+            is_storable = True
+        else:
+            product_type = "consu"
+            is_storable = False
 
-            if item_type == "P":  # Purchased
-                product_type = "consu"
-                is_storable = True
-            elif item_type == "M":  # Manufactured
-                product_type = "consu"
-                is_storable = True
-            elif item_type == "F":  # Phantom
-                product_type = "consu"
-                is_storable = False
-            elif item_type in ("R", "S", "O"):  # Reference, Service, Outside Processing
-                product_type = "service"
-                is_storable = False
-            elif item_type in ("K", "C", "Y"):  # Kit, Co-Product, By-Product
-                product_type = "consu"
-                is_storable = True
-            else:
-                product_type = "consu"
-                is_storable = False
+        # Determine if product is sold (based on category)
+        is_sold = product.get("item_prodcat_id") in [28, 31, 32, 33, 34]
 
-            # Determine if product is sold (based on category)
-            is_sold = product.get("item_prodcat_id") in [28, 31, 32, 33, 34]
+        # Get product name
+        name = product.get("item_descrip1", "")
+        if not name:
+            name = product.get("item_number", "")
 
-            # Get product name
-            name = product.get("item_descrip1", "")
-            if not name:
-                name = product.get("item_number", "")
+        description = product.get("item_descrip2", "")
 
-            description = product.get("item_descrip2", "")
+        # Get category and UoM (lookup done in extract phase)
+        category_id = product.get("_category_id")
+        uom_id = product.get("_uom_id")
 
-            # Get category and UoM (lookup done in extract phase)
-            category_id = product.get("_category_id")
-            uom_id = product.get("_uom_id")
+        # Get price and cost
+        list_price = product.get("item_listprice", 0.0)
+        standard_price = product.get("item_listcost", 0.0)
+        if not standard_price and product.get("item_maxcost"):
+            standard_price = product.get("item_maxcost", 0.0)
 
-            # Get price and cost
-            list_price = product.get("item_listprice", 0.0)
-            standard_price = product.get("item_listcost", 0.0)
-            if not standard_price and product.get("item_maxcost"):
-                standard_price = product.get("item_maxcost", 0.0)
+        return {
+            "name": name,
+            "description": description,
+            "default_code": product.get("item_number"),
+            "barcode": product.get("item_upccode"),
+            "type": product_type,
+            "tracking": tracking,
+            "is_storable": is_storable,
+            "categ_id": category_id,
+            "uom_id": uom_id,
+            "active": product.get("item_active"),
+            "sale_ok": is_sold,
+            "purchase_ok": item_type in ["P", "M", "F"],
+            "list_price": list_price,
+            "standard_price": standard_price,
+            "xtuple_item_id": product.get("item_id"),
+            "xtuple_item_number": product.get("item_number"),
+            "xtuple_item_type": item_type,
+            "xtuple_classcode": product.get("classcode_code"),
+        }
 
-            product_vals.append(
+    @ETL.transform()
+    def transform_products(self, ctx: ETLContext, extracted: Dict) -> Dict:
+        """Transform xTuple products into Odoo product values."""
+        new_products = extracted.get("extract_new_products", [])
+        products_to_update = extracted.get("extract_products_to_update", [])
+
+        # Transform new products for creation
+        create_vals = [self._transform_product(p) for p in new_products]
+
+        # Transform products that need xTuple fields updated
+        update_vals = []
+        for product in products_to_update:
+            item_type = product.get("item_type", "")
+            update_vals.append(
                 {
-                    "name": name,
-                    "description": description,
                     "default_code": product.get("item_number"),
-                    "barcode": product.get("item_upccode"),
-                    "type": product_type,
-                    "tracking": tracking,
-                    "is_storable": is_storable,
-                    "categ_id": category_id,
-                    "uom_id": uom_id,
-                    "active": product.get("item_active"),
-                    "sale_ok": is_sold,
-                    "purchase_ok": item_type in ["P", "M", "F"],
-                    "list_price": list_price,
-                    "standard_price": standard_price,
                     "xtuple_item_id": product.get("item_id"),
                     "xtuple_item_number": product.get("item_number"),
                     "xtuple_item_type": item_type,
@@ -328,15 +383,22 @@ class XtupleProductImporter(models.AbstractModel):
                 }
             )
 
-        _logger.info(f"Transformed {len(product_vals)} product records")
-        return product_vals
+        _logger.info(
+            f"Transformed {len(create_vals)} new products, "
+            f"{len(update_vals)} products to update"
+        )
+        return {"create": create_vals, "update": update_vals}
 
     @ETL.load()
     def load_products(self, ctx: ETLContext, transformed: Dict) -> None:
         """Load products into Odoo."""
-        product_vals = transformed.get("transform_products", [])
-        if product_vals:
-            products = ctx.env["product.product"].create(product_vals)
+        data = transformed.get("transform_products", {})
+        create_vals = data.get("create", [])
+        update_vals = data.get("update", [])
+
+        # Create new products
+        if create_vals:
+            products = ctx.env["product.product"].create(create_vals)
             _logger.info(f"Created {len(products)} products")
 
             # Mark templates inactive for inactive variants
@@ -344,8 +406,22 @@ class XtupleProductImporter(models.AbstractModel):
                 [("active", "=", False), ("xtuple_item_id", "!=", False)]
             )
             inactive_products.product_tmpl_id.write({"active": False})
-        else:
-            _logger.info("No new products to create")
+
+        # Update existing products with xTuple fields
+        if update_vals:
+            updated = 0
+            for vals in update_vals:
+                default_code = vals.pop("default_code")
+                product = ctx.env["product.product"].search(
+                    [("default_code", "=", default_code)], limit=1
+                )
+                if product:
+                    product.write(vals)
+                    updated += 1
+            _logger.info(f"Updated {updated} existing products with xTuple fields")
+
+        if not create_vals and not update_vals:
+            _logger.info("No products to create or update")
 
 
 # =============================================================================

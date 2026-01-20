@@ -10,7 +10,7 @@ from typing import Dict, List
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_ERRORS
 
 from .utils import get_api_client
 
@@ -105,110 +105,103 @@ class QboInvoiceImporter(models.AbstractModel):
         skipped = 0
 
         for inv in invoices:
-            try:
-                # Get customer
-                customer_ref = inv.get("CustomerRef", {})
-                qbo_customer_id = int(customer_ref.get("value", 0))
-                partner_id = customer_map.get(qbo_customer_id)
+            # Get customer
+            customer_ref = inv.get("CustomerRef", {})
+            qbo_customer_id = int(customer_ref.get("value", 0))
+            partner_id = customer_map.get(qbo_customer_id)
 
-                if not partner_id:
-                    _logger.warning(
-                        f"Customer not found for QBO ID {qbo_customer_id} "
-                        f"in invoice {inv.get('Id')}"
-                    )
-                    skipped += 1
-                    continue
-
-                # Parse dates
-                txn_date = inv.get("TxnDate")
-                due_date = inv.get("DueDate")
-
-                invoice_date = None
-                if txn_date:
-                    try:
-                        invoice_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
-                    except ValueError:
-                        invoice_date = datetime.now().date()
-
-                invoice_date_due = None
-                if due_date:
-                    try:
-                        invoice_date_due = datetime.strptime(
-                            due_date, "%Y-%m-%d"
-                        ).date()
-                    except ValueError:
-                        pass
-
-                # Get currency
-                currency_id = company.currency_id.id
-                currency_ref = inv.get("CurrencyRef", {})
-                if currency_ref:
-                    currency_code = currency_ref.get("value")
-                    if currency_code:
-                        currency = ctx.env["res.currency"].search(
-                            [("name", "=", currency_code)], limit=1
-                        )
-                        if currency:
-                            currency_id = currency.id
-
-                # Build invoice lines
-                line_vals = []
-                for line in inv.get("Line", []):
-                    line_data = self._transform_invoice_line(
-                        line, product_map, tax_map, tax_rate_map, inv, ctx
-                    )
-                    if line_data:
-                        line_vals.append((0, 0, line_data))
-
-                if not line_vals:
-                    _logger.warning(f"No valid lines for invoice {inv.get('Id')}")
-                    skipped += 1
-                    continue
-
-                # Check total amount to determine if this is a refund
-                total_amt = float(inv.get("TotalAmt", 0) or 0)
-                move_type = "out_refund" if total_amt < 0 else "out_invoice"
-
-                # If refund, make line amounts positive
-                if move_type == "out_refund":
-                    for line_tuple in line_vals:
-                        line_data = line_tuple[2]
-                        if "price_unit" in line_data:
-                            line_data["price_unit"] = abs(line_data["price_unit"])
-
-                # Check for linked Estimate (sale order)
-                sale_order_id = None
-                for linked in inv.get("LinkedTxn", []):
-                    if linked.get("TxnType") == "Estimate":
-                        txn_id = str(linked.get("TxnId", ""))
-                        if txn_id in estimate_map:
-                            sale_order_id = estimate_map[txn_id]
-                            break
-
-                vals = {
-                    "move_type": move_type,
-                    "journal_id": journal.id,
-                    "partner_id": partner_id,
-                    "invoice_date": invoice_date,
-                    "invoice_date_due": invoice_date_due,
-                    "currency_id": currency_id,
-                    "ref": inv.get("DocNumber", ""),
-                    "narration": inv.get("CustomerMemo", {}).get("value", ""),
-                    "invoice_line_ids": line_vals,
-                    "qbo_invoice_id": int(inv.get("Id")),
-                }
-
-                # Link to sale order if found
-                if sale_order_id:
-                    vals["invoice_origin"] = (
-                        ctx.env["sale.order"].browse(sale_order_id).name
-                    )
-
-                move_vals.append(vals)
-
-            except Exception as e:
-                _logger.error(f"Error transforming invoice {inv.get('Id')}: {e}")
+            if not partner_id:
+                _logger.warning(
+                    f"Customer not found for QBO ID {qbo_customer_id} "
+                    f"in invoice {inv.get('Id')}"
+                )
                 skipped += 1
+                continue
+
+            # Parse dates
+            txn_date = inv.get("TxnDate")
+            due_date = inv.get("DueDate")
+
+            invoice_date = None
+            if txn_date:
+                try:
+                    invoice_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
+                except ValueError:
+                    invoice_date = datetime.now().date()
+
+            invoice_date_due = None
+            if due_date:
+                try:
+                    invoice_date_due = datetime.strptime(due_date, "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+
+            # Get currency
+            currency_id = company.currency_id.id
+            currency_ref = inv.get("CurrencyRef", {})
+            if currency_ref:
+                currency_code = currency_ref.get("value")
+                if currency_code:
+                    currency = ctx.env["res.currency"].search(
+                        [("name", "=", currency_code)], limit=1
+                    )
+                    if currency:
+                        currency_id = currency.id
+
+            # Build invoice lines
+            line_vals = []
+            for line in inv.get("Line", []):
+                line_data = self._transform_invoice_line(
+                    line, product_map, tax_map, tax_rate_map, inv, ctx
+                )
+                if line_data:
+                    line_vals.append((0, 0, line_data))
+
+            if not line_vals:
+                _logger.warning(f"No valid lines for invoice {inv.get('Id')}")
+                skipped += 1
+                continue
+
+            # Check total amount to determine if this is a refund
+            total_amt = float(inv.get("TotalAmt", 0) or 0)
+            move_type = "out_refund" if total_amt < 0 else "out_invoice"
+
+            # If refund, make line amounts positive
+            if move_type == "out_refund":
+                for line_tuple in line_vals:
+                    line_data = line_tuple[2]
+                    if "price_unit" in line_data:
+                        line_data["price_unit"] = abs(line_data["price_unit"])
+
+            # Check for linked Estimate (sale order)
+            sale_order_id = None
+            for linked in inv.get("LinkedTxn", []):
+                if linked.get("TxnType") == "Estimate":
+                    txn_id = str(linked.get("TxnId", ""))
+                    if txn_id in estimate_map:
+                        sale_order_id = estimate_map[txn_id]
+                        break
+
+            vals = {
+                "move_type": move_type,
+                "journal_id": journal.id,
+                "partner_id": partner_id,
+                "invoice_date": invoice_date,
+                "invoice_date_due": invoice_date_due,
+                "currency_id": currency_id,
+                "ref": inv.get("DocNumber", ""),
+                "narration": inv.get("CustomerMemo", {}).get("value", ""),
+                "invoice_line_ids": line_vals,
+                "qbo_invoice_id": int(inv.get("Id")),
+            }
+
+            # Link to sale order if found
+            if sale_order_id:
+                vals["invoice_origin"] = (
+                    ctx.env["sale.order"].browse(sale_order_id).name
+                )
+
+            move_vals.append(vals)
 
         _logger.info(f"Transformed {len(move_vals)} invoices, skipped {skipped}")
         return move_vals
@@ -301,20 +294,17 @@ class QboInvoiceImporter(models.AbstractModel):
         errors = 0
 
         for vals in move_vals:
+            move = ctx.env["account.move"].create(vals)
+            created += 1
+
+            # Try to post the invoice
             try:
-                move = ctx.env["account.move"].create(vals)
-                created += 1
-
-                # Try to post the invoice
-                try:
-                    move.action_post()
-                    posted += 1
-                except Exception as e:
-                    _logger.warning(f"Could not post invoice {vals.get('ref')}: {e}")
-
+                move.action_post()
+                posted += 1
+            except RETRYABLE_ERRORS:
+                raise
             except Exception as e:
-                _logger.error(f"Failed to create invoice {vals.get('ref')}: {e}")
-                errors += 1
+                _logger.warning(f"Could not post invoice {vals.get('ref')}: {e}")
 
         _logger.info(f"Created {created} invoices ({posted} posted), {errors} errors")
 

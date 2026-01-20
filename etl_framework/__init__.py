@@ -10,6 +10,7 @@ from .framework import (
     ETLPipeline,
     MultiprocessingConfig,
     PipelineOrchestrator,
+    RETRYABLE_ERRORS,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "ETLPipeline",
     "MultiprocessingConfig",
     "PipelineOrchestrator",
+    "RETRYABLE_ERRORS",
 ]
