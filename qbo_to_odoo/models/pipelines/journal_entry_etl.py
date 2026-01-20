@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_ERRORS
 
 _logger = logging.getLogger(__name__)
 
@@ -202,19 +202,18 @@ class QboJournalEntryImporter(models.AbstractModel):
 
         # Create moves one by one to handle potential errors
         created = 0
-        errors = 0
-
         for vals in move_vals:
+            move = ctx.env["account.move"].create(vals)
+            created += 1
+            # Post the move
             try:
-                move = ctx.env["account.move"].create(vals)
-                # Post the move
                 move.action_post()
-                created += 1
+            except RETRYABLE_ERRORS:
+                raise
             except Exception as e:
-                _logger.error(f"Failed to create journal entry {vals.get('ref')}: {e}")
-                errors += 1
+                _logger.warning(f"Could not post journal entry {vals.get('ref')}: {e}")
 
-        _logger.info(f"Created {created} journal entries, {errors} errors")
+        _logger.info(f"Created {created} journal entries")
 
         # Update last sync timestamp
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))

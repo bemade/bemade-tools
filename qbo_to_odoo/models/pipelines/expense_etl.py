@@ -1,14 +1,15 @@
 """QuickBooks Online Expense ETL Pipeline
 
-This module handles the migration of Expenses from QBO to Odoo hr.expense
-using the ETL framework.
+This module handles the migration of Purchases (Expenses) from QBO to Odoo
+as account.move journal entries, using the ETL framework.
 
-In QBO, the Expense entity represents employee expense reports,
-which map directly to hr.expense in Odoo.
+In QBO, the Purchase entity represents expense transactions including
+Cash, Check, and Credit Card payments. These are imported as journal
+entries with debit lines for each expense and a credit line for the
+payment account.
 """
 
 import logging
-from datetime import datetime
 from typing import Dict, List, Optional
 
 from odoo import models
@@ -21,146 +22,197 @@ _logger = logging.getLogger(__name__)
 
 
 @ETL.pipeline(
-    target_model="hr.expense",
+    target_model="account.move",
     importer_name="qbo.expense.importer",
-    sap_source="Expense",
-    depends_on=["qbo.employee.importer", "qbo.account.importer"],
+    sap_source="Purchase",
+    depends_on=["qbo.account.importer", "qbo.item.importer", "qbo.tax.importer"],
 )
 class QboExpenseImporter(models.AbstractModel):
-    """ETL Pipeline for importing QBO Expenses as hr.expense."""
+    """ETL Pipeline for importing QBO Purchases as account.move journal entries."""
 
     _name = "qbo.expense.importer"
     _description = "QBO Expense Importer"
 
-    @ETL.extract("Expense")
+    @ETL.extract("Purchase")
     def extract_expenses(self, ctx: ETLContext) -> List[Dict]:
-        """Extract expenses from QBO API."""
+        """Extract purchases from QBO API.
+
+        Note: In QBO, expenses are stored as "Purchase" entities which cover
+        Cash Expense, Check, and Credit Card transactions.
+        """
         api_client = get_api_client(ctx)
 
         # Get existing QBO expense IDs
-        ctx.env.cr.execute(
-            "SELECT qbo_expense_id FROM hr_expense WHERE qbo_expense_id IS NOT NULL"
-        )
-        existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
+        try:
+            ctx.env.cr.execute(
+                "SELECT qbo_expense_id FROM account_move WHERE qbo_expense_id IS NOT NULL"
+            )
+            existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
+        except Exception:
+            # Column may not exist yet if module not upgraded
+            ctx.env.cr.rollback()
+            existing_ids = set()
+            _logger.warning("qbo_expense_id column not found - module upgrade required")
         _logger.info(f"Found {len(existing_ids)} existing expenses in Odoo")
 
-        # Fetch all expenses from QBO
-        expenses = api_client.query_all(entity="Expense", order_by="Id")
+        # Fetch all purchases from QBO
+        all_purchases = api_client.query_all(entity="Purchase", order_by="Id")
 
         # Filter out already imported
-        new_expenses = [e for e in expenses if str(e.get("Id")) not in existing_ids]
+        new_purchases = [
+            p for p in all_purchases if str(p.get("Id")) not in existing_ids
+        ]
 
         _logger.info(
-            f"Extracted {len(expenses)} expenses from QBO, "
-            f"{len(new_expenses)} are new"
+            f"Extracted {len(all_purchases)} purchases from QBO, "
+            f"{len(new_purchases)} are new"
         )
-        return new_expenses
+        return new_purchases
 
     @ETL.transform()
     def transform_expenses(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
-        """Transform QBO expenses into Odoo hr.expense values."""
-        expenses = extracted.get("extract_expenses", [])
+        """Transform QBO purchases into Odoo account.move journal entry values."""
+        purchases = extracted.get("extract_expenses", [])
 
-        # Build lookups
-        ctx.env.cr.execute(
-            "SELECT qbo_employee_id, id FROM hr_employee WHERE qbo_employee_id IS NOT NULL"
-        )
-        employee_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
-
+        # Build account lookup
         ctx.env.cr.execute(
             "SELECT qbo_id, id FROM account_account WHERE qbo_id IS NOT NULL"
         )
-        account_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+        account_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
 
-        company = ctx.env.company
-
-        # Get default expense product (or create one)
-        expense_product = ctx.env["product.product"].search(
-            [("can_be_expensed", "=", True)], limit=1
+        # Build product lookup
+        ctx.env.cr.execute(
+            "SELECT qbo_item_id, id FROM product_product WHERE qbo_item_id IS NOT NULL"
         )
-        if not expense_product:
-            expense_product = ctx.env["product.product"].create(
-                {
-                    "name": "QBO Expense",
-                    "type": "service",
-                    "can_be_expensed": True,
-                }
-            )
+        product_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
 
-        expense_vals = []
+        # Build tax lookup
+        ctx.env.cr.execute(
+            "SELECT qbo_tax_id, id FROM account_tax WHERE qbo_tax_id IS NOT NULL"
+        )
+        tax_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
+
+        # Get expense journal from company config or find default
+        company = ctx.env.company
+        expense_journal = ctx.env["account.journal"].search(
+            [("type", "=", "general"), ("company_id", "=", company.id)],
+            limit=1,
+        )
+        if not expense_journal:
+            raise ValueError("No general journal found for expense entries")
+
+        move_vals_list = []
         skipped = 0
 
-        for expense in expenses:
-            try:
-                qbo_expense_id = int(expense.get("Id", 0))
-
-                # Parse date
-                txn_date = expense.get("TxnDate")
-                expense_date = None
-                if txn_date:
-                    try:
-                        expense_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
-                    except ValueError:
-                        expense_date = datetime.now().date()
-
-                # Get payment type
-                payment_type = expense.get("PaymentType", "")
-
-                # Get employee if linked
-                employee_ref = expense.get("EmployeeRef", {})
-                employee_id = None
-                if employee_ref:
-                    qbo_employee_id = int(employee_ref.get("value", 0))
-                    employee_id = employee_map.get(qbo_employee_id)
-
-                # Get account from AccountRef (main expense account)
-                account_ref = expense.get("AccountRef", {})
-                main_account_id = None
-                if account_ref:
-                    qbo_account_id = int(account_ref.get("value", 0))
-                    main_account_id = account_map.get(qbo_account_id)
-
-                # Process each line as a separate expense
-                for line in expense.get("Line", []):
-                    line_vals = self._transform_expense_line(
-                        line,
-                        expense,
-                        account_map,
-                        expense_product,
-                        expense_date,
-                        payment_type,
-                        employee_id,
-                        main_account_id,
-                        company,
-                        qbo_expense_id,
-                    )
-                    if line_vals:
-                        expense_vals.append(line_vals)
-
-            except Exception as e:
-                _logger.error(f"Error transforming expense {expense.get('Id')}: {e}")
+        for purchase in purchases:
+            move_vals = self._transform_purchase(
+                purchase,
+                account_map,
+                product_map,
+                tax_map,
+                expense_journal,
+                company,
+            )
+            if move_vals:
+                move_vals_list.append(move_vals)
+            else:
                 skipped += 1
 
-        _logger.info(
-            f"Transformed {len(expense_vals)} expense lines, skipped {skipped} expenses"
-        )
-        return expense_vals
+        _logger.info(f"Transformed {len(move_vals_list)} purchases, skipped {skipped}")
+        return move_vals_list
 
-    def _transform_expense_line(
+    def _transform_purchase(
+        self,
+        purchase: Dict,
+        account_map: Dict,
+        product_map: Dict,
+        tax_map: Dict,
+        journal,
+        company,
+    ) -> Optional[Dict]:
+        """Transform a single QBO Purchase into account.move values."""
+        qbo_id = purchase.get("Id")
+        txn_date = purchase.get("TxnDate")
+
+        # Get payment account (credit side)
+        account_ref = purchase.get("AccountRef", {})
+        payment_account_qbo_id = account_ref.get("value")
+        payment_account_id = account_map.get(str(payment_account_qbo_id))
+        if not payment_account_id:
+            raise ValueError(
+                f"Payment account not found for QBO ID {payment_account_qbo_id}"
+            )
+
+        # Get currency
+        currency_code = purchase.get("CurrencyRef", {}).get("value", "USD")
+        currency = company.env["res.currency"].search(
+            [("name", "=", currency_code)], limit=1
+        )
+        if not currency:
+            currency = company.currency_id
+
+        # Build journal entry lines
+        line_ids = []
+        total_amount = 0.0
+
+        for line in purchase.get("Line", []):
+            line_vals = self._transform_purchase_line(
+                line, account_map, product_map, tax_map, currency
+            )
+            if line_vals:
+                line_ids.append((0, 0, line_vals))
+                total_amount += line_vals.get("debit", 0)
+
+        if not line_ids:
+            return None
+
+        # Add credit line for payment account
+        line_ids.append(
+            (
+                0,
+                0,
+                {
+                    "account_id": payment_account_id,
+                    "credit": total_amount,
+                    "currency_id": currency.id,
+                    "name": f"Payment - {purchase.get('PaymentType', 'Expense')}",
+                },
+            )
+        )
+
+        return {
+            "move_type": "entry",
+            "journal_id": journal.id,
+            "date": txn_date,
+            "qbo_expense_id": qbo_id,
+            "company_id": company.id,
+            "currency_id": currency.id,
+            "line_ids": line_ids,
+        }
+
+    def _transform_purchase_line(
         self,
         line: Dict,
-        expense: Dict,
         account_map: Dict,
-        expense_product,
-        expense_date,
-        payment_type: str,
-        employee_id: Optional[int],
-        main_account_id: Optional[int],
-        company,
-        qbo_expense_id: int,
+        product_map: Dict,
+        tax_map: Dict,
+        currency,
     ) -> Optional[Dict]:
-        """Transform a single expense line into hr.expense values."""
+        """Transform a single purchase line into account.move.line values."""
         detail_type = line.get("DetailType", "")
+        amount = float(line.get("Amount", 0) or 0)
+
+        if amount <= 0:
+            return None
+
+        line_vals = {
+            "debit": amount,
+            "credit": 0,
+            "currency_id": currency.id,
+        }
+
+        if line.get("Description"):
+            line_vals["name"] = line.get("Description")
 
         # Handle account-based expense lines
         if detail_type == "AccountBasedExpenseLineDetail":
@@ -168,38 +220,24 @@ class QboExpenseImporter(models.AbstractModel):
             if not detail:
                 return None
 
-            # Get account from line detail, fall back to main expense account
             account_ref = detail.get("AccountRef", {})
-            qbo_account_id = int(account_ref.get("value", 0)) if account_ref else 0
-            account_id = account_map.get(qbo_account_id) or main_account_id
-
-            amount = float(line.get("Amount", 0) or 0)
-            if amount <= 0:
+            qbo_account_id = account_ref.get("value")
+            account_id = account_map.get(str(qbo_account_id))
+            if not account_id:
+                _logger.warning(f"Account not found for QBO ID {qbo_account_id}")
                 return None
 
-            description = (
-                line.get("Description", "")
-                or account_ref.get("name", "")
-                or "QBO Expense"
-            )
+            line_vals["account_id"] = account_id
 
-            vals = {
-                "name": description,
-                "product_id": expense_product.id,
-                "total_amount": amount,
-                "quantity": 1,
-                "date": expense_date,
-                "qbo_expense_id": qbo_expense_id,
-                "company_id": company.id,
-                "payment_mode": "company_account",  # Paid by company
-            }
+            if not line_vals.get("name"):
+                line_vals["name"] = account_ref.get("name", "Expense")
 
-            if account_id:
-                vals["account_id"] = account_id
-            if employee_id:
-                vals["employee_id"] = employee_id
-
-            return vals
+            # Handle tax
+            tax_ref = detail.get("TaxCodeRef", {})
+            if tax_ref and tax_ref.get("value") not in ("NON", None):
+                tax_id = tax_map.get(str(tax_ref.get("value")))
+                if tax_id:
+                    line_vals["tax_ids"] = [(6, 0, [tax_id])]
 
         # Handle item-based expense lines
         elif detail_type == "ItemBasedExpenseLineDetail":
@@ -207,57 +245,59 @@ class QboExpenseImporter(models.AbstractModel):
             if not detail:
                 return None
 
-            amount = float(line.get("Amount", 0) or 0)
-            if amount <= 0:
+            item_ref = detail.get("ItemRef", {})
+            qbo_item_id = item_ref.get("value")
+            product_id = product_map.get(str(qbo_item_id))
+
+            if product_id:
+                product = currency.env["product.product"].browse(product_id)
+                account_id = (
+                    product.property_account_expense_id.id
+                    or product.categ_id.property_account_expense_categ_id.id
+                )
+                if account_id:
+                    line_vals["account_id"] = account_id
+                else:
+                    _logger.warning(
+                        f"No expense account for product {item_ref.get('name')}"
+                    )
+                    return None
+            else:
+                _logger.warning(f"Product not found for QBO ID {qbo_item_id}")
                 return None
 
-            item_ref = detail.get("ItemRef", {})
-            description = (
-                line.get("Description", "") or item_ref.get("name", "") or "QBO Expense"
-            )
+            if not line_vals.get("name"):
+                line_vals["name"] = item_ref.get("name", "Expense")
 
-            qty = float(detail.get("Qty", 1) or 1)
+            # Handle tax
+            tax_ref = detail.get("TaxCodeRef", {})
+            if tax_ref and tax_ref.get("value") not in ("NON", None):
+                tax_id = tax_map.get(str(tax_ref.get("value")))
+                if tax_id:
+                    line_vals["tax_ids"] = [(6, 0, [tax_id])]
 
-            vals = {
-                "name": description,
-                "product_id": expense_product.id,
-                "total_amount": amount,
-                "quantity": qty,
-                "date": expense_date,
-                "qbo_expense_id": qbo_expense_id,
-                "company_id": company.id,
-                "payment_mode": "company_account",
-            }
+        else:
+            return None
 
-            if employee_id:
-                vals["employee_id"] = employee_id
-            if main_account_id:
-                vals["account_id"] = main_account_id
-
-            return vals
-
-        return None
+        return line_vals
 
     @ETL.load()
     def load_expenses(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Load expenses into Odoo."""
-        expense_vals = transformed.get("transform_expenses", [])
+        """Load purchases as journal entries into Odoo."""
+        move_vals_list = transformed.get("transform_expenses", [])
 
-        if not expense_vals:
-            _logger.info("No new expenses to create")
+        if not move_vals_list:
+            _logger.info("No new purchases to create")
             return
 
         created = 0
-        errors = 0
+        posted = 0
 
-        for vals in expense_vals:
-            try:
-                expense = ctx.env["hr.expense"].create(vals)
-                created += 1
-                _logger.debug(f"Created expense {expense.name}")
+        for vals in move_vals_list:
+            move = ctx.env["account.move"].create(vals)
+            created += 1
+            move.action_post()
+            posted += 1
+            _logger.debug(f"Created and posted expense entry {move.name}")
 
-            except Exception as e:
-                _logger.error(f"Failed to create expense {vals.get('name')}: {e}")
-                errors += 1
-
-        _logger.info(f"Created {created} expenses, {errors} errors")
+        _logger.info(f"Created {created} expense entries ({posted} posted)")

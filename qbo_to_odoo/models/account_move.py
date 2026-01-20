@@ -50,3 +50,9 @@ class AccountMove(models.Model):
         copy=False,
         help="QuickBooks Online VendorCredit ID (vendor refunds)",
     )
+    qbo_expense_id = fields.Integer(
+        string="QBO Expense ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online Purchase ID (expenses)",
+    )

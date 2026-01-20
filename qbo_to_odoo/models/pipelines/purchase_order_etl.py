@@ -87,71 +87,66 @@ class QboPurchaseOrderImporter(models.AbstractModel):
         skipped = 0
 
         for po in purchase_orders:
-            try:
-                # Get vendor
-                vendor_ref = po.get("VendorRef", {})
-                qbo_vendor_id = int(vendor_ref.get("value", 0))
-                partner_id = vendor_map.get(qbo_vendor_id)
+            # Get vendor
+            vendor_ref = po.get("VendorRef", {})
+            qbo_vendor_id = int(vendor_ref.get("value", 0))
+            partner_id = vendor_map.get(qbo_vendor_id)
 
-                if not partner_id:
-                    _logger.warning(
-                        f"Vendor not found for QBO ID {qbo_vendor_id} "
-                        f"in purchase order {po.get('Id')}"
-                    )
-                    skipped += 1
-                    continue
-
-                # Parse date
-                txn_date = po.get("TxnDate")
-                order_date = None
-                if txn_date:
-                    try:
-                        order_date = datetime.strptime(txn_date, "%Y-%m-%d")
-                    except ValueError:
-                        order_date = datetime.now()
-
-                # Get currency
-                currency_id = company.currency_id.id
-                currency_ref = po.get("CurrencyRef", {})
-                if currency_ref:
-                    currency_code = currency_ref.get("value")
-                    if currency_code:
-                        currency = ctx.env["res.currency"].search(
-                            [("name", "=", currency_code)], limit=1
-                        )
-                        if currency:
-                            currency_id = currency.id
-
-                # Build order lines
-                line_vals = []
-                for line in po.get("Line", []):
-                    line_data = self._transform_purchase_order_line(
-                        line, product_map, tax_map, tax_rate_map, po, ctx
-                    )
-                    if line_data:
-                        line_vals.append((0, 0, line_data))
-
-                if not line_vals:
-                    _logger.warning(f"No valid lines for purchase order {po.get('Id')}")
-                    skipped += 1
-                    continue
-
-                vals = {
-                    "partner_id": partner_id,
-                    "date_order": order_date,
-                    "currency_id": currency_id,
-                    "partner_ref": po.get("DocNumber", ""),
-                    "notes": po.get("Memo", ""),
-                    "order_line": line_vals,
-                    "qbo_purchase_order_id": int(po.get("Id", 0)),
-                    "company_id": company.id,
-                }
-
-                order_vals.append(vals)
-
-            except Exception as e:
-                _logger.error(f"Error transforming purchase order {po.get('Id')}: {e}")
+            if not partner_id:
+                _logger.warning(
+                    f"Vendor not found for QBO ID {qbo_vendor_id} "
+                    f"in purchase order {po.get('Id')}"
+                )
                 skipped += 1
+                continue
+
+            # Parse date
+            txn_date = po.get("TxnDate")
+            order_date = None
+            if txn_date:
+                try:
+                    order_date = datetime.strptime(txn_date, "%Y-%m-%d")
+                except ValueError:
+                    order_date = datetime.now()
+
+            # Get currency
+            currency_id = company.currency_id.id
+            currency_ref = po.get("CurrencyRef", {})
+            if currency_ref:
+                currency_code = currency_ref.get("value")
+                if currency_code:
+                    currency = ctx.env["res.currency"].search(
+                        [("name", "=", currency_code)], limit=1
+                    )
+                    if currency:
+                        currency_id = currency.id
+
+            # Build order lines
+            line_vals = []
+            for line in po.get("Line", []):
+                line_data = self._transform_purchase_order_line(
+                    line, product_map, tax_map, tax_rate_map, po, ctx
+                )
+                if line_data:
+                    line_vals.append((0, 0, line_data))
+
+            if not line_vals:
+                _logger.warning(f"No valid lines for purchase order {po.get('Id')}")
+                skipped += 1
+                continue
+
+            vals = {
+                "partner_id": partner_id,
+                "date_order": order_date,
+                "currency_id": currency_id,
+                "partner_ref": po.get("DocNumber", ""),
+                "note": po.get("Memo", ""),
+                "order_line": line_vals,
+                "qbo_purchase_order_id": int(po.get("Id", 0)),
+                "company_id": company.id,
+            }
+
+            order_vals.append(vals)
 
         _logger.info(
             f"Transformed {len(order_vals)} purchase orders, skipped {skipped}"
@@ -233,16 +228,6 @@ class QboPurchaseOrderImporter(models.AbstractModel):
         created = 0
         errors = 0
 
-        for vals in order_vals:
-            try:
-                order = ctx.env["purchase.order"].create(vals)
-                created += 1
-                _logger.debug(f"Created purchase.order {order.name} from QBO")
-
-            except Exception as e:
-                _logger.error(
-                    f"Failed to create purchase order {vals.get('partner_ref')}: {e}"
-                )
-                errors += 1
-
-        _logger.info(f"Created {created} purchase orders, {errors} errors")
+        # Batch create purchase orders
+        orders = ctx.env["purchase.order"].create(order_vals)
+        _logger.info(f"Created {len(orders)} purchase orders")

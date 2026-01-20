@@ -109,7 +109,7 @@ class QboTaxImporter(models.AbstractModel):
 
         tax_vals = []
 
-        # First, create individual tax rates
+        # First, create individual tax rates - duplicated for both sale and purchase
         for rate in tax_rates:
             rate_value = 0.0
             if rate.get("RateValue"):
@@ -121,18 +121,35 @@ class QboTaxImporter(models.AbstractModel):
                         rate_value = float(eff.get("RateValue", 0) or 0)
                         break
 
-            vals = {
-                "name": rate.get("Name", "") + " %",
-                "description": rate.get("Description", ""),
-                "qbo_tax_rate_id": str(rate.get("Id")),
-                "amount_type": "percent",
-                "amount": rate_value,
-                "type_tax_use": "none",  # Will be set by parent tax code
-                "company_id": company.id,
-                "country_id": company.country_id.id,
-                "tax_group_id": tax_group.id if tax_group else False,
-            }
-            tax_vals.append(vals)
+            # Create tax rate for sales
+            tax_vals.append(
+                {
+                    "name": rate.get("Name", "") + " %",
+                    "description": rate.get("Description", ""),
+                    "qbo_tax_rate_id": str(rate.get("Id")),
+                    "amount_type": "percent",
+                    "amount": rate_value,
+                    "type_tax_use": "sale",
+                    "company_id": company.id,
+                    "country_id": company.country_id.id,
+                    "tax_group_id": tax_group.id if tax_group else False,
+                }
+            )
+
+            # Create tax rate for purchases
+            tax_vals.append(
+                {
+                    "name": rate.get("Name", "") + " %",
+                    "description": rate.get("Description", ""),
+                    "qbo_tax_rate_id": str(rate.get("Id")),
+                    "amount_type": "percent",
+                    "amount": rate_value,
+                    "type_tax_use": "purchase",
+                    "company_id": company.id,
+                    "country_id": company.country_id.id,
+                    "tax_group_id": tax_group.id if tax_group else False,
+                }
+            )
 
         # Then create tax codes (group taxes that reference rates)
         for tc in tax_codes:
@@ -180,15 +197,6 @@ class QboTaxImporter(models.AbstractModel):
             _logger.info("No new taxes to create")
             return
 
-        created = 0
-        errors = 0
-
-        for vals in tax_vals:
-            try:
-                ctx.env["account.tax"].create(vals)
-                created += 1
-            except Exception as e:
-                _logger.error(f"Failed to create tax {vals.get('name')}: {e}")
-                errors += 1
-
-        _logger.info(f"Created {created} taxes, {errors} errors")
+        # Batch create taxes
+        taxes = ctx.env["account.tax"].create(tax_vals)
+        _logger.info(f"Created {len(taxes)} taxes")

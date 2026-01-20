@@ -159,34 +159,30 @@ class QboPaymentImporter(models.AbstractModel):
             pmt_type = pmt["type"]
             data = pmt["data"]
 
-            try:
-                if pmt_type == "customer":
-                    result = self._transform_customer_payment(
-                        data,
-                        customer_map,
-                        invoice_map,
-                        journal_id,
-                        bank_account_id,
-                        company,
-                        ctx,
-                    )
-                else:
-                    result = self._transform_bill_payment(
-                        data,
-                        vendor_map,
-                        bill_map,
-                        journal_id,
-                        bank_account_id,
-                        company,
-                        ctx,
-                    )
+            if pmt_type == "customer":
+                result = self._transform_customer_payment(
+                    data,
+                    customer_map,
+                    invoice_map,
+                    journal_id,
+                    bank_account_id,
+                    company,
+                    ctx,
+                )
+            else:
+                result = self._transform_bill_payment(
+                    data,
+                    vendor_map,
+                    bill_map,
+                    journal_id,
+                    bank_account_id,
+                    company,
+                    ctx,
+                )
 
-                if result:
-                    payment_data.extend(result)
-                else:
-                    skipped += 1
-            except Exception as e:
-                _logger.error(f"Error transforming payment {data.get('Id')}: {e}")
+            if result:
+                payment_data.extend(result)
+            else:
                 skipped += 1
 
         _logger.info(
@@ -341,6 +337,9 @@ class QboPaymentImporter(models.AbstractModel):
             _logger.info("No payment allocations to process")
             return
 
+        # Invalidate cache to ensure fresh data from DB
+        ctx.env.invalidate_all()
+
         # Batch fetch all moves needed
         move_ids = list({a["move_id"] for a in allocations})
         moves = ctx.env["account.move"].browse(move_ids)
@@ -413,7 +412,8 @@ class QboPaymentImporter(models.AbstractModel):
             }
 
             je_vals_list.append(je_vals)
-            reconciliation_pairs.append((line_to_reconcile, len(je_vals_list) - 1))
+            # Store move_id instead of recordset - we'll re-fetch fresh before reconciling
+            reconciliation_pairs.append((move.id, len(je_vals_list) - 1))
 
         if not je_vals_list:
             _logger.info("No valid payment journal entries to create")
@@ -429,20 +429,32 @@ class QboPaymentImporter(models.AbstractModel):
 
         # Phase 4: Reconcile each pair
         reconciled_count = 0
-        for line_to_reconcile, je_idx in reconciliation_pairs:
+        for original_move_id, je_idx in reconciliation_pairs:
             payment_move = payment_moves[je_idx]
+
+            # Re-fetch the invoice/bill fresh - the original check may be stale
+            # if the same invoice had multiple payment allocations in this batch
+            original_move = ctx.env["account.move"].browse(original_move_id)
+            line_to_reconcile = original_move.line_ids.filtered(
+                lambda l: l.account_id.account_type
+                in ("asset_receivable", "liability_payable")
+                and not l.reconciled
+            )
+
+            if not line_to_reconcile:
+                _logger.debug(
+                    f"No unreconciled line on {original_move.name} for {payment_move.name}"
+                )
+                continue
 
             payment_line = payment_move.line_ids.filtered(
                 lambda l: l.account_id.account_type
                 in ("asset_receivable", "liability_payable")
             )
 
-            if payment_line and line_to_reconcile:
-                try:
-                    (line_to_reconcile + payment_line).reconcile()
-                    reconciled_count += 1
-                except Exception as e:
-                    _logger.warning(f"Reconcile failed for {payment_move.name}: {e}")
+            if payment_line:
+                (line_to_reconcile + payment_line).reconcile()
+                reconciled_count += 1
 
         _logger.info(
             f"Created {len(payment_moves)} payment JEs, reconciled {reconciled_count}"

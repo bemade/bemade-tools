@@ -106,111 +106,106 @@ class QboBillImporter(models.AbstractModel):
         skipped = 0
 
         for bill in bills:
-            try:
-                # Get vendor
-                vendor_ref = bill.get("VendorRef", {})
-                qbo_vendor_id = int(vendor_ref.get("value", 0))
-                partner_id = vendor_map.get(qbo_vendor_id)
+            # Get vendor
+            vendor_ref = bill.get("VendorRef", {})
+            qbo_vendor_id = int(vendor_ref.get("value", 0))
+            partner_id = vendor_map.get(qbo_vendor_id)
 
-                if not partner_id:
-                    _logger.warning(
-                        f"Vendor not found for QBO ID {qbo_vendor_id} "
-                        f"in bill {bill.get('Id')}"
-                    )
-                    skipped += 1
-                    continue
-
-                # Parse dates
-                txn_date = bill.get("TxnDate")
-                due_date = bill.get("DueDate")
-
-                invoice_date = None
-                if txn_date:
-                    try:
-                        invoice_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
-                    except ValueError:
-                        invoice_date = datetime.now().date()
-
-                invoice_date_due = None
-                if due_date:
-                    try:
-                        invoice_date_due = datetime.strptime(
-                            due_date, "%Y-%m-%d"
-                        ).date()
-                    except ValueError:
-                        pass
-
-                # Get currency
-                currency_id = company.currency_id.id
-                currency_ref = bill.get("CurrencyRef", {})
-                if currency_ref:
-                    currency_code = currency_ref.get("value")
-                    if currency_code:
-                        currency = ctx.env["res.currency"].search(
-                            [("name", "=", currency_code)], limit=1
-                        )
-                        if currency:
-                            currency_id = currency.id
-
-                # Build bill lines
-                line_vals = []
-                for line in bill.get("Line", []):
-                    line_data = self._transform_bill_line(
-                        line, product_map, account_map, tax_map, tax_rate_map, bill, ctx
-                    )
-                    if line_data:
-                        line_vals.append((0, 0, line_data))
-
-                if not line_vals:
-                    _logger.warning(f"No valid lines for bill {bill.get('Id')}")
-                    skipped += 1
-                    continue
-
-                # Check total amount to determine if this is a refund
-                total_amt = float(bill.get("TotalAmt", 0) or 0)
-                move_type = "in_refund" if total_amt < 0 else "in_invoice"
-
-                # If refund, make line amounts positive
-                if move_type == "in_refund":
-                    for line_tuple in line_vals:
-                        line_data = line_tuple[2]
-                        if "price_unit" in line_data:
-                            line_data["price_unit"] = abs(line_data["price_unit"])
-
-                # Check for linked PurchaseOrder
-                purchase_order_id = None
-                for linked in bill.get("LinkedTxn", []):
-                    if linked.get("TxnType") == "PurchaseOrder":
-                        txn_id = str(linked.get("TxnId", ""))
-                        if txn_id in po_map:
-                            purchase_order_id = po_map[txn_id]
-                            break
-
-                vals = {
-                    "move_type": move_type,
-                    "journal_id": journal.id,
-                    "partner_id": partner_id,
-                    "invoice_date": invoice_date,
-                    "invoice_date_due": invoice_date_due,
-                    "currency_id": currency_id,
-                    "ref": bill.get("DocNumber", ""),
-                    "narration": bill.get("Memo", ""),
-                    "invoice_line_ids": line_vals,
-                    "qbo_bill_id": int(bill.get("Id")),
-                }
-
-                # Link to purchase order if found
-                if purchase_order_id:
-                    vals["invoice_origin"] = (
-                        ctx.env["purchase.order"].browse(purchase_order_id).name
-                    )
-
-                move_vals.append(vals)
-
-            except Exception as e:
-                _logger.error(f"Error transforming bill {bill.get('Id')}: {e}")
+            if not partner_id:
+                _logger.warning(
+                    f"Vendor not found for QBO ID {qbo_vendor_id} "
+                    f"in bill {bill.get('Id')}"
+                )
                 skipped += 1
+                continue
 
+            # Parse dates
+            txn_date = bill.get("TxnDate")
+            due_date = bill.get("DueDate")
+
+            invoice_date = None
+            if txn_date:
+                try:
+                    invoice_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
+                except ValueError:
+                    invoice_date = datetime.now().date()
+
+            invoice_date_due = None
+            if due_date:
+                try:
+                    invoice_date_due = datetime.strptime(due_date, "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+
+            # Get currency
+            currency_id = company.currency_id.id
+            currency_ref = bill.get("CurrencyRef", {})
+            if currency_ref:
+                currency_code = currency_ref.get("value")
+                if currency_code:
+                    currency = ctx.env["res.currency"].search(
+                        [("name", "=", currency_code)], limit=1
+                    )
+                    if currency:
+                        currency_id = currency.id
+
+            # Build bill lines
+            line_vals = []
+            for line in bill.get("Line", []):
+                line_data = self._transform_bill_line(
+                    line, product_map, account_map, tax_map, tax_rate_map, bill, ctx
+                )
+                if line_data:
+                    line_vals.append((0, 0, line_data))
+
+            if not line_vals:
+                _logger.warning(f"No valid lines for bill {bill.get('Id')}")
+                skipped += 1
+                continue
+
+            # Compute actual total from line amounts to determine move type
+            computed_total = sum(
+                line_tuple[2].get("price_unit", 0) * line_tuple[2].get("quantity", 1)
+                for line_tuple in line_vals
+            )
+            move_type = "in_refund" if computed_total < 0 else "in_invoice"
+
+            # For refunds, make line amounts positive (Odoo expects positive amounts)
+            if move_type == "in_refund":
+                for line_tuple in line_vals:
+                    line_data = line_tuple[2]
+                    if "price_unit" in line_data:
+                        line_data["price_unit"] = abs(line_data["price_unit"])
+
+            # Check for linked PurchaseOrder
+            purchase_order_id = None
+            for linked in bill.get("LinkedTxn", []):
+                if linked.get("TxnType") == "PurchaseOrder":
+                    txn_id = str(linked.get("TxnId", ""))
+                    if txn_id in po_map:
+                        purchase_order_id = po_map[txn_id]
+                        break
+
+            vals = {
+                "move_type": move_type,
+                "journal_id": journal.id,
+                "partner_id": partner_id,
+                "invoice_date": invoice_date,
+                "invoice_date_due": invoice_date_due,
+                "currency_id": currency_id,
+                "ref": bill.get("DocNumber", ""),
+                "narration": bill.get("Memo", ""),
+                "invoice_line_ids": line_vals,
+                "qbo_bill_id": int(bill.get("Id")),
+            }
+
+            # Link to purchase order if found
+            if purchase_order_id:
+                vals["invoice_origin"] = (
+                    ctx.env["purchase.order"].browse(purchase_order_id).name
+                )
+
+            move_vals.append(vals)
         _logger.info(f"Transformed {len(move_vals)} bills, skipped {skipped}")
         return move_vals
 
@@ -329,25 +324,14 @@ class QboBillImporter(models.AbstractModel):
 
         created = 0
         posted = 0
-        errors = 0
 
         for vals in move_vals:
-            try:
-                move = ctx.env["account.move"].create(vals)
-                created += 1
+            move = ctx.env["account.move"].create(vals)
+            created += 1
+            move.action_post()
+            posted += 1
 
-                # Try to post the bill
-                try:
-                    move.action_post()
-                    posted += 1
-                except Exception as e:
-                    _logger.warning(f"Could not post bill {vals.get('ref')}: {e}")
-
-            except Exception as e:
-                _logger.error(f"Failed to create bill {vals.get('ref')}: {e}")
-                errors += 1
-
-        _logger.info(f"Created {created} bills ({posted} posted), {errors} errors")
+        _logger.info(f"Created {created} bills ({posted} posted)")
 
         # Update last sync timestamp
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))

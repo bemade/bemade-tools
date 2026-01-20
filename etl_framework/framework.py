@@ -60,12 +60,57 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
 import psycopg2
+import psycopg2.errors
+import psycopg2.extensions
 from enum import Enum
+
+# Errors that should bubble up for retry by the orchestrator
+# These are transient database errors that can be resolved by retrying
+RETRYABLE_ERRORS = (
+    psycopg2.errors.SerializationFailure,
+    psycopg2.errors.DeadlockDetected,
+    psycopg2.extensions.TransactionRollbackError,
+)
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from contextlib import contextmanager
 
 from odoo import api
 from odoo.modules.registry import Registry
 from odoo.tools import mute_logger
+
+
+@contextmanager
+def mute_retryable_errors():
+    """Context manager that only mutes logging for retryable DB errors.
+
+    Non-retryable errors (constraint violations, data errors, etc.) will
+    still be logged normally so we can see the actual root cause.
+    """
+    import logging
+
+    class RetryableErrorFilter(logging.Filter):
+        """Filter that suppresses only retryable error messages."""
+
+        def filter(self, record):
+            # Check if this is a retryable error message
+            msg = record.getMessage().lower()
+            retryable_keywords = [
+                "serialization",
+                "deadlock",
+                "could not serialize",
+                "concurrent update",
+            ]
+            return not any(kw in msg for kw in retryable_keywords)
+
+    sql_logger = logging.getLogger("odoo.sql_db")
+    error_filter = RetryableErrorFilter()
+    sql_logger.addFilter(error_filter)
+    try:
+        yield
+    finally:
+        sql_logger.removeFilter(error_filter)
+
 
 _logger = logging.getLogger(__name__)
 
@@ -782,9 +827,9 @@ class ETLExecutor:
             # Create ETL context with Odoo cursor (no SAP cursor in multiprocessing)
             ctx = ETLContext(cr=None, env=env)
 
-            # Mute sql_db to suppress noisy serialization error logs in worker processes
-            # (errors still propagate for retry in the main process)
-            with mute_logger("odoo.sql_db"):
+            # Mute only retryable errors (deadlocks, serialization failures) in worker processes
+            # Non-retryable errors (constraint violations, data errors) are still logged
+            with mute_retryable_errors():
                 # Transform
                 # The chunk is already the full extracted_data dict from all extract methods
                 # (passed from _execute_parallel as extracted_data parameter)

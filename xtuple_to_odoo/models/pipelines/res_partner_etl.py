@@ -234,8 +234,8 @@ class XtuplePartnerCustomerImporter(models.AbstractModel):
     _inherit = "xtuple.partner.import.mixin"
 
     @ETL.extract("custinfo")
-    def extract_customers(self, ctx: ETLContext) -> List[Dict]:
-        """Extract customers from xTuple custinfo table."""
+    def extract_new_customers(self, ctx: ETLContext) -> List[Dict]:
+        """Extract new customers from xTuple that don't exist in Odoo."""
         ctx.env.cr.execute(
             "SELECT xtuple_cust_id FROM res_partner WHERE xtuple_cust_id IS NOT NULL"
         )
@@ -247,9 +247,6 @@ class XtuplePartnerCustomerImporter(models.AbstractModel):
             "SELECT LOWER(name) FROM res_partner WHERE name IS NOT NULL AND name != ''"
         )
         existing_names = {row[0] for row in ctx.env.cr.fetchall()}
-        _logger.info(
-            f"Found {len(existing_names)} existing partners by name for deduplication"
-        )
 
         select_clause = f"""
         SELECT
@@ -270,70 +267,144 @@ class XtuplePartnerCustomerImporter(models.AbstractModel):
         ctx.cr.execute(sql)
         customers = ctx.cr.dictfetchall()
 
-        # Filter out customers that match existing partners by name (deduplication)
-        deduped_customers = [
+        # Filter to only new customers (not matching existing by name)
+        new_customers = [
             c
             for c in customers
             if not c.get("cust_name")
             or c.get("cust_name", "").lower() not in existing_names
         ]
 
-        _logger.info(
-            f"Extracted {len(customers)} customers from xTuple, "
-            f"{len(deduped_customers)} after deduplication by name"
+        _logger.info(f"Extracted {len(new_customers)} new customers from xTuple")
+        return new_customers
+
+    @ETL.extract("custinfo_update")
+    def extract_customers_to_update(self, ctx: ETLContext) -> List[Dict]:
+        """Extract customers that exist in Odoo by name but need xTuple fields."""
+        ctx.env.cr.execute(
+            "SELECT xtuple_cust_id FROM res_partner WHERE xtuple_cust_id IS NOT NULL"
         )
-        return deduped_customers
+        existing_cust_ids = tuple([row[0] for row in ctx.env.cr.fetchall()])
+
+        # Get existing partner names for matching
+        ctx.env.cr.execute(
+            "SELECT LOWER(name) FROM res_partner WHERE name IS NOT NULL AND name != ''"
+        )
+        existing_names = {row[0] for row in ctx.env.cr.fetchall()}
+
+        select_clause = f"""
+        SELECT
+            {CUSTOMER_SELECT},
+            crmacct_parent_id,
+            crmacct.crmacct_id
+        FROM custinfo
+        LEFT JOIN cntct ON (cust_cntct_id = cntct_id)
+        LEFT JOIN addr ON (cntct_addr_id = addr_id)
+        LEFT JOIN crmacct ON (crmacct_cust_id = cust_id)
+        """
+
+        if existing_cust_ids:
+            sql = SQL(select_clause + "WHERE cust_id NOT IN %s", existing_cust_ids)
+        else:
+            sql = SQL(select_clause)
+
+        ctx.cr.execute(sql)
+        customers = ctx.cr.dictfetchall()
+
+        # Filter to only customers that match existing partners by name (need update)
+        customers_to_update = [
+            c
+            for c in customers
+            if c.get("cust_name") and c.get("cust_name", "").lower() in existing_names
+        ]
+
+        _logger.info(
+            f"Extracted {len(customers_to_update)} customers to update with xTuple fields"
+        )
+        return customers_to_update
 
     @ETL.transform()
-    def transform_customers(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+    def transform_customers(self, ctx: ETLContext, extracted: Dict) -> Dict:
         """Transform xTuple customers into Odoo partner values."""
-        customers = extracted.get("extract_customers", [])
+        new_customers = extracted.get("extract_new_customers", [])
+        customers_to_update = extracted.get("extract_customers_to_update", [])
         countries_dict = self._get_countries_dict()
         states_dict = self._get_states_dict()
         company_id = ctx.env.company.id
 
-        partner_vals = []
-        for customer in customers:
-            try:
-                address_info = self._extract_address_info(
-                    customer, countries_dict, states_dict
-                )
+        # Transform new customers for creation
+        create_vals = []
+        for customer in new_customers:
+            address_info = self._extract_address_info(
+                customer, countries_dict, states_dict
+            )
 
-                vals = self._build_partner_vals(
-                    customer,
-                    address_info,
-                    company_id,
-                    is_company=True,
-                    active_field="cust_active",
-                )
-                vals.update(
-                    {
-                        "ref": customer.get("cust_number"),
-                        "name": customer.get("cust_name", ""),
-                        "xtuple_cust_id": customer.get("cust_id"),
-                        "xtuple_crmacct_id": customer.get("crmacct_id"),
-                        "xtuple_partner_type": "customer",
-                        "customer_rank": 1,
-                    }
-                )
-                partner_vals.append(vals)
-            except Exception as e:
-                _logger.error(
-                    f"Error transforming customer {customer.get('cust_id')}: {str(e)}"
-                )
+            vals = self._build_partner_vals(
+                customer,
+                address_info,
+                company_id,
+                is_company=True,
+                active_field="cust_active",
+            )
+            vals.update(
+                {
+                    "ref": customer.get("cust_number"),
+                    "name": customer.get("cust_name", ""),
+                    "xtuple_cust_id": customer.get("cust_id"),
+                    "xtuple_crmacct_id": customer.get("crmacct_id"),
+                    "xtuple_partner_type": "customer",
+                    "customer_rank": 1,
+                }
+            )
+            create_vals.append(vals)
 
-        _logger.info(f"Transformed {len(partner_vals)} customer records")
-        return partner_vals
+        # Transform customers that need xTuple fields updated
+        update_vals = []
+        for customer in customers_to_update:
+            update_vals.append(
+                {
+                    "name": customer.get("cust_name", ""),
+                    "xtuple_cust_id": customer.get("cust_id"),
+                    "xtuple_crmacct_id": customer.get("crmacct_id"),
+                    "xtuple_partner_type": "customer",
+                }
+            )
+
+        _logger.info(
+            f"Transformed {len(create_vals)} new customers, "
+            f"{len(update_vals)} customers to update"
+        )
+        return {"create": create_vals, "update": update_vals}
 
     @ETL.load()
     def load_customers(self, ctx: ETLContext, transformed: Dict) -> None:
         """Load customers into Odoo."""
-        partner_vals = transformed.get("transform_customers", [])
-        if partner_vals:
-            partners = ctx.env["res.partner"].create(partner_vals)
+        data = transformed.get("transform_customers", {})
+        create_vals = data.get("create", [])
+        update_vals = data.get("update", [])
+
+        # Create new customers
+        if create_vals:
+            partners = ctx.env["res.partner"].create(create_vals)
             _logger.info(f"Created {len(partners)} customer partners")
-        else:
-            _logger.info("No new customers to create")
+
+        # Update existing partners with xTuple fields
+        if update_vals:
+            updated = 0
+            for vals in update_vals:
+                name = vals.pop("name")
+                partner = ctx.env["res.partner"].search(
+                    [("name", "=ilike", name)], limit=1
+                )
+                if partner:
+                    partner.write(vals)
+                    updated += 1
+            _logger.info(
+                f"Updated {updated} existing partners with xTuple customer fields"
+            )
+
+        if not create_vals and not update_vals:
+            _logger.info("No customers to create or update")
 
 
 # =============================================================================
@@ -354,26 +425,19 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
     _description = "xTuple Vendor Importer"
     _inherit = "xtuple.partner.import.mixin"
 
-    @ETL.extract("vendinfo")
-    def extract_vendors(self, ctx: ETLContext) -> List[Dict]:
-        """Extract vendors from xTuple vendinfo table."""
+    def _get_vendor_base_query(self, ctx: ETLContext):
+        """Get base vendor query and existing IDs."""
         ctx.env.cr.execute(
             "SELECT xtuple_vend_id FROM res_partner WHERE xtuple_vend_id IS NOT NULL"
         )
         existing_vend_ids = tuple([row[0] for row in ctx.env.cr.fetchall()])
-        _logger.info(f"Found {len(existing_vend_ids)} existing vendors in Odoo")
 
-        # Get existing partner names for deduplication (cross-system matching)
         ctx.env.cr.execute(
             "SELECT LOWER(name) FROM res_partner WHERE name IS NOT NULL AND name != ''"
         )
         existing_names = {row[0] for row in ctx.env.cr.fetchall()}
-        _logger.info(
-            f"Found {len(existing_names)} existing partners by name for deduplication"
-        )
 
-        # Get customer ID to partner ID mapping (needed for transform, done here for multiprocessing)
-        # This is used to check if a vendor is also a customer
+        # Get customer ID to partner ID mapping for vendor/customer linking
         ctx.env.cr.execute(
             "SELECT xtuple_cust_id, id FROM res_partner WHERE xtuple_cust_id IS NOT NULL"
         )
@@ -398,43 +462,67 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
         ctx.cr.execute(sql)
         vendors = ctx.cr.dictfetchall()
 
-        # Embed existing customer partner ID in each vendor record for multiprocessing
+        # Embed existing customer partner ID in each vendor record
         for vendor in vendors:
             vend_id = vendor.get("vend_id")
             if vend_id in cust_id_to_partner:
                 vendor["_existing_customer_partner_id"] = cust_id_to_partner[vend_id]
 
-        # Filter out vendors that match existing partners by name (deduplication)
-        deduped_vendors = [
+        return vendors, existing_names, len(existing_vend_ids)
+
+    @ETL.extract("vendinfo")
+    def extract_new_vendors(self, ctx: ETLContext) -> List[Dict]:
+        """Extract new vendors from xTuple that don't exist in Odoo."""
+        vendors, existing_names, existing_count = self._get_vendor_base_query(ctx)
+        _logger.info(f"Found {existing_count} existing vendors in Odoo")
+
+        # Filter to only new vendors (not matching existing by name)
+        new_vendors = [
             v
             for v in vendors
             if not v.get("vend_name")
             or v.get("vend_name", "").lower() not in existing_names
         ]
 
+        _logger.info(f"Extracted {len(new_vendors)} new vendors from xTuple")
+        return new_vendors
+
+    @ETL.extract("vendinfo_update")
+    def extract_vendors_to_update(self, ctx: ETLContext) -> List[Dict]:
+        """Extract vendors that exist in Odoo by name but need xTuple fields."""
+        vendors, existing_names, _ = self._get_vendor_base_query(ctx)
+
+        # Filter to only vendors that match existing partners by name (need update)
+        vendors_to_update = [
+            v
+            for v in vendors
+            if v.get("vend_name") and v.get("vend_name", "").lower() in existing_names
+        ]
+
         _logger.info(
-            f"Extracted {len(vendors)} vendors from xTuple, "
-            f"{len(deduped_vendors)} after deduplication by name"
+            f"Extracted {len(vendors_to_update)} vendors to update with xTuple fields"
         )
-        return deduped_vendors
+        return vendors_to_update
 
     @ETL.transform()
     def transform_vendors(self, ctx: ETLContext, extracted: Dict) -> Dict[str, Any]:
         """Transform xTuple vendors into Odoo partner values."""
-        vendors = extracted.get("extract_vendors", [])
+        new_vendors = extracted.get("extract_new_vendors", [])
+        vendors_to_update = extracted.get("extract_vendors_to_update", [])
         countries_dict = self._get_countries_dict()
         states_dict = self._get_states_dict()
         company_id = ctx.env.company.id
 
-        vendor_ids_to_update = []
-        partner_vals = []
+        # Track vendors that are also customers (need to update existing customer record)
+        customer_vendor_updates = []
+        create_vals = []
 
-        for vendor in vendors:
+        for vendor in new_vendors:
             # Check if this vendor is also a customer (lookup done in extract phase)
             existing_customer_id = vendor.get("_existing_customer_partner_id")
 
             if existing_customer_id:
-                vendor_ids_to_update.append(
+                customer_vendor_updates.append(
                     (existing_customer_id, int(vendor.get("vend_id")))
                 )
                 continue
@@ -464,23 +552,40 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
                     "supplier_rank": 1,
                 }
             )
-            partner_vals.append(vals)
+            create_vals.append(vals)
 
-        _logger.info(f"Transformed {len(partner_vals)} vendor records")
+        # Transform vendors that need xTuple fields updated (matched by name)
+        update_vals = []
+        for vendor in vendors_to_update:
+            update_vals.append(
+                {
+                    "name": vendor.get("vend_name", ""),
+                    "xtuple_vend_id": int(vendor.get("vend_id")),
+                    "xtuple_crmacct_id": vendor.get("vend_crmacct_id"),
+                    "xtuple_partner_type": "vendor",
+                }
+            )
+
+        _logger.info(
+            f"Transformed {len(create_vals)} new vendors, "
+            f"{len(update_vals)} vendors to update"
+        )
         return {
-            "partner_vals": partner_vals,
-            "vendor_ids_to_update": vendor_ids_to_update,
+            "create": create_vals,
+            "update": update_vals,
+            "customer_vendor_updates": customer_vendor_updates,
         }
 
     @ETL.load()
     def load_vendors(self, ctx: ETLContext, transformed: Dict) -> None:
         """Load vendors into Odoo."""
         data = transformed.get("transform_vendors", {})
-        partner_vals = data.get("partner_vals", [])
-        vendor_ids_to_update = data.get("vendor_ids_to_update", [])
+        create_vals = data.get("create", [])
+        update_vals = data.get("update", [])
+        customer_vendor_updates = data.get("customer_vendor_updates", [])
 
         # Update existing customers to be both customer and vendor
-        for partner_id, vend_id in vendor_ids_to_update:
+        for partner_id, vend_id in customer_vendor_updates:
             ctx.env.cr.execute(
                 """
                 UPDATE res_partner
@@ -489,17 +594,33 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
                 """,
                 (vend_id, partner_id),
             )
-        if vendor_ids_to_update:
+        if customer_vendor_updates:
             _logger.info(
-                f"Updated {len(vendor_ids_to_update)} existing customers to be both customer and vendor"
+                f"Updated {len(customer_vendor_updates)} existing customers to be both customer and vendor"
+            )
+
+        # Update existing partners with xTuple vendor fields (matched by name)
+        if update_vals:
+            updated = 0
+            for vals in update_vals:
+                name = vals.pop("name")
+                partner = ctx.env["res.partner"].search(
+                    [("name", "=ilike", name)], limit=1
+                )
+                if partner:
+                    partner.write(vals)
+                    updated += 1
+            _logger.info(
+                f"Updated {updated} existing partners with xTuple vendor fields"
             )
 
         # Create new vendor partners
-        if partner_vals:
-            partners = ctx.env["res.partner"].create(partner_vals)
+        if create_vals:
+            partners = ctx.env["res.partner"].create(create_vals)
             _logger.info(f"Created {len(partners)} vendor partners")
-        else:
-            _logger.info("No new vendors to create")
+
+        if not create_vals and not update_vals and not customer_vendor_updates:
+            _logger.info("No vendors to create or update")
 
 
 # =============================================================================

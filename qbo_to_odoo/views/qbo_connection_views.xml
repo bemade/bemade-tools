@@ -53,60 +53,6 @@
                     <notebook>
                         <page string="Import Actions" invisible="state != 'connected'">
                             <group>
-                                <button name="action_import_accounts" 
-                                        string="Import Chart of Accounts" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_import_categories" 
-                                        string="Import Product Categories" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_import_customers" 
-                                        string="Import Customers" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_import_vendors" 
-                                        string="Import Vendors" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_import_products" 
-                                        string="Import Products/Services" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_import_journal_entries" 
-                                        string="Import Journal Entries" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_import_payment_terms" 
-                                        string="Import Payment Terms" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_import_taxes" 
-                                        string="Import Taxes" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_import_invoices" 
-                                        string="Import Invoices" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_import_bills" 
-                                        string="Import Bills" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_import_payments" 
-                                        string="Import Payments" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_create_bank_journals" 
-                                        string="Create Bank Journals" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                                <button name="action_reconcile_payments" 
-                                        string="Reconcile Payments" 
-                                        type="object" 
-                                        class="btn-secondary"/>
-                            </group>
-                            <group>
                                 <button name="action_import_all" 
                                         string="Import All Data" 
                                         type="object" 

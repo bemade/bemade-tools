@@ -159,19 +159,9 @@ class QboAccountImporter(models.AbstractModel):
             _logger.info("No new accounts to create")
             return
 
-        # Create accounts one by one to handle potential errors
-        created = 0
-        errors = 0
-
-        for vals in account_vals:
-            try:
-                ctx.env["account.account"].create(vals)
-                created += 1
-            except Exception as e:
-                _logger.error(f"Failed to create account {vals.get('code')}: {e}")
-                errors += 1
-
-        _logger.info(f"Created {created} accounts, {errors} errors")
+        # Batch create accounts
+        accounts = ctx.env["account.account"].create(account_vals)
+        _logger.info(f"Created {len(accounts)} accounts")
 
         # Update last sync timestamp
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))

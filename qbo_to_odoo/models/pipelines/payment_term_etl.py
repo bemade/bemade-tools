@@ -107,15 +107,6 @@ class QboTermImporter(models.AbstractModel):
             _logger.info("No new payment terms to create")
             return
 
-        created = 0
-        errors = 0
-
-        for vals in term_vals:
-            try:
-                ctx.env["account.payment.term"].create(vals)
-                created += 1
-            except Exception as e:
-                _logger.error(f"Failed to create payment term {vals.get('name')}: {e}")
-                errors += 1
-
-        _logger.info(f"Created {created} payment terms, {errors} errors")
+        # Batch create payment terms
+        terms = ctx.env["account.payment.term"].create(term_vals)
+        _logger.info(f"Created {len(terms)} payment terms")

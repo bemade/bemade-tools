@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_ERRORS
 
 from .utils import get_api_client
 
@@ -95,73 +95,68 @@ class QboCreditMemoImporter(models.AbstractModel):
         skipped = 0
 
         for cm in credit_memos:
-            try:
-                # Get customer
-                customer_ref = cm.get("CustomerRef", {})
-                qbo_customer_id = int(customer_ref.get("value", 0))
-                partner_id = customer_map.get(qbo_customer_id)
+            # Get customer
+            customer_ref = cm.get("CustomerRef", {})
+            qbo_customer_id = int(customer_ref.get("value", 0))
+            partner_id = customer_map.get(qbo_customer_id)
 
-                if not partner_id:
-                    _logger.warning(
-                        f"Customer not found for QBO ID {qbo_customer_id} "
-                        f"in credit memo {cm.get('Id')}"
-                    )
-                    skipped += 1
-                    continue
-
-                # Parse dates
-                txn_date = cm.get("TxnDate")
-
-                invoice_date = None
-                if txn_date:
-                    try:
-                        invoice_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
-                    except ValueError:
-                        invoice_date = datetime.now().date()
-
-                # Get currency
-                currency_id = company.currency_id.id
-                currency_ref = cm.get("CurrencyRef", {})
-                if currency_ref:
-                    currency_code = currency_ref.get("value")
-                    if currency_code:
-                        currency = ctx.env["res.currency"].search(
-                            [("name", "=", currency_code)], limit=1
-                        )
-                        if currency:
-                            currency_id = currency.id
-
-                # Build credit memo lines
-                line_vals = []
-                for line in cm.get("Line", []):
-                    line_data = self._transform_credit_memo_line(
-                        line, product_map, tax_map, tax_rate_map, cm, ctx
-                    )
-                    if line_data:
-                        line_vals.append((0, 0, line_data))
-
-                if not line_vals:
-                    _logger.warning(f"No valid lines for credit memo {cm.get('Id')}")
-                    skipped += 1
-                    continue
-
-                vals = {
-                    "move_type": "out_refund",
-                    "journal_id": journal.id,
-                    "partner_id": partner_id,
-                    "invoice_date": invoice_date,
-                    "currency_id": currency_id,
-                    "ref": cm.get("DocNumber", ""),
-                    "narration": cm.get("CustomerMemo", {}).get("value", ""),
-                    "invoice_line_ids": line_vals,
-                    "qbo_credit_memo_id": int(cm.get("Id", 0)),
-                }
-
-                move_vals.append(vals)
-
-            except Exception as e:
-                _logger.error(f"Error transforming credit memo {cm.get('Id')}: {e}")
+            if not partner_id:
+                _logger.warning(
+                    f"Customer not found for QBO ID {qbo_customer_id} "
+                    f"in credit memo {cm.get('Id')}"
+                )
                 skipped += 1
+                continue
+
+            # Parse dates
+            txn_date = cm.get("TxnDate")
+
+            invoice_date = None
+            if txn_date:
+                try:
+                    invoice_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
+                except ValueError:
+                    invoice_date = datetime.now().date()
+
+            # Get currency
+            currency_id = company.currency_id.id
+            currency_ref = cm.get("CurrencyRef", {})
+            if currency_ref:
+                currency_code = currency_ref.get("value")
+                if currency_code:
+                    currency = ctx.env["res.currency"].search(
+                        [("name", "=", currency_code)], limit=1
+                    )
+                    if currency:
+                        currency_id = currency.id
+
+            # Build credit memo lines
+            line_vals = []
+            for line in cm.get("Line", []):
+                line_data = self._transform_credit_memo_line(
+                    line, product_map, tax_map, tax_rate_map, cm, ctx
+                )
+                if line_data:
+                    line_vals.append((0, 0, line_data))
+
+            if not line_vals:
+                _logger.warning(f"No valid lines for credit memo {cm.get('Id')}")
+                skipped += 1
+                continue
+
+            vals = {
+                "move_type": "out_refund",
+                "journal_id": journal.id,
+                "partner_id": partner_id,
+                "invoice_date": invoice_date,
+                "currency_id": currency_id,
+                "ref": cm.get("DocNumber", ""),
+                "narration": cm.get("CustomerMemo", {}).get("value", ""),
+                "invoice_line_ids": line_vals,
+                "qbo_credit_memo_id": int(cm.get("Id", 0)),
+            }
+
+            move_vals.append(vals)
 
         _logger.info(f"Transformed {len(move_vals)} credit memos, skipped {skipped}")
         return move_vals
@@ -254,22 +249,15 @@ class QboCreditMemoImporter(models.AbstractModel):
         errors = 0
 
         for vals in move_vals:
+            move = ctx.env["account.move"].create(vals)
+            created += 1
+
             try:
-                move = ctx.env["account.move"].create(vals)
-                created += 1
-
-                try:
-                    move.action_post()
-                    posted += 1
-                except Exception as e:
-                    _logger.warning(
-                        f"Could not post credit memo {vals.get('ref')}: {e}"
-                    )
-
+                move.action_post()
+                posted += 1
+            except RETRYABLE_ERRORS:
+                raise
             except Exception as e:
-                _logger.error(f"Failed to create credit memo {vals.get('ref')}: {e}")
-                errors += 1
+                _logger.warning(f"Could not post credit memo {vals.get('ref')}: {e}")
 
-        _logger.info(
-            f"Created {created} credit memos ({posted} posted), {errors} errors"
-        )
+        _logger.info(f"Created {created} credit memos ({posted} posted)")

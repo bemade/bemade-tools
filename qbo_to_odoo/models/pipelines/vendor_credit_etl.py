@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_ERRORS
 
 from .utils import get_api_client
 
@@ -100,73 +100,68 @@ class QboVendorCreditImporter(models.AbstractModel):
         skipped = 0
 
         for vc in vendor_credits:
-            try:
-                # Get vendor
-                vendor_ref = vc.get("VendorRef", {})
-                qbo_vendor_id = int(vendor_ref.get("value", 0))
-                partner_id = vendor_map.get(qbo_vendor_id)
+            # Get vendor
+            vendor_ref = vc.get("VendorRef", {})
+            qbo_vendor_id = int(vendor_ref.get("value", 0))
+            partner_id = vendor_map.get(qbo_vendor_id)
 
-                if not partner_id:
-                    _logger.warning(
-                        f"Vendor not found for QBO ID {qbo_vendor_id} "
-                        f"in vendor credit {vc.get('Id')}"
-                    )
-                    skipped += 1
-                    continue
-
-                # Parse dates
-                txn_date = vc.get("TxnDate")
-
-                invoice_date = None
-                if txn_date:
-                    try:
-                        invoice_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
-                    except ValueError:
-                        invoice_date = datetime.now().date()
-
-                # Get currency
-                currency_id = company.currency_id.id
-                currency_ref = vc.get("CurrencyRef", {})
-                if currency_ref:
-                    currency_code = currency_ref.get("value")
-                    if currency_code:
-                        currency = ctx.env["res.currency"].search(
-                            [("name", "=", currency_code)], limit=1
-                        )
-                        if currency:
-                            currency_id = currency.id
-
-                # Build vendor credit lines
-                line_vals = []
-                for line in vc.get("Line", []):
-                    line_data = self._transform_vendor_credit_line(
-                        line, product_map, account_map, tax_map, tax_rate_map, vc, ctx
-                    )
-                    if line_data:
-                        line_vals.append((0, 0, line_data))
-
-                if not line_vals:
-                    _logger.warning(f"No valid lines for vendor credit {vc.get('Id')}")
-                    skipped += 1
-                    continue
-
-                vals = {
-                    "move_type": "in_refund",
-                    "journal_id": journal.id,
-                    "partner_id": partner_id,
-                    "invoice_date": invoice_date,
-                    "currency_id": currency_id,
-                    "ref": vc.get("DocNumber", ""),
-                    "narration": vc.get("Memo", ""),
-                    "invoice_line_ids": line_vals,
-                    "qbo_vendor_credit_id": int(vc.get("Id", 0)),
-                }
-
-                move_vals.append(vals)
-
-            except Exception as e:
-                _logger.error(f"Error transforming vendor credit {vc.get('Id')}: {e}")
+            if not partner_id:
+                _logger.warning(
+                    f"Vendor not found for QBO ID {qbo_vendor_id} "
+                    f"in vendor credit {vc.get('Id')}"
+                )
                 skipped += 1
+                continue
+
+            # Parse dates
+            txn_date = vc.get("TxnDate")
+
+            invoice_date = None
+            if txn_date:
+                try:
+                    invoice_date = datetime.strptime(txn_date, "%Y-%m-%d").date()
+                except ValueError:
+                    invoice_date = datetime.now().date()
+
+            # Get currency
+            currency_id = company.currency_id.id
+            currency_ref = vc.get("CurrencyRef", {})
+            if currency_ref:
+                currency_code = currency_ref.get("value")
+                if currency_code:
+                    currency = ctx.env["res.currency"].search(
+                        [("name", "=", currency_code)], limit=1
+                    )
+                    if currency:
+                        currency_id = currency.id
+
+            # Build vendor credit lines
+            line_vals = []
+            for line in vc.get("Line", []):
+                line_data = self._transform_vendor_credit_line(
+                    line, product_map, account_map, tax_map, tax_rate_map, vc, ctx
+                )
+                if line_data:
+                    line_vals.append((0, 0, line_data))
+
+            if not line_vals:
+                _logger.warning(f"No valid lines for vendor credit {vc.get('Id')}")
+                skipped += 1
+                continue
+
+            vals = {
+                "move_type": "in_refund",
+                "journal_id": journal.id,
+                "partner_id": partner_id,
+                "invoice_date": invoice_date,
+                "currency_id": currency_id,
+                "ref": vc.get("DocNumber", ""),
+                "narration": vc.get("Memo", ""),
+                "invoice_line_ids": line_vals,
+                "qbo_vendor_credit_id": int(vc.get("Id", 0)),
+            }
+
+            move_vals.append(vals)
 
         _logger.info(f"Transformed {len(move_vals)} vendor credits, skipped {skipped}")
         return move_vals
@@ -293,22 +288,15 @@ class QboVendorCreditImporter(models.AbstractModel):
         errors = 0
 
         for vals in move_vals:
+            move = ctx.env["account.move"].create(vals)
+            created += 1
+
             try:
-                move = ctx.env["account.move"].create(vals)
-                created += 1
-
-                try:
-                    move.action_post()
-                    posted += 1
-                except Exception as e:
-                    _logger.warning(
-                        f"Could not post vendor credit {vals.get('ref')}: {e}"
-                    )
-
+                move.action_post()
+                posted += 1
+            except RETRYABLE_ERRORS:
+                raise
             except Exception as e:
-                _logger.error(f"Failed to create vendor credit {vals.get('ref')}: {e}")
-                errors += 1
+                _logger.warning(f"Could not post vendor credit {vals.get('ref')}: {e}")
 
-        _logger.info(
-            f"Created {created} vendor credits ({posted} posted), {errors} errors"
-        )
+        _logger.info(f"Created {created} vendor credits ({posted} posted)")

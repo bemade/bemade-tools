@@ -172,3 +172,175 @@ class XtupleMrpProductionImporter(models.AbstractModel):
                 .create(production_vals)
             )
             _logger.info(f"Created {len(productions)} manufacturing orders")
+
+
+# =============================================================================
+# MO Component Lines (womatl -> stock.move)
+# =============================================================================
+
+SELECT_WOMATL = """
+    SELECT
+        womatl_id,
+        womatl_wo_id,
+        womatl_itemsite_id,
+        womatl_qtyreq,
+        womatl_qtyiss,
+        womatl_bomitem_id,
+        womatl_seqnumber,
+        womatl_notes,
+        item_id,
+        item_number
+    FROM womatl
+    LEFT JOIN itemsite ON womatl_itemsite_id = itemsite_id
+    LEFT JOIN item ON itemsite_item_id = item_id
+"""
+
+
+@ETL.pipeline(
+    target_model="stock.move",
+    importer_name="xtuple.mrp.consumption.importer",
+    sap_source="womatl",
+    depends_on=[
+        "xtuple.mrp.production.importer",
+    ],
+    chunk_size=500,
+)
+class XtupleMrpConsumptionImporter(models.AbstractModel):
+    """ETL Pipeline for importing MO component lines from xTuple womatl."""
+
+    _name = "xtuple.mrp.consumption.importer"
+    _description = "xTuple MO Component Importer"
+
+    @ETL.extract("womatl")
+    def extract_womatl(self, ctx: ETLContext) -> List[Dict]:
+        """Extract work order material lines from xTuple."""
+        # Check for existing stock moves
+        ctx.env.cr.execute(
+            "SELECT xtuple_womatl_id FROM stock_move WHERE xtuple_womatl_id IS NOT NULL"
+        )
+        existing_womatl_ids = [row[0] for row in ctx.env.cr.fetchall()]
+        _logger.info(
+            f"Found {len(existing_womatl_ids)} existing MO component moves in Odoo"
+        )
+
+        # Extract womatl lines
+        if existing_womatl_ids:
+            ctx.cr.execute(
+                SELECT_WOMATL + " WHERE womatl_id NOT IN %s",
+                (tuple(existing_womatl_ids),),
+            )
+        else:
+            ctx.cr.execute(SELECT_WOMATL)
+
+        womatl_lines = ctx.cr.dictfetchall()
+        _logger.info(f"Extracted {len(womatl_lines)} new womatl lines from xTuple")
+        return womatl_lines
+
+    @ETL.extract("metadata")
+    def extract_metadata(self, ctx: ETLContext) -> Dict:
+        """Extract lookup data for transform."""
+        # Get MO mapping by xTuple wo_id
+        ctx.env.cr.execute(
+            """SELECT xtuple_wo_id, id, location_src_id, location_dest_id, company_id
+               FROM mrp_production WHERE xtuple_wo_id IS NOT NULL"""
+        )
+        production_map = {
+            row[0]: {
+                "id": row[1],
+                "location_src_id": row[2],
+                "location_dest_id": row[3],
+                "company_id": row[4],
+            }
+            for row in ctx.env.cr.fetchall()
+        }
+
+        # Get product mapping
+        ctx.env.cr.execute(
+            """SELECT pp.xtuple_item_id, pp.id, pt.uom_id
+               FROM product_product pp
+               JOIN product_template pt ON pp.product_tmpl_id = pt.id
+               WHERE pp.xtuple_item_id IS NOT NULL"""
+        )
+        product_map = {
+            row[0]: {"id": row[1], "uom_id": row[2]} for row in ctx.env.cr.fetchall()
+        }
+
+        # Get production location
+        prod_loc = ctx.env["stock.location"].search(
+            [("usage", "=", "production"), ("company_id", "=", ctx.env.company.id)],
+            limit=1,
+        )
+
+        return {
+            "productions": production_map,
+            "products": product_map,
+            "production_location_id": prod_loc.id if prod_loc else False,
+        }
+
+    @ETL.transform()
+    def transform_stock_moves(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform womatl lines to stock move vals."""
+        womatl_lines = extracted.get("extract_womatl", [])
+        metadata = extracted.get("extract_metadata", {})
+        production_map = metadata.get("productions", {})
+        product_map = metadata.get("products", {})
+        prod_loc_id = metadata.get("production_location_id")
+
+        move_vals = []
+        skipped_no_mo = 0
+        skipped_no_product = 0
+
+        for line in womatl_lines:
+            wo_id = line.get("womatl_wo_id")
+            item_id = line.get("item_id")
+            qty_req = line.get("womatl_qtyreq") or 0.0
+
+            production = production_map.get(wo_id)
+            product = product_map.get(item_id)
+
+            if not production:
+                skipped_no_mo += 1
+                continue
+
+            if not product:
+                skipped_no_product += 1
+                continue
+
+            if qty_req <= 0:
+                continue
+
+            vals = {
+                "raw_material_production_id": production["id"],
+                "product_id": product["id"],
+                "product_uom": product["uom_id"],
+                "product_uom_qty": qty_req,
+                "location_id": production["location_src_id"] or prod_loc_id,
+                "location_dest_id": prod_loc_id,
+                "company_id": production["company_id"],
+                "sequence": line.get("womatl_seqnumber") or 0,
+                "xtuple_womatl_id": line.get("womatl_id"),
+            }
+            move_vals.append(vals)
+
+        if skipped_no_mo:
+            _logger.warning(f"Skipped {skipped_no_mo} womatl lines - MO not found")
+        if skipped_no_product:
+            _logger.warning(
+                f"Skipped {skipped_no_product} womatl lines - product not found"
+            )
+
+        _logger.info(f"Transformed {len(move_vals)} component stock moves")
+        return move_vals
+
+    @ETL.load()
+    def load_stock_moves(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Create component consumption stock moves."""
+        move_vals = transformed.get("transform_stock_moves", [])
+        if not move_vals:
+            _logger.info("No component moves to create")
+            return
+
+        moves = (
+            ctx.env["stock.move"].with_context(tracking_disable=True).create(move_vals)
+        )
+        _logger.info(f"Created {len(moves)} component stock moves")
