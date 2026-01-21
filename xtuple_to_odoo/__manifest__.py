@@ -30,6 +30,7 @@
     * Products
     * Bills of Materials
     * Manufacturing Orders
+
     """,
     "category": "Data Migration",
     "author": "Bemade Inc.",

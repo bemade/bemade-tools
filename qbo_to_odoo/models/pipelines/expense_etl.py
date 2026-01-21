@@ -25,7 +25,11 @@ _logger = logging.getLogger(__name__)
     target_model="account.move",
     importer_name="qbo.expense.importer",
     sap_source="Purchase",
-    depends_on=["qbo.account.importer", "qbo.item.importer", "qbo.tax.importer"],
+    depends_on=[
+        "qbo.exchange.rate.importer",
+        "qbo.account.importer",
+        "qbo.item.importer",
+    ],
 )
 class QboExpenseImporter(models.AbstractModel):
     """ETL Pipeline for importing QBO Purchases as account.move journal entries."""
@@ -86,12 +90,6 @@ class QboExpenseImporter(models.AbstractModel):
         )
         product_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
 
-        # Build tax lookup
-        ctx.env.cr.execute(
-            "SELECT qbo_tax_id, id FROM account_tax WHERE qbo_tax_id IS NOT NULL"
-        )
-        tax_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
-
         # Get expense journal from company config or find default
         company = ctx.env.company
         expense_journal = ctx.env["account.journal"].search(
@@ -109,7 +107,6 @@ class QboExpenseImporter(models.AbstractModel):
                 purchase,
                 account_map,
                 product_map,
-                tax_map,
                 expense_journal,
                 company,
             )
@@ -126,7 +123,6 @@ class QboExpenseImporter(models.AbstractModel):
         purchase: Dict,
         account_map: Dict,
         product_map: Dict,
-        tax_map: Dict,
         journal,
         company,
     ) -> Optional[Dict]:
@@ -157,7 +153,7 @@ class QboExpenseImporter(models.AbstractModel):
 
         for line in purchase.get("Line", []):
             line_vals = self._transform_purchase_line(
-                line, account_map, product_map, tax_map, currency
+                line, account_map, product_map, currency
             )
             if line_vals:
                 line_ids.append((0, 0, line_vals))
@@ -195,7 +191,6 @@ class QboExpenseImporter(models.AbstractModel):
         line: Dict,
         account_map: Dict,
         product_map: Dict,
-        tax_map: Dict,
         currency,
     ) -> Optional[Dict]:
         """Transform a single purchase line into account.move.line values."""
@@ -232,13 +227,6 @@ class QboExpenseImporter(models.AbstractModel):
             if not line_vals.get("name"):
                 line_vals["name"] = account_ref.get("name", "Expense")
 
-            # Handle tax
-            tax_ref = detail.get("TaxCodeRef", {})
-            if tax_ref and tax_ref.get("value") not in ("NON", None):
-                tax_id = tax_map.get(str(tax_ref.get("value")))
-                if tax_id:
-                    line_vals["tax_ids"] = [(6, 0, [tax_id])]
-
         # Handle item-based expense lines
         elif detail_type == "ItemBasedExpenseLineDetail":
             detail = line.get("ItemBasedExpenseLineDetail", {})
@@ -269,13 +257,6 @@ class QboExpenseImporter(models.AbstractModel):
             if not line_vals.get("name"):
                 line_vals["name"] = item_ref.get("name", "Expense")
 
-            # Handle tax
-            tax_ref = detail.get("TaxCodeRef", {})
-            if tax_ref and tax_ref.get("value") not in ("NON", None):
-                tax_id = tax_map.get(str(tax_ref.get("value")))
-                if tax_id:
-                    line_vals["tax_ids"] = [(6, 0, [tax_id])]
-
         else:
             return None
 
@@ -298,6 +279,5 @@ class QboExpenseImporter(models.AbstractModel):
             created += 1
             move.action_post()
             posted += 1
-            _logger.debug(f"Created and posted expense entry {move.name}")
 
         _logger.info(f"Created {created} expense entries ({posted} posted)")

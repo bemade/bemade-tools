@@ -82,6 +82,7 @@ class QboJournalEntryImporter(models.AbstractModel):
         move_vals = []
         skipped = 0
 
+        # Exchange rates are now synced by qbo.exchange.rate.importer pipeline
         for entry in entries:
             # Parse date
             txn_date = entry.get("TxnDate")
@@ -93,8 +94,9 @@ class QboJournalEntryImporter(models.AbstractModel):
             else:
                 date = datetime.now().date()
 
-            # Get QBO exchange rate (use 1.0 if not present)
-            exchange_rate = float(entry.get("ExchangeRate", 1.0) or 1.0)
+            # Get currency info for the move
+            currency_ref = entry.get("CurrencyRef", {})
+            currency_code = currency_ref.get("value") if currency_ref else None
 
             # Build line items
             lines = entry.get("Line", [])
@@ -128,15 +130,13 @@ class QboJournalEntryImporter(models.AbstractModel):
 
                 posting_type = detail.get("PostingType", "")
 
-                # Apply QBO exchange rate to get home currency amount
-                balance = round(amount * exchange_rate, 2)
-
+                # Use the original amount - Odoo will convert using the synced exchange rate
                 if posting_type == "Debit":
-                    debit = balance
+                    debit = amount
                     credit = 0.0
                 elif posting_type == "Credit":
                     debit = 0.0
-                    credit = balance
+                    credit = amount
                 else:
                     continue
 
@@ -159,34 +159,62 @@ class QboJournalEntryImporter(models.AbstractModel):
                 skipped += 1
                 continue
 
-            # Fix rounding differences by adjusting the last credit line
+            # Fix rounding differences to ensure entry balances
             total_debit = sum(l[2]["debit"] for l in line_vals)
             total_credit = sum(l[2]["credit"] for l in line_vals)
             diff = round(total_debit - total_credit, 2)
 
             if diff != 0:
-                # Find last credit line and adjust it
-                for i in range(len(line_vals) - 1, -1, -1):
-                    if line_vals[i][2]["credit"] > 0:
-                        line_vals[i][2]["credit"] = round(
-                            line_vals[i][2]["credit"] + diff, 2
-                        )
-                        _logger.debug(
-                            f"Adjusted credit by {diff} to balance JE {entry.get('Id')}"
-                        )
-                        break
+                adjusted = False
+                # Try to adjust a credit line first (if debit > credit)
+                if diff > 0:
+                    for i in range(len(line_vals) - 1, -1, -1):
+                        if line_vals[i][2]["credit"] > 0:
+                            line_vals[i][2]["credit"] = round(
+                                line_vals[i][2]["credit"] + diff, 2
+                            )
+                            adjusted = True
+                            break
+                # Try to adjust a debit line (if credit > debit)
+                else:
+                    for i in range(len(line_vals) - 1, -1, -1):
+                        if line_vals[i][2]["debit"] > 0:
+                            line_vals[i][2]["debit"] = round(
+                                line_vals[i][2]["debit"] - diff, 2
+                            )
+                            adjusted = True
+                            break
 
-            move_vals.append(
-                {
-                    "move_type": "entry",
-                    "journal_id": journal.id,
-                    "date": date,
-                    "ref": f"QBO-{entry.get('Id')}",
-                    "narration": entry.get("PrivateNote", ""),
-                    "line_ids": line_vals,
-                    "qbo_journal_entry_id": int(entry.get("Id")),
-                }
-            )
+                if adjusted:
+                    _logger.debug(f"Adjusted by {diff} to balance JE {entry.get('Id')}")
+                else:
+                    _logger.warning(
+                        f"Could not balance JE {entry.get('Id')}: "
+                        f"debit={total_debit}, credit={total_credit}"
+                    )
+                    skipped += 1
+                    continue
+
+            # Build move values
+            move_val = {
+                "move_type": "entry",
+                "journal_id": journal.id,
+                "date": date,
+                "ref": f"QBO-{entry.get('Id')}",
+                "narration": entry.get("PrivateNote", ""),
+                "line_ids": line_vals,
+                "qbo_journal_entry_id": int(entry.get("Id")),
+            }
+
+            # Set currency if foreign currency transaction
+            if currency_code:
+                currency = ctx.env["res.currency"].search(
+                    [("name", "=", currency_code)], limit=1
+                )
+                if currency:
+                    move_val["currency_id"] = currency.id
+
+            move_vals.append(move_val)
 
         _logger.info(f"Transformed {len(move_vals)} journal entries, skipped {skipped}")
         return move_vals
@@ -202,16 +230,33 @@ class QboJournalEntryImporter(models.AbstractModel):
 
         # Create moves one by one to handle potential errors
         created = 0
+        errors = 0
         for vals in move_vals:
-            move = ctx.env["account.move"].create(vals)
-            created += 1
-            # Post the move
             try:
-                move.action_post()
-            except RETRYABLE_ERRORS:
-                raise
+                move = ctx.env["account.move"].create(vals)
+                created += 1
+                # Post the move
+                try:
+                    move.action_post()
+                except RETRYABLE_ERRORS:
+                    raise
+                except Exception as e:
+                    _logger.warning(
+                        f"Could not post journal entry {vals.get('ref')}: {e}"
+                    )
             except Exception as e:
-                _logger.warning(f"Could not post journal entry {vals.get('ref')}: {e}")
+                errors += 1
+                # Log details for debugging
+                total_debit = sum(
+                    l[2].get("debit", 0) for l in vals.get("line_ids", [])
+                )
+                total_credit = sum(
+                    l[2].get("credit", 0) for l in vals.get("line_ids", [])
+                )
+                _logger.error(
+                    f"Failed to create journal entry {vals.get('ref')}: {e}. "
+                    f"Debit={total_debit}, Credit={total_credit}, Diff={total_debit - total_credit}"
+                )
 
         _logger.info(f"Created {created} journal entries")
 
