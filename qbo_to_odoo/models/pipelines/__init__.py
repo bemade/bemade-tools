@@ -1,4 +1,5 @@
 # ETL Pipelines
+from . import exchange_rate_etl  # Must run first to sync rates
 from . import account_etl
 from . import bank_journal_etl
 from . import category_etl
@@ -14,5 +15,6 @@ from . import credit_memo_etl
 from . import vendor_credit_etl
 from . import payment_etl
 from . import journal_entry_etl
+from . import transfer_etl
 from . import employee_etl
 from . import expense_etl

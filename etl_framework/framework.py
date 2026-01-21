@@ -64,6 +64,8 @@ import psycopg2.errors
 import psycopg2.extensions
 from enum import Enum
 
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 # Errors that should bubble up for retry by the orchestrator
 # These are transient database errors that can be resolved by retrying
 RETRYABLE_ERRORS = (
@@ -71,7 +73,55 @@ RETRYABLE_ERRORS = (
     psycopg2.errors.DeadlockDetected,
     psycopg2.extensions.TransactionRollbackError,
 )
-from typing import Any, Callable, Dict, List, Optional, Tuple
+
+
+@dataclass
+class ChunkableData:
+    """Data structure for extract methods returning chunkable records with metadata.
+
+    Use this when an extract method needs to return both records for chunking
+    and additional lookup data (mappings, etc.) that should be available to
+    all chunks during transform/load.
+
+    The 'records' list will be split across worker processes based on chunk_size,
+    while 'context' is passed unchanged to each chunk.
+
+    Example:
+        @ETL.extract("poitem")
+        def extract_lines(self, ctx: ETLContext) -> ChunkableData:
+            lines = ctx.cr.dictfetchall()
+            po_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+            product_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+            return ChunkableData(
+                records=lines,
+                context={"po_map": po_map, "product_map": product_map},
+            )
+
+    In transform, access via:
+        data = extracted.get("extract_lines")
+        records = data.records  # or data["records"] for dict compat
+        po_map = data.context["po_map"]
+
+    Attributes:
+        records: The list of records to be chunked for parallel processing.
+        context: Additional data (mappings, lookups) available to all chunks.
+    """
+
+    records: List[Dict[str, Any]]
+    context: Dict[str, Any] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> Any:
+        """Allow dict-like access for backward compatibility."""
+        if key == "records":
+            return self.records
+        return self.context.get(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Allow dict-like get() for backward compatibility."""
+        if key == "records":
+            return self.records
+        return self.context.get(key, default)
+
 
 from contextlib import contextmanager
 
@@ -671,30 +721,11 @@ class ETLExecutor:
                                     f"[{self.pipeline.importer_model_name}] Completed chunk {i}/{len(chunks)}"
                                 )
                                 break
-                            except Exception as e:
-                                # Locate a retryable database error anywhere in the exception chain
-                                retryable_exc = self._find_retryable_db_error(e)
-
-                                # Debug: log what we caught
-                                _logger.debug(
-                                    "Chunk %s caught exception=%s, retryable=%s, chain=%s",
-                                    i,
-                                    type(e).__name__,
-                                    (
-                                        type(retryable_exc).__name__
-                                        if retryable_exc
-                                        else "None"
-                                    ),
-                                    self._summarize_exception_chain(e),
-                                )
-
-                                if not retryable_exc:
-                                    # Not a retryable error, crash immediately
-                                    raise
+                            except RETRYABLE_ERRORS as e:
                                 if attempt < max_retries - 1:
                                     wait_time = 2**attempt  # Exponential backoff
                                     _logger.warning(
-                                        f"Chunk {i}/{len(chunks)} hit {type(retryable_exc).__name__}, "
+                                        f"Chunk {i}/{len(chunks)} hit {type(e).__name__}, "
                                         f"retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})"
                                     )
                                     time.sleep(wait_time)
@@ -711,6 +742,11 @@ class ETLExecutor:
                                 else:
                                     # Max retries exceeded
                                     raise
+                            except Exception as e:
+                                _logger.error(
+                                    "Multiprocessing execution failed", exc_info=True
+                                )
+                                raise
             except Exception:
                 _logger.error("Multiprocessing execution failed", exc_info=True)
                 raise
@@ -771,21 +807,48 @@ class ETLExecutor:
                     for chunk in data[1]
                 ]
 
-        # Look for 'headers' key in nested dicts (common pattern for invoices/bills)
+        # Handle ChunkableData dataclass (preferred API)
         for key, data in extracted_data.items():
-            if (
-                isinstance(data, dict)
-                and "headers" in data
-                and isinstance(data["headers"], list)
-            ):
-                headers = data["headers"]
-                # Create chunks with full extracted_data, but chunk the headers
+            if isinstance(data, ChunkableData):
+                records = data.records
                 chunks = []
-                for i in range(0, len(headers), chunk_size):
+                for i in range(0, len(records), chunk_size):
                     chunk_dict = extracted_data.copy()
-                    chunk_dict[key] = {**data, "headers": headers[i : i + chunk_size]}
+                    chunk_dict[key] = ChunkableData(
+                        records=records[i : i + chunk_size],
+                        context=data.context,
+                    )
                     chunks.append(chunk_dict)
                 return chunks
+
+        # Look for chunkable keys in nested dicts (deprecated, use ChunkableData)
+        # Priority: 'records' key, 'headers' (backward compat)
+        for key, data in extracted_data.items():
+            if isinstance(data, dict):
+                # Check for 'records' key
+                if "records" in data and isinstance(data["records"], list):
+                    records = data["records"]
+                    chunks = []
+                    for i in range(0, len(records), chunk_size):
+                        chunk_dict = extracted_data.copy()
+                        chunk_dict[key] = {
+                            **data,
+                            "records": records[i : i + chunk_size],
+                        }
+                        chunks.append(chunk_dict)
+                    return chunks
+                # Check for 'headers' key (backward compatibility)
+                if "headers" in data and isinstance(data["headers"], list):
+                    headers = data["headers"]
+                    chunks = []
+                    for i in range(0, len(headers), chunk_size):
+                        chunk_dict = extracted_data.copy()
+                        chunk_dict[key] = {
+                            **data,
+                            "headers": headers[i : i + chunk_size],
+                        }
+                        chunks.append(chunk_dict)
+                    return chunks
 
         # Otherwise, chunk the first list we find
         for key, data in extracted_data.items():
@@ -819,7 +882,13 @@ class ETLExecutor:
             chunk: Data chunk to process.
             target_model: Target Odoo model name.
         """
-        with Registry(dbname).cursor() as cr:
+        from odoo.sql_db import db_connect
+
+        # Use db_connect directly to get a fresh connection, avoiding
+        # inherited connection pool state issues after fork
+        db = db_connect(dbname)
+        cr = db.cursor()
+        try:
             env = api.Environment(cr, uid, context)
             importer = env[importer_name]
             pipeline = importer._etl_pipeline  # type: ignore[attr-defined]
@@ -827,24 +896,20 @@ class ETLExecutor:
             # Create ETL context with Odoo cursor (no SAP cursor in multiprocessing)
             ctx = ETLContext(cr=None, env=env)
 
-            # Mute only retryable errors (deadlocks, serialization failures) in worker processes
-            # Non-retryable errors (constraint violations, data errors) are still logged
-            with mute_retryable_errors():
-                # Transform
-                # The chunk is already the full extracted_data dict from all extract methods
-                # (passed from _execute_parallel as extracted_data parameter)
-                extracted_dict = chunk
+            # Transform
+            extracted_dict = chunk
+            transformed_data = {}
+            for method in pipeline.transform_methods:
+                result = method.func(importer, ctx, extracted_dict)
+                transformed_data[method.func.__name__] = result
 
-                transformed_data = {}
-                for method in pipeline.transform_methods:
-                    result = method.func(importer, ctx, extracted_dict)
-                    transformed_data[method.func.__name__] = result
+            # Load
+            for method in pipeline.load_methods:
+                method.func(importer, ctx, transformed_data)
 
-                # Load
-                for method in pipeline.load_methods:
-                    method.func(importer, ctx, transformed_data)
-
-                cr.commit()
+            cr.commit()
+        finally:
+            cr.close()
 
 
 # =============================================================================

@@ -136,25 +136,10 @@ class QboEmployeeImporter(models.AbstractModel):
         errors = 0
 
         for vals in employee_vals:
-            # Remove private address fields that don't exist on hr.employee
-            private_street = vals.pop("private_street", None)
-            private_city = vals.pop("private_city", None)
-
+            # In Odoo 19, private address fields are directly on hr.employee
+            # (private_street, private_city, etc.) - no separate partner needed
             employee = ctx.env["hr.employee"].create(vals)
             created += 1
-
-            # If we have address info, try to set it on the private address
-            if private_street or private_city:
-                if not employee.address_home_id:
-                    # Create a private address partner
-                    partner_vals = {
-                        "name": employee.name,
-                        "type": "private",
-                        "street": private_street,
-                        "city": private_city,
-                    }
-                    partner = ctx.env["res.partner"].create(partner_vals)
-                    employee.address_home_id = partner.id
 
             _logger.debug(f"Created employee {employee.name}")
 

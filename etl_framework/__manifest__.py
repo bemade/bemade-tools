@@ -41,6 +41,7 @@ Usage:
         @ETL.load()
         def load_products(self, ctx, transformed):
             ...
+
     """,
     "author": "Bemade",
     "website": "https://www.bemade.org",

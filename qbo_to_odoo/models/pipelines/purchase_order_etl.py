@@ -210,7 +210,7 @@ class QboPurchaseOrderImporter(models.AbstractModel):
                 line_vals["product_id"] = product_id
 
             if tax_ids:
-                line_vals["taxes_id"] = [(6, 0, tax_ids)]
+                line_vals["tax_ids"] = [(6, 0, tax_ids)]
 
             return line_vals
 

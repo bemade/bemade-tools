@@ -11,6 +11,7 @@ from .framework import (
     MultiprocessingConfig,
     PipelineOrchestrator,
     RETRYABLE_ERRORS,
+    ChunkableData,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "MultiprocessingConfig",
     "PipelineOrchestrator",
     "RETRYABLE_ERRORS",
+    "ChunkableData",
 ]

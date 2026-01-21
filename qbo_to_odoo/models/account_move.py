@@ -56,3 +56,9 @@ class AccountMove(models.Model):
         copy=False,
         help="QuickBooks Online Purchase ID (expenses)",
     )
+    qbo_transfer_id = fields.Integer(
+        string="QBO Transfer ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online Transfer ID (bank transfers)",
+    )

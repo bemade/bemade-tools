@@ -9,7 +9,7 @@ from typing import Dict, List
 
 from odoo import api, models
 
-from odoo.addons.etl_framework.framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
 
 _logger = logging.getLogger(__name__)
 
@@ -162,7 +162,7 @@ class XtuplePurchaseOrderLineImporter(models.AbstractModel):
     _description = "xTuple Purchase Order Line Importer"
 
     @ETL.extract("poitem")
-    def extract_lines(self, ctx: ETLContext) -> Dict:
+    def extract_lines(self, ctx: ETLContext) -> ChunkableData:
         """Extract purchase order lines from xTuple."""
         # Check for existing PO lines
         ctx.env.cr.execute(
@@ -195,14 +195,18 @@ class XtuplePurchaseOrderLineImporter(models.AbstractModel):
         product_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
 
         _logger.info(f"Extracted {len(lines)} new PO lines from xTuple")
-        return {"lines": lines, "po_map": po_map, "product_map": product_map}
+        return ChunkableData(
+            records=lines,
+            context={"po_map": po_map, "product_map": product_map},
+        )
 
     @ETL.transform()
     def transform_lines(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
         """Transform xTuple PO lines into Odoo purchase order line values."""
-        lines = extracted.get("extract_lines", {}).get("lines", [])
-        po_map = extracted.get("extract_lines", {}).get("po_map", {})
-        product_map = extracted.get("extract_lines", {}).get("product_map", {})
+        data = extracted.get("extract_lines")
+        lines = data.records if data else []
+        po_map = data.context.get("po_map", {}) if data else {}
+        product_map = data.context.get("product_map", {}) if data else {}
 
         line_vals = []
         for line in lines:
