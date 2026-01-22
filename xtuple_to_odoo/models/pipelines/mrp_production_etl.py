@@ -271,10 +271,34 @@ class XtupleMrpConsumptionImporter(models.AbstractModel):
             limit=1,
         )
 
+        # Get warehouse
+        warehouse = ctx.env["stock.warehouse"].search(
+            [("company_id", "=", ctx.env.company.id)], limit=1
+        )
+
+        # Get the manufacture pull rule for mts_else_mto procurement
+        manuf_route = ctx.env["stock.route"].search(
+            [("name", "ilike", "manufacture")], limit=1
+        )
+        manuf_pull_rule = (
+            ctx.env["stock.rule"].search(
+                [
+                    ("route_id", "=", manuf_route.id),
+                    ("action", "=", "pull"),
+                    ("location_dest_id.usage", "=", "production"),
+                ],
+                limit=1,
+            )
+            if manuf_route
+            else False
+        )
+
         return {
             "productions": production_map,
             "products": product_map,
             "production_location_id": prod_loc.id if prod_loc else False,
+            "manuf_pull_rule_id": manuf_pull_rule.id if manuf_pull_rule else False,
+            "warehouse_id": warehouse.id if warehouse else False,
         }
 
     @ETL.transform()
@@ -285,6 +309,8 @@ class XtupleMrpConsumptionImporter(models.AbstractModel):
         production_map = metadata.get("productions", {})
         product_map = metadata.get("products", {})
         prod_loc_id = metadata.get("production_location_id")
+        manuf_pull_rule_id = metadata.get("manuf_pull_rule_id")
+        warehouse_id = metadata.get("warehouse_id")
 
         move_vals = []
         skipped_no_mo = 0
@@ -317,7 +343,10 @@ class XtupleMrpConsumptionImporter(models.AbstractModel):
                 "location_id": production["location_src_id"] or prod_loc_id,
                 "location_dest_id": prod_loc_id,
                 "company_id": production["company_id"],
+                "warehouse_id": warehouse_id,
                 "sequence": line.get("womatl_seqnumber") or 0,
+                "procure_method": "mts_else_mto",
+                "rule_id": manuf_pull_rule_id,
                 "xtuple_womatl_id": line.get("womatl_id"),
             }
             move_vals.append(vals)
