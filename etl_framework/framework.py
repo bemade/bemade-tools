@@ -1,53 +1,18 @@
-"""
-ETL Framework for Odoo Data Migration
+"""ETL Framework for Odoo Data Migration.
 
 This module provides a declarative, self-optimizing ETL (Extract, Transform, Load)
 framework for migrating data from external sources to Odoo.
 
 Key Features:
-- Declarative pipeline definition using decorators
-- Automatic multiprocessing based on data volume
-- Dependency resolution between models
-- Memory-efficient execution
-- Clear separation of Extract, Transform, and Load phases
-- Generic source configuration for any external database
 
-Usage Example:
-    @ETL.pipeline(
-        target_model='product.product',
-        importer_name='my.product.importer',
-        sap_source='products',  # Source table name
-        depends_on=['product.category.importer'],
-        multiprocessing_threshold=1000,
-    )
-    class ProductImporter(models.AbstractModel):
-        _name = 'my.product.importer'
+* Declarative pipeline definition using decorators
+* Automatic multiprocessing based on data volume
+* Dependency resolution between models
+* Memory-efficient execution
+* Clear separation of Extract, Transform, and Load phases
+* Generic source configuration for any external database
 
-        @ETL.extract('products')
-        def extract_products(self, ctx: ETLContext):
-            ctx.cr.execute("SELECT * FROM products")
-            return ctx.cr.dictfetchall()
-
-        @ETL.transform()
-        def transform_products(self, ctx: ETLContext, extracted):
-            products = extracted.get('extract_products', [])
-            return [{"name": p["name"]} for p in products]
-
-        @ETL.load()
-        def load_products(self, ctx: ETLContext, transformed):
-            product_vals = transformed.get('transform_products', [])
-            ctx.env['product.product'].create(product_vals)
-
-Source Configuration:
-    The ETLContext accepts a source_config dictionary for source-specific settings:
-
-    source_config = {
-        'source_id': 1,           # ID of source database record
-        'source_model': 'my.db',  # Odoo model for source config
-        'filestore_path': '/path/to/files',  # Optional file path
-    }
-
-    Access in pipelines via: ctx.get_config('filestore_path')
+See README.md for usage examples and source configuration details.
 """
 
 import logging
@@ -83,28 +48,14 @@ class ChunkableData:
     and additional lookup data (mappings, etc.) that should be available to
     all chunks during transform/load.
 
-    The 'records' list will be split across worker processes based on chunk_size,
-    while 'context' is passed unchanged to each chunk.
+    The records list will be split across worker processes based on chunk_size,
+    while context is passed unchanged to each chunk.
 
-    Example:
-        @ETL.extract("poitem")
-        def extract_lines(self, ctx: ETLContext) -> ChunkableData:
-            lines = ctx.cr.dictfetchall()
-            po_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
-            product_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
-            return ChunkableData(
-                records=lines,
-                context={"po_map": po_map, "product_map": product_map},
-            )
+    In transform, access via extracted.get('extract_lines').records for the
+    chunked records and .context for the lookup data.
 
-    In transform, access via:
-        data = extracted.get("extract_lines")
-        records = data.records  # or data["records"] for dict compat
-        po_map = data.context["po_map"]
-
-    Attributes:
-        records: The list of records to be chunked for parallel processing.
-        context: Additional data (mappings, lookups) available to all chunks.
+    :param records: The list of records to be chunked for parallel processing.
+    :param context: Additional data (mappings, lookups) available to all chunks.
     """
 
     records: List[Dict[str, Any]]
