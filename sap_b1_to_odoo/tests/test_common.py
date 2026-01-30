@@ -1,8 +1,9 @@
-""" Run tests on an actual SAP B1 database running on a local postgresql server. """
+"""Run tests on an actual SAP B1 database running on a local postgresql server."""
 
-from odoo.tests import TransactionCase
+from odoo.tests import TransactionCase, tagged
 
 
+@tagged("-at_install", "-post_install", "sap_import")
 class TestSapImportCommon(TransactionCase):
     @classmethod
     def setUpClass(cls):
