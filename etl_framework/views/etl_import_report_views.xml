@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- ============================================================ -->
+    <!-- etl.import.report -->
+    <!-- ============================================================ -->
+
+    <record id="etl_import_report_tree" model="ir.ui.view">
+        <field name="name">etl.import.report.tree</field>
+        <field name="model">etl.import.report</field>
+        <field name="arch" type="xml">
+            <list decoration-danger="state == 'failed'" decoration-muted="state == 'running'">
+                <field name="name"/>
+                <field name="start_time"/>
+                <field name="duration" widget="float_time"/>
+                <field name="total_success"/>
+                <field name="total_warning"/>
+                <field name="total_failure"/>
+                <field name="state" widget="badge"
+                       decoration-success="state == 'done'"
+                       decoration-danger="state == 'failed'"
+                       decoration-info="state == 'running'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="etl_import_report_form" model="ir.ui.view">
+        <field name="name">etl.import.report.form</field>
+        <field name="model">etl.import.report</field>
+        <field name="arch" type="xml">
+            <form create="0" edit="0">
+                <header>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1><field name="name"/></h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="start_time"/>
+                            <field name="end_time"/>
+                            <field name="duration" widget="float_time"/>
+                        </group>
+                        <group>
+                            <field name="total_success"/>
+                            <field name="total_warning"/>
+                            <field name="total_failure"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Pipeline Results" name="lines">
+                            <field name="line_ids">
+                                <list decoration-danger="state == 'failed'">
+                                    <field name="sequence" widget="handle"/>
+                                    <field name="pipeline_name"/>
+                                    <field name="target_model"/>
+                                    <field name="extracted_count"/>
+                                    <field name="success_count"/>
+                                    <field name="warning_count"/>
+                                    <field name="failure_count"/>
+                                    <field name="duration" widget="float_time"/>
+                                    <field name="state" widget="badge"
+                                           decoration-success="state == 'done'"
+                                           decoration-danger="state == 'failed'"
+                                           decoration-info="state == 'running'"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="etl_import_report_action" model="ir.actions.act_window">
+        <field name="name">ETL Import Reports</field>
+        <field name="res_model">etl.import.report</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- ============================================================ -->
+    <!-- etl.import.report.line -->
+    <!-- ============================================================ -->
+
+    <record id="etl_import_report_line_form" model="ir.ui.view">
+        <field name="name">etl.import.report.line.form</field>
+        <field name="model">etl.import.report.line</field>
+        <field name="arch" type="xml">
+            <form create="0" edit="0">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="pipeline_name"/>
+                            <field name="target_model"/>
+                            <field name="state" widget="badge"
+                                   decoration-success="state == 'done'"
+                                   decoration-danger="state == 'failed'"
+                                   decoration-info="state == 'running'"/>
+                        </group>
+                        <group>
+                            <field name="extracted_count"/>
+                            <field name="success_count"/>
+                            <field name="warning_count"/>
+                            <field name="failure_count"/>
+                            <field name="duration" widget="float_time"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Details" name="details">
+                            <field name="detail_ids">
+                                <list decoration-danger="level == 'failure'"
+                                      decoration-warning="level == 'warning'">
+                                    <field name="level" widget="badge"
+                                           decoration-danger="level == 'failure'"
+                                           decoration-warning="level == 'warning'"/>
+                                    <field name="source_ref"/>
+                                    <field name="message"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ============================================================ -->
+    <!-- Menu -->
+    <!-- ============================================================ -->
+
+    <menuitem id="etl_menu_root"
+              name="ETL"
+              web_icon="etl_framework,static/description/icon.png"
+              sequence="90"/>
+
+    <menuitem id="etl_menu_reports"
+              name="Import Reports"
+              parent="etl_menu_root"
+              action="etl_import_report_action"
+              sequence="10"/>
+
+</odoo>

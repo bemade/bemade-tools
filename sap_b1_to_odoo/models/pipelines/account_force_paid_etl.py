@@ -302,24 +302,25 @@ class AccountForcePaidReconciliation(models.AbstractModel):
                 ],
             }
 
-            writeoff_move = ctx.env["account.move"].create(writeoff_vals)
-            writeoff_move.action_post()
+            with ctx.skippable(ref):
+                writeoff_move = ctx.env["account.move"].create(writeoff_vals)
+                writeoff_move.action_post()
 
-            # Reconcile with the invoice/bill
-            if doc_type == "customer":
-                writeoff_line = writeoff_move.line_ids.filtered(
-                    lambda l: l.account_id.account_type == "asset_receivable"
-                    and l.credit > 0
-                )
-            else:
-                writeoff_line = writeoff_move.line_ids.filtered(
-                    lambda l: l.account_id.account_type == "liability_payable"
-                    and l.debit > 0
-                )
+                # Reconcile with the invoice/bill
+                if doc_type == "customer":
+                    writeoff_line = writeoff_move.line_ids.filtered(
+                        lambda l: l.account_id.account_type == "asset_receivable"
+                        and l.credit > 0
+                    )
+                else:
+                    writeoff_line = writeoff_move.line_ids.filtered(
+                        lambda l: l.account_id.account_type == "liability_payable"
+                        and l.debit > 0
+                    )
 
-            if writeoff_line and line_to_reconcile:
-                (line_to_reconcile + writeoff_line).reconcile()
-                reconciled_count += 1
+                if writeoff_line and line_to_reconcile:
+                    (line_to_reconcile + writeoff_line).reconcile()
+                    reconciled_count += 1
 
         _logger.info(
             f"[ForcePaidReconciliation] Chunk complete: {reconciled_count} reconciled, "

@@ -1,7 +1,7 @@
 # ETL Framework for Odoo
 
-**Version:** 2.2  
-**Last Updated:** January 8, 2026
+**Version:** 2.3  
+**Last Updated:** February 6, 2026
 
 ---
 
@@ -57,41 +57,30 @@ from odoo.addons.etl_framework import ETL, ETLContext, PipelineOrchestrator
 - No silent failures or recovery attempts
 - Clear error messages for debugging
 
+### 6. **Observable Execution**
+- Built-in import reporting persisted to Odoo models
+- Auto-capture of `WARNING` and `ERROR` log messages during pipeline execution
+- Pipeline code can explicitly log successes, warnings, and failures via `ctx.report`
+- Reports are browsable through the Odoo UI under **ETL > Import Reports**
+
 ---
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    ETL Pipeline Registry                     │
-│  (Stores all decorated pipelines and their configurations)  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Pipeline Orchestrator                      │
-│  • Resolves model dependencies (topological sort)            │
-│  • Executes pipelines in correct order                       │
-│  • Manages database connections and commits                  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      ETL Executor                            │
-│  1. Execute Extract methods                                  │
-│  2. Count extracted records                                  │
-│  3. Decide: Single-process or Multiprocessing?              │
-│  4. Execute Transform + Load accordingly                     │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                    ┌─────────┴─────────┐
-                    ▼                   ▼
-         ┌──────────────────┐  ┌──────────────────┐
-         │ Single Process   │  │ Multiprocessing  │
-         │ • Sequential     │  │ • Chunk data     │
-         │ • Simple         │  │ • Fork workers   │
-         │ • Fast for small │  │ • Fast for large │
-         └──────────────────┘  └──────────────────┘
+```mermaid
+graph TD
+    A["**ETL Pipeline Registry**<br/>Stores all decorated pipelines<br/>and their configurations"]
+    B["**Pipeline Orchestrator**<br/>• Resolves model dependencies (topological sort)<br/>• Executes pipelines in correct order<br/>• Manages database connections and commits<br/>• Creates ETLReporter for the run"]
+    C["**ETL Executor**<br/>1. Execute Extract methods<br/>2. Count extracted records<br/>3. Install log handler (auto-capture WARNING+)<br/>4. Decide: Single-process or Multiprocessing?<br/>5. Execute Transform + Load accordingly<br/>6. Persist pipeline report"]
+    D["**Single Process**<br/>• Sequential<br/>• Simple<br/>• Fast for small"]
+    E["**Multiprocessing**<br/>• Chunk data<br/>• Fork workers<br/>• Fast for large"]
+    F["**ETL Reporter**<br/>• Tracks per-pipeline results<br/>• Auto-captures log messages<br/>• Persists to etl.import.report"]
+
+    A --> B --> C
+    C --> D
+    C --> E
+    B --> F
+    C --> F
 ```
 
 ---
@@ -110,6 +99,10 @@ class ETLContext:
 
     def get_config(self, key: str, default: Any = None) -> Any:
         """Retrieve a configuration value."""
+
+    @property
+    def report(self) -> PipelineReport:
+        """Access the active pipeline report (no-op if no reporter)."""
 ```
 
 Example source configuration:
@@ -377,13 +370,72 @@ This allows:
 
 ---
 
+## Import Reporting
+
+The framework automatically tracks every ETL run and persists results to Odoo models, viewable under **ETL > Import Reports**.
+
+### Automatic Reporting
+
+The following are tracked automatically with zero pipeline code changes:
+
+- **Extracted record count** per pipeline (note: this reflects the total records returned by the extract phase, including records that may already exist in Odoo if the extract does not filter them)
+- **Pipeline duration** and state (Done / Failed)
+- **Uncaught exceptions** recorded as failure details
+- **Logged warnings** (`_logger.warning(...)`) captured as report warnings
+- **Logged errors** (`_logger.error(...)`) captured as report failures
+
+Log messages from the `etl_framework` module itself (retry warnings, progress info, etc.) are excluded from capture.
+
+### Explicit Reporting API
+
+Pipelines can also log results explicitly via `ctx.report`:
+
+```python
+@ETL.load()
+def load_records(self, ctx: ETLContext, transformed: dict):
+    for vals in transformed.get("transform_records", []):
+        try:
+            ctx.env["res.partner"].create(vals)
+            ctx.report.success()
+        except Exception as e:
+            # Log failure without raising — processing continues
+            ctx.report.failure(message=str(e), source_ref=vals.get("name"))
+```
+
+Available methods on `ctx.report`:
+
+| Method | Description |
+|--------|-------------|
+| `success(count=1)` | Increment success counter |
+| `warning(message, source_ref=None)` | Log a warning detail |
+| `failure(message, source_ref=None)` | Log a failure detail (non-throwing) |
+
+If no reporter is active, `ctx.report` returns a no-op object — safe to call unconditionally.
+
+### Report Models
+
+| Model | Description |
+|-------|-------------|
+| `etl.import.report` | One record per ETL run (start/end time, totals, state) |
+| `etl.import.report.line` | One record per pipeline (extracted count, success/warning/failure counts) |
+| `etl.import.report.detail` | Individual warning/failure messages with source references |
+
+---
+
 ## API Reference
 
-See inline documentation in `framework.py` for complete API details.
+See inline documentation in `framework.py` and `reporter.py` for complete API details.
 
 ---
 
 ## Changelog
+
+### v2.3 (February 2026)
+- **Import reporting**: Persistent ETL run reports with per-pipeline success/warning/failure tracking
+- **Auto-capture of log messages**: `WARNING` and `ERROR` log messages during pipeline execution are automatically recorded as report details
+- **Explicit reporting API**: Pipelines can log successes, warnings, and failures via `ctx.report` without raising exceptions
+- **Browsable report views**: Tree and form views under **ETL > Import Reports** with state indicators and drill-down to details
+- **Worker error handling**: Worker processes now rollback cleanly on error, preventing `InFailedSqlTransaction` from masking the original exception
 
 ### v2.2 (January 2026)
 - **Generic source configuration**: Replaced SAP-specific `sap_db_id` with generic `source_config` dictionary
