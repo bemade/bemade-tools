@@ -1,18 +1,9 @@
 import logging
 
-import psycopg2
-
 from odoo import api, models
 from odoo.addons.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
-
-# Errors that should bubble up for retry by the orchestrator
-RETRYABLE_ERRORS = (
-    psycopg2.errors.SerializationFailure,
-    psycopg2.errors.DeadlockDetected,
-    psycopg2.extensions.TransactionRollbackError,
-)
 
 
 @ETL.pipeline(
@@ -403,14 +394,9 @@ class AccountPaymentReconciliation(models.AbstractModel):
             )
 
             if payment_line and line_to_reconcile:
-                try:
+                with ctx.skippable(f"payment move {payment_move.id}"):
                     (line_to_reconcile + payment_line).reconcile()
                     reconciled_count += 1
-                except RETRYABLE_ERRORS:
-                    # Let serialization/deadlock errors bubble up for orchestrator retry
-                    raise
-                except Exception as e:
-                    _logger.warning(f"[PaymentReconciliation] Reconcile failed: {e}")
 
         _logger.info(
             f"[PaymentReconciliation] Chunk complete: {reconciled_count} reconciled "

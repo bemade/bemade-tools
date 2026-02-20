@@ -1,0 +1,4 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_etl_import_report,etl.import.report,model_etl_import_report,base.group_system,1,1,1,1
+access_etl_import_report_line,etl.import.report.line,model_etl_import_report_line,base.group_system,1,1,1,1
+access_etl_import_report_detail,etl.import.report.detail,model_etl_import_report_detail,base.group_system,1,1,1,1

@@ -1,6 +1,6 @@
 {
     "name": "ETL Framework",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "category": "Technical",
     "summary": "Declarative, self-optimizing ETL framework for Odoo",
     "description": """
@@ -25,7 +25,10 @@ See the module README for usage examples.
     "website": "https://www.bemade.org",
     "license": "LGPL-3",
     "depends": ["base"],
-    "data": [],
+    "data": [
+        "security/ir.model.access.csv",
+        "views/etl_import_report_views.xml",
+    ],
     "installable": True,
     "auto_install": False,
 }

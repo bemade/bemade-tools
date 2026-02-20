@@ -153,7 +153,7 @@ class TestSimplePipelineExecution(TransactionCase):
             TestSimpleImporter._last_loaded_ids
         )
         self.assertEqual(len(categories), 3)
-        self.assertTrue(all("[TEST" in cat.name for cat in categories))
+        self.assertTrue(all("[OVERRIDE]" in cat.name for cat in categories))
 
 
 @tagged("post_install", "-at_install")
@@ -245,3 +245,92 @@ class TestETLContext(TransactionCase):
         ctx = ETLContext(cr=None, env=self.env)
         partners = ctx.env["res.partner"].search([], limit=1)
         self.assertIsNotNone(partners)
+
+
+@tagged("post_install", "-at_install")
+class TestInheritOverrideResolution(TransactionCase):
+    """Test that _inherit overrides are called by the ETL framework.
+
+    The ETL pipeline decorator stores function references at class
+    registration time. When another module uses _inherit to override
+    those methods, the framework must resolve methods by name on the
+    Odoo model instance (via getattr) so the MRO picks up the override,
+    rather than calling the stored base-class function directly.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from odoo.addons.test_etl_framework.models.test_importers import (
+            TestSimpleImporter,
+            TestSimpleImporterOverride,
+        )
+
+        # Reset class-level state
+        TestSimpleImporter._last_extracted = None
+        TestSimpleImporter._last_transformed = None
+        TestSimpleImporter._last_loaded_ids = None
+        TestSimpleImporterOverride._override_transform_called = False
+        TestSimpleImporterOverride._override_load_called = False
+
+    def test_override_transform_is_called(self):
+        """The _inherit override of transform_data must run, not the base."""
+        from odoo.addons.test_etl_framework.models.test_importers import (
+            TestSimpleImporterOverride,
+        )
+
+        pipeline = ETL.get_pipeline("test.simple.importer")
+        ctx = ETLContext(cr=None, env=self.env)
+        importer = self.env["test.simple.importer"]
+
+        executor = ETLExecutor(pipeline, ctx, importer)
+        executor.execute()
+
+        self.assertTrue(
+            TestSimpleImporterOverride._override_transform_called,
+            "The _inherit override of transform_data was not called. "
+            "The framework is likely calling the stored base-class function "
+            "reference instead of resolving via getattr on the model instance.",
+        )
+
+    def test_override_load_is_called(self):
+        """The _inherit override of load_data must run, not the base."""
+        from odoo.addons.test_etl_framework.models.test_importers import (
+            TestSimpleImporterOverride,
+        )
+
+        pipeline = ETL.get_pipeline("test.simple.importer")
+        ctx = ETLContext(cr=None, env=self.env)
+        importer = self.env["test.simple.importer"]
+
+        executor = ETLExecutor(pipeline, ctx, importer)
+        executor.execute()
+
+        self.assertTrue(
+            TestSimpleImporterOverride._override_load_called,
+            "The _inherit override of load_data was not called. "
+            "The framework is likely calling the stored base-class function "
+            "reference instead of resolving via getattr on the model instance.",
+        )
+
+    def test_override_transform_output_is_used(self):
+        """Records created must reflect the override's transform, not the base."""
+        from odoo.addons.test_etl_framework.models.test_importers import (
+            TestSimpleImporter,
+        )
+
+        pipeline = ETL.get_pipeline("test.simple.importer")
+        ctx = ETLContext(cr=None, env=self.env)
+        importer = self.env["test.simple.importer"]
+
+        executor = ETLExecutor(pipeline, ctx, importer)
+        executor.execute()
+
+        # The override prefixes names with [OVERRIDE], the base uses [CODE]
+        categories = self.env["res.partner.category"].browse(
+            TestSimpleImporter._last_loaded_ids
+        )
+        self.assertTrue(
+            all("[OVERRIDE]" in cat.name for cat in categories),
+            f"Expected [OVERRIDE] prefix from _inherit transform, "
+            f"got names: {categories.mapped('name')}",
+        )

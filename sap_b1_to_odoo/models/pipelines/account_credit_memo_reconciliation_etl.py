@@ -210,14 +210,9 @@ class AccountCreditMemoReconciliation(models.AbstractModel):
                     failed += 1
                 continue
 
-            try:
+            with ctx.skippable(f"CM {cm.name} -> {inv.name}"):
                 (cm_line + inv_line).reconcile()
                 reconciled += 1
-            except Exception as e:
-                _logger.warning(
-                    f"Failed to reconcile CM {cm.name} with {inv.name}: {e}"
-                )
-                failed += 1
 
         _logger.info(
             f"[CreditMemoReconciliation] Complete: {reconciled} reconciled, "
