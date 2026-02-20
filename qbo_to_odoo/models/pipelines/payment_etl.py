@@ -94,29 +94,17 @@ class QboPaymentImporter(models.AbstractModel):
         )
         bill_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
 
-        # Get payment journal
-        company = ctx.env.company
-        payment_journal = ctx.env["account.journal"].search(
-            [("type", "=", "general"), ("company_id", "=", company.id)],
-            limit=1,
+        # Build account lookup by QBO ID
+        ctx.env.cr.execute(
+            "SELECT qbo_id, id FROM account_account WHERE qbo_id IS NOT NULL"
         )
-        if not payment_journal:
-            raise ValueError("No general journal found for payment entries")
-
-        # Get bank account for offset
-        bank_account = ctx.env["account.account"].search(
-            [("account_type", "=", "asset_cash"), ("company_ids", "in", [company.id])],
-            limit=1,
-        )
-        if not bank_account:
-            raise ValueError("No bank account found for payment entries")
+        account_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
 
         # Store in class-level cache
         QboPaymentImporter._lookup_cache = {
             "invoice_map": invoice_map,
             "bill_map": bill_map,
-            "journal_id": payment_journal.id,
-            "bank_account_id": bank_account.id,
+            "account_map": account_map,
         }
 
         # Combine into single list for proper chunking
@@ -131,14 +119,7 @@ class QboPaymentImporter(models.AbstractModel):
         cache = QboPaymentImporter._lookup_cache
         invoice_map = cache.get("invoice_map", {})
         bill_map = cache.get("bill_map", {})
-        journal_id = cache.get("journal_id")
-        bank_account_id = cache.get("bank_account_id")
-
-        if not journal_id or not bank_account_id:
-            _logger.warning(
-                "Missing journal or bank account in cache, skipping transform"
-            )
-            return []
+        account_map = cache.get("account_map", {})
 
         # Build partner lookups
         ctx.env.cr.execute(
@@ -164,8 +145,7 @@ class QboPaymentImporter(models.AbstractModel):
                     data,
                     customer_map,
                     invoice_map,
-                    journal_id,
-                    bank_account_id,
+                    account_map,
                     company,
                     ctx,
                 )
@@ -174,8 +154,7 @@ class QboPaymentImporter(models.AbstractModel):
                     data,
                     vendor_map,
                     bill_map,
-                    journal_id,
-                    bank_account_id,
+                    account_map,
                     company,
                     ctx,
                 )
@@ -195,8 +174,7 @@ class QboPaymentImporter(models.AbstractModel):
         payment: Dict,
         customer_map: Dict,
         invoice_map: Dict,
-        journal_id: int,
-        bank_account_id: int,
+        account_map: Dict,
         company,
         ctx: ETLContext,
     ) -> Optional[List[Dict]]:
@@ -224,6 +202,16 @@ class QboPaymentImporter(models.AbstractModel):
 
         qbo_payment_id = int(payment.get("Id", 0))
         payment_ref = payment.get("PaymentRefNum", "") or f"QBO-{qbo_payment_id}"
+
+        # Get bank account and journal from QBO payment data
+        result = self._get_bank_account_from_payment(payment, account_map, ctx)
+        if not result:
+            _logger.warning(
+                f"No valid bank account found for payment {qbo_payment_id}, skipping"
+            )
+            return None
+
+        bank_account_id, journal_id = result
 
         # Get linked invoices from payment lines
         lines = payment.get("Line", [])
@@ -258,13 +246,103 @@ class QboPaymentImporter(models.AbstractModel):
 
         return allocations if allocations else None
 
+    def _get_bank_account_from_payment(
+        self, payment: Dict, account_map: Dict, ctx: ETLContext
+    ) -> Optional[tuple[int, int]]:
+        """Extract bank account and journal IDs from QBO payment data.
+
+        QBO payments can reference bank accounts in different ways:
+        - Customer payments: 'DepositToAccountRef' field
+        - Bill payments: 'BankAccountRef' field or 'APAccountRef'
+
+        Args:
+            payment: QBO payment or bill payment data
+            account_map: Mapping of QBO account IDs to Odoo account IDs
+            ctx: ETL context for database access
+
+        Returns:
+            Tuple of (bank_account_id, journal_id) or None if not found
+        """
+        # Try different account reference fields based on payment type
+        account_ref = None
+
+        # Check for DepositToAccountRef (customer payments)
+        if "DepositToAccountRef" in payment:
+            account_ref = payment.get("DepositToAccountRef", {})
+
+        # Check for BankAccountRef (bill payments)
+        elif "BankAccountRef" in payment:
+            account_ref = payment.get("BankAccountRef", {})
+
+        # Check for APAccountRef (some bill payments)
+        elif "APAccountRef" in payment:
+            account_ref = payment.get("APAccountRef", {})
+
+        if not account_ref:
+            _logger.debug(
+                f"No account reference found in payment {payment.get('Id')}. "
+                f"Available fields: {list(payment.keys())}"
+            )
+            return None
+
+        qbo_account_id = str(account_ref.get("value", 0))
+        if not qbo_account_id or qbo_account_id == "0":
+            _logger.debug(
+                f"Invalid account reference value in payment {payment.get('Id')}: {account_ref}"
+            )
+            return None
+
+        # Look up the Odoo account ID
+        bank_account_id = account_map.get(qbo_account_id)
+        if not bank_account_id:
+            _logger.warning(
+                f"Bank account with QBO ID {qbo_account_id} not found in Odoo "
+                f"for payment {payment.get('Id')}"
+            )
+            return None
+
+        # Verify it's actually a bank/cash account and find its journal
+        try:
+            bank_account = ctx.env["account.account"].browse(bank_account_id)
+            if bank_account.account_type != "asset_cash":
+                _logger.warning(
+                    f"Account {qbo_account_id} is not a bank account (type: {bank_account.account_type}) "
+                    f"for payment {payment.get('Id')}"
+                )
+                return None
+
+            # Find the bank journal for this account
+            company = ctx.env.company
+            bank_journal = ctx.env["account.journal"].search(
+                [
+                    ("type", "=", "bank"),
+                    ("company_id", "=", company.id),
+                    ("default_account_id", "=", bank_account_id),
+                ],
+                limit=1,
+            )
+
+            if not bank_journal:
+                _logger.warning(
+                    f"No bank journal found for account {bank_account_id} "
+                    f"for payment {payment.get('Id')}"
+                )
+                return None
+
+            return bank_account_id, bank_journal.id
+
+        except Exception as e:
+            _logger.warning(
+                f"Error validating bank account {bank_account_id} for payment {payment.get('Id')}: {e}"
+            )
+            return None
+
     def _transform_bill_payment(
         self,
         bp: Dict,
         vendor_map: Dict,
         bill_map: Dict,
-        journal_id: int,
-        bank_account_id: int,
+        account_map: Dict,
         company,
         ctx: ETLContext,
     ) -> Optional[List[Dict]]:
@@ -292,6 +370,16 @@ class QboPaymentImporter(models.AbstractModel):
 
         qbo_bill_payment_id = int(bp.get("Id", 0))
         payment_ref = bp.get("DocNumber", "") or f"QBO-BP-{qbo_bill_payment_id}"
+
+        # Get bank account and journal from QBO bill payment data
+        result = self._get_bank_account_from_payment(bp, account_map, ctx)
+        if not result:
+            _logger.warning(
+                f"No valid bank account found for bill payment {qbo_bill_payment_id}, skipping"
+            )
+            return None
+
+        bank_account_id, journal_id = result
 
         # Get linked bills from payment lines
         lines = bp.get("Line", [])
@@ -354,8 +442,8 @@ class QboPaymentImporter(models.AbstractModel):
             if not move:
                 continue
 
-            amount = alloc["amount"]
-            if amount <= 0:
+            amount_foreign = alloc["amount"]
+            if amount_foreign <= 0:
                 continue
 
             # Find the receivable/payable line on the invoice/bill
@@ -369,15 +457,63 @@ class QboPaymentImporter(models.AbstractModel):
                 _logger.debug(f"No unreconciled line found on move {move.name}")
                 continue
 
-            # Determine debit/credit based on document type
+            # Convert payment amount from foreign currency to company currency
+            # The invoice's receivable/payable line has debit/credit in company currency
+            # We need to match that, not the foreign currency amount
+            invoice_line = line_to_reconcile[0]
+            is_foreign_currency = move.currency_id != move.company_id.currency_id
+
+            if is_foreign_currency:
+                # Foreign currency invoice - convert payment amount
+                # Use the invoice's implicit exchange rate (balance / amount_currency)
+                if invoice_line.amount_currency:
+                    rate = abs(invoice_line.balance / invoice_line.amount_currency)
+                    amount_company = amount_foreign * rate
+                else:
+                    amount_company = amount_foreign
+                currency_id = move.currency_id.id
+            else:
+                amount_company = amount_foreign
+                currency_id = None
+
+            # Determine debit/credit and amount_currency based on document type
             if alloc["is_customer"]:
                 # Customer payment: credit receivable, debit bank
-                recv_debit, recv_credit = 0, amount
-                bank_debit, bank_credit = amount, 0
+                recv_debit, recv_credit = 0, amount_company
+                bank_debit, bank_credit = amount_company, 0
+                # amount_currency is negative for credit on receivable (reducing what customer owes)
+                recv_amount_currency = -amount_foreign if is_foreign_currency else 0
+                bank_amount_currency = amount_foreign if is_foreign_currency else 0
             else:
                 # Vendor payment: debit payable, credit bank
-                recv_debit, recv_credit = amount, 0
-                bank_debit, bank_credit = 0, amount
+                recv_debit, recv_credit = amount_company, 0
+                bank_debit, bank_credit = 0, amount_company
+                # amount_currency is positive for debit on payable (reducing what we owe)
+                recv_amount_currency = amount_foreign if is_foreign_currency else 0
+                bank_amount_currency = -amount_foreign if is_foreign_currency else 0
+
+            # Build line values
+            recv_line_vals = {
+                "account_id": line_to_reconcile[0].account_id.id,
+                "partner_id": alloc["partner_id"],
+                "debit": recv_debit,
+                "credit": recv_credit,
+                "name": f"Payment for {move.name}",
+            }
+            bank_line_vals = {
+                "account_id": alloc["bank_account_id"],
+                "partner_id": alloc["partner_id"],
+                "debit": bank_debit,
+                "credit": bank_credit,
+                "name": f"Payment for {move.name}",
+            }
+
+            # Add currency fields for foreign currency payments
+            if is_foreign_currency:
+                recv_line_vals["currency_id"] = currency_id
+                recv_line_vals["amount_currency"] = recv_amount_currency
+                bank_line_vals["currency_id"] = currency_id
+                bank_line_vals["amount_currency"] = bank_amount_currency
 
             je_vals = {
                 "journal_id": alloc["journal_id"],
@@ -386,28 +522,8 @@ class QboPaymentImporter(models.AbstractModel):
                 "qbo_payment_id": alloc["qbo_payment_id"],
                 "qbo_bill_payment_id": alloc["qbo_bill_payment_id"],
                 "line_ids": [
-                    (
-                        0,
-                        0,
-                        {
-                            "account_id": line_to_reconcile[0].account_id.id,
-                            "partner_id": alloc["partner_id"],
-                            "debit": recv_debit,
-                            "credit": recv_credit,
-                            "name": f"Payment for {move.name}",
-                        },
-                    ),
-                    (
-                        0,
-                        0,
-                        {
-                            "account_id": alloc["bank_account_id"],
-                            "partner_id": alloc["partner_id"],
-                            "debit": bank_debit,
-                            "credit": bank_credit,
-                            "name": f"Payment for {move.name}",
-                        },
-                    ),
+                    (0, 0, recv_line_vals),
+                    (0, 0, bank_line_vals),
                 ],
             }
 
