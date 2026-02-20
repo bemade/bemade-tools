@@ -24,7 +24,10 @@ _logger = logging.getLogger(__name__)
     target_model="account.move",
     importer_name="qbo.payment.importer",
     sap_source="Payment",
-    depends_on=["qbo.invoice.importer", "qbo.bill.importer"],
+    depends_on=[
+        "qbo.invoice.importer",
+        "qbo.bill.importer",
+    ],
 )
 class QboPaymentImporter(models.AbstractModel):
     """ETL Pipeline for importing QBO Payments as journal entries."""
@@ -94,17 +97,12 @@ class QboPaymentImporter(models.AbstractModel):
         )
         bill_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
 
-        # Build account lookup by QBO ID
-        ctx.env.cr.execute(
-            "SELECT qbo_id, id FROM account_account WHERE qbo_id IS NOT NULL"
-        )
-        account_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
-
         # Store in class-level cache
+        # NOTE: account_map is built in transform phase because class-level cache
+        # doesn't persist across multiprocessing workers
         QboPaymentImporter._lookup_cache = {
             "invoice_map": invoice_map,
             "bill_map": bill_map,
-            "account_map": account_map,
         }
 
         # Combine into single list for proper chunking
@@ -119,7 +117,13 @@ class QboPaymentImporter(models.AbstractModel):
         cache = QboPaymentImporter._lookup_cache
         invoice_map = cache.get("invoice_map", {})
         bill_map = cache.get("bill_map", {})
-        account_map = cache.get("account_map", {})
+
+        # Build account lookup by QBO ID - must be done in transform phase
+        # because class-level cache doesn't persist across multiprocessing workers
+        ctx.env.cr.execute(
+            "SELECT qbo_id, id FROM account_account WHERE qbo_id IS NOT NULL"
+        )
+        account_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
 
         # Build partner lookups
         ctx.env.cr.execute(
@@ -249,11 +253,14 @@ class QboPaymentImporter(models.AbstractModel):
     def _get_bank_account_from_payment(
         self, payment: Dict, account_map: Dict, ctx: ETLContext
     ) -> Optional[tuple[int, int]]:
-        """Extract bank account and journal IDs from QBO payment data.
+        """Extract account and journal IDs from QBO payment data.
 
-        QBO payments can reference bank accounts in different ways:
+        QBO payments reference accounts via different fields:
         - Customer payments: 'DepositToAccountRef' field
         - Bill payments: 'BankAccountRef' field or 'APAccountRef'
+
+        The referenced account is used as-is without type validation,
+        matching whatever account QBO has linked to the payment.
 
         Args:
             payment: QBO payment or bill payment data
@@ -261,7 +268,7 @@ class QboPaymentImporter(models.AbstractModel):
             ctx: ETL context for database access
 
         Returns:
-            Tuple of (bank_account_id, journal_id) or None if not found
+            Tuple of (account_id, journal_id) or None if not found
         """
         # Try different account reference fields based on payment type
         account_ref = None
@@ -293,49 +300,25 @@ class QboPaymentImporter(models.AbstractModel):
             return None
 
         # Look up the Odoo account ID
-        bank_account_id = account_map.get(qbo_account_id)
-        if not bank_account_id:
+        account_id = account_map.get(qbo_account_id)
+        if not account_id:
             _logger.warning(
-                f"Bank account with QBO ID {qbo_account_id} not found in Odoo "
+                f"Account with QBO ID {qbo_account_id} not found in Odoo "
                 f"for payment {payment.get('Id')}"
             )
             return None
 
-        # Verify it's actually a bank/cash account and find its journal
-        try:
-            bank_account = ctx.env["account.account"].browse(bank_account_id)
-            if bank_account.account_type != "asset_cash":
-                _logger.warning(
-                    f"Account {qbo_account_id} is not a bank account (type: {bank_account.account_type}) "
-                    f"for payment {payment.get('Id')}"
-                )
-                return None
-
-            # Find the bank journal for this account
-            company = ctx.env.company
-            bank_journal = ctx.env["account.journal"].search(
-                [
-                    ("type", "=", "bank"),
-                    ("company_id", "=", company.id),
-                    ("default_account_id", "=", bank_account_id),
-                ],
-                limit=1,
-            )
-
-            if not bank_journal:
-                _logger.warning(
-                    f"No bank journal found for account {bank_account_id} "
-                    f"for payment {payment.get('Id')}"
-                )
-                return None
-
-            return bank_account_id, bank_journal.id
-
-        except Exception as e:
-            _logger.warning(
-                f"Error validating bank account {bank_account_id} for payment {payment.get('Id')}: {e}"
-            )
+        # Find a general journal for the payment entry
+        company = ctx.env.company
+        journal = ctx.env["account.journal"].search(
+            [("type", "=", "general"), ("company_id", "=", company.id)],
+            limit=1,
+        )
+        if not journal:
+            _logger.warning(f"No general journal found for payment {payment.get('Id')}")
             return None
+
+        return account_id, journal.id
 
     def _transform_bill_payment(
         self,
