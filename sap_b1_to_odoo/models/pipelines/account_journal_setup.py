@@ -38,12 +38,11 @@ class AccountJournalSetup(models.AbstractModel):
 
         # Find specific account types
         cash_accounts = accounts.filtered(lambda a: a.account_type == "asset_cash")
-        ar_account = accounts.filtered(lambda a: a.account_type == "asset_receivable")[
-            :1
-        ]
-        ap_account = accounts.filtered(lambda a: a.account_type == "liability_payable")[
-            :1
-        ]
+
+        # Find the most-used AR and AP accounts from SAP business partners (ocrd.debpayacct).
+        # SAP often has per-partner receivable/payable sub-accounts; we want the main ones.
+        ar_account = self._find_most_used_account(ctx, accounts, "asset_receivable")
+        ap_account = self._find_most_used_account(ctx, accounts, "liability_payable")
 
         # Find the most common inventory valuation account from SAP categories
         # Query SAP OITB for the most used balinvntac (inventory account)
@@ -100,6 +99,43 @@ class AccountJournalSetup(models.AbstractModel):
             "stock_valuation_account": stock_valuation_account,
         }
 
+    @api.model
+    def _find_most_used_account(self, ctx, accounts, account_type):
+        """Find the most-used account of a given type from SAP business partners.
+
+        Queries SAP ocrd.debpayacct to find which receivable/payable account
+        is assigned to the most partners, then matches it to an imported Odoo account.
+        Falls back to the first account of that type if no SAP match is found.
+        """
+        ctx.cr.execute(
+            """
+            SELECT a.formatcode, COUNT(*) as cnt
+            FROM ocrd bp
+            JOIN oact a ON bp.debpayacct = a.acctcode
+            WHERE bp.debpayacct IS NOT NULL
+            GROUP BY a.formatcode
+            ORDER BY cnt DESC
+            """
+        )
+        typed_accounts = accounts.filtered(lambda a: a.account_type == account_type)
+        for row in ctx.cr.fetchall():
+            sap_code = row[0]
+            match = typed_accounts.filtered(lambda a, c=sap_code: a.sap_acct_code == c)
+            if match:
+                _logger.info(
+                    f"Most-used {account_type} account from SAP: "
+                    f"{match[0].display_name} ({row[1]} partners)"
+                )
+                return match[0]
+        # Fallback: first account of this type
+        if typed_accounts:
+            _logger.warning(
+                f"No SAP partner match for {account_type}, "
+                f"falling back to {typed_accounts[0].display_name}"
+            )
+            return typed_accounts[0]
+        return ctx.env["account.account"]
+
     @ETL.transform()
     def transform_journals(self, ctx: ETLContext, extracted):
         """Create journal configuration using SAP accounts and archive default journals."""
@@ -141,6 +177,26 @@ class AccountJournalSetup(models.AbstractModel):
                 unused_defaults.write({"active": False})
                 _logger.info(
                     f"Archived {len(unused_defaults)} unused default journals: {', '.join(unused_defaults.mapped('code'))}"
+                )
+
+        # Fix up existing journals whose default_account_id points to an archived account.
+        # This happens when Odoo auto-creates journals (e.g. INV, BILL) with default
+        # accounts that the CoA pipeline later archives in favour of SAP accounts.
+        journal_updates = []
+        for journal in active_journals:
+            if not journal.default_account_id or journal.default_account_id.active:
+                continue
+            replacement = None
+            if journal.type == "sale" and income_account:
+                replacement = income_account
+            elif journal.type == "purchase" and expense_account:
+                replacement = expense_account
+            if replacement:
+                journal_updates.append((journal, replacement))
+                _logger.info(
+                    f"Will re-point {journal.code} default account "
+                    f"from archived {journal.default_account_id.display_name} "
+                    f"to {replacement.display_name}"
                 )
 
         journal_vals = []
@@ -229,6 +285,9 @@ class AccountJournalSetup(models.AbstractModel):
         _logger.info(f"Prepared {len(journal_vals)} journals to create")
         return {
             "journal_vals": journal_vals,
+            "journal_updates": journal_updates,
+            "ar_account": ar_account,
+            "ap_account": ap_account,
             "stock_valuation_account": stock_valuation_account,
         }
 
@@ -237,7 +296,39 @@ class AccountJournalSetup(models.AbstractModel):
         """Create account.journal records and mark chart template as installed."""
         data = transformed.get("transform_journals") or {}
         journal_vals = data.get("journal_vals", [])
+        journal_updates = data.get("journal_updates", [])
         stock_valuation_account = data.get("stock_valuation_account")
+
+        ar_account = data.get("ar_account")
+        ap_account = data.get("ap_account")
+
+        # Set company-wide default receivable/payable accounts via ir.default.
+        # The CoA pipeline archives Odoo's default accounts; without this,
+        # partners inherit the archived defaults and invoice posting fails.
+        IrDefault = ctx.env["ir.default"]
+        if ar_account:
+            IrDefault.set(
+                "res.partner",
+                "property_account_receivable_id",
+                ar_account.id,
+                company_id=ctx.env.company.id,
+            )
+            _logger.info(f"Set default receivable account to {ar_account.display_name}")
+        if ap_account:
+            IrDefault.set(
+                "res.partner",
+                "property_account_payable_id",
+                ap_account.id,
+                company_id=ctx.env.company.id,
+            )
+            _logger.info(f"Set default payable account to {ap_account.display_name}")
+
+        # Re-point journals whose default account was archived by the CoA pipeline
+        for journal, replacement in journal_updates:
+            journal.default_account_id = replacement
+            _logger.info(
+                f"Re-pointed {journal.code} default account to {replacement.display_name}"
+            )
 
         if not journal_vals:
             _logger.info(

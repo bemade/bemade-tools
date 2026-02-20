@@ -1,6 +1,7 @@
 # ETL Framework for Odoo
 # Declarative, self-optimizing ETL pipelines
 
+from . import models
 from .framework import (
     ETL,
     ETLContext,
@@ -10,9 +11,10 @@ from .framework import (
     ETLPipeline,
     MultiprocessingConfig,
     PipelineOrchestrator,
-    RETRYABLE_ERRORS,
+    RETRYABLE_DB_ERRORS,
     ChunkableData,
 )
+from .reporter import ETLReporter, PipelineReport
 
 __all__ = [
     "ETL",
@@ -21,8 +23,10 @@ __all__ = [
     "ETLMethod",
     "ETLPhase",
     "ETLPipeline",
+    "ETLReporter",
     "MultiprocessingConfig",
     "PipelineOrchestrator",
-    "RETRYABLE_ERRORS",
+    "RETRYABLE_DB_ERRORS",
     "ChunkableData",
+    "PipelineReport",
 ]
