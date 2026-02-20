@@ -97,6 +97,17 @@ class QboJournalEntryImporter(models.AbstractModel):
             # Get currency info for the move
             currency_ref = entry.get("CurrencyRef", {})
             currency_code = currency_ref.get("value") if currency_ref else None
+            exchange_rate = float(entry.get("ExchangeRate", 1.0) or 1.0)
+
+            # Determine if this is a foreign currency entry
+            is_foreign_currency = False
+            currency = None
+            if currency_code and currency_code != company.currency_id.name:
+                currency = ctx.env["res.currency"].search(
+                    [("name", "=", currency_code)], limit=1
+                )
+                if currency:
+                    is_foreign_currency = True
 
             # Build line items
             lines = entry.get("Line", [])
@@ -113,8 +124,8 @@ class QboJournalEntryImporter(models.AbstractModel):
                     continue
 
                 # Skip zero-amount lines
-                amount = float(line.get("Amount", 0) or 0)
-                if amount == 0:
+                amount_foreign = float(line.get("Amount", 0) or 0)
+                if amount_foreign == 0:
                     continue
 
                 qbo_account_id = int(account_ref.get("value", 0))
@@ -130,30 +141,39 @@ class QboJournalEntryImporter(models.AbstractModel):
 
                 posting_type = detail.get("PostingType", "")
 
-                # Use the original amount - Odoo will convert using the synced exchange rate
+                # Convert to company currency if foreign currency
+                # QBO ExchangeRate = home currency per 1 foreign unit
+                if is_foreign_currency and exchange_rate:
+                    amount_company = amount_foreign * exchange_rate
+                else:
+                    amount_company = amount_foreign
+
                 if posting_type == "Debit":
-                    debit = amount
+                    debit = amount_company
                     credit = 0.0
+                    amount_currency = amount_foreign if is_foreign_currency else 0
                 elif posting_type == "Credit":
                     debit = 0.0
-                    credit = amount
+                    credit = amount_company
+                    amount_currency = -amount_foreign if is_foreign_currency else 0
                 else:
                     continue
 
-                line_vals.append(
-                    (
-                        0,
-                        0,
-                        {
-                            "account_id": account_id,
-                            "name": line.get("Description", "")
-                            or entry.get("PrivateNote", "")
-                            or "/",
-                            "debit": debit,
-                            "credit": credit,
-                        },
-                    )
-                )
+                line_data = {
+                    "account_id": account_id,
+                    "name": line.get("Description", "")
+                    or entry.get("PrivateNote", "")
+                    or "/",
+                    "debit": debit,
+                    "credit": credit,
+                }
+
+                # Add currency fields for foreign currency entries
+                if is_foreign_currency:
+                    line_data["currency_id"] = currency.id
+                    line_data["amount_currency"] = amount_currency
+
+                line_vals.append((0, 0, line_data))
 
             if has_error or not line_vals:
                 skipped += 1

@@ -141,9 +141,16 @@ class QboExchangeRateImporter(models.AbstractModel):
 
             # Skip if already exists in DB, otherwise set in dict (overwrites duplicates)
             if key not in existing_rates:
+                # QBO ExchangeRate = home currency units per 1 foreign unit
+                # e.g., 1.4 means 1 USD = 1.4 CAD
+                # Odoo rate = foreign currency units per 1 home currency unit
+                # e.g., 0.714 means 1 CAD = 0.714 USD
+                # So: odoo_rate = 1 / qbo_exchange_rate
+                qbo_rate = rate_data["rate"]
+                odoo_rate = 1.0 / qbo_rate if qbo_rate else 1.0
                 rate_vals_dict[key] = {
                     "name": date,
-                    "inverse_company_rate": rate_data["rate"],
+                    "rate": odoo_rate,
                     "currency_id": currency_id,
                     "company_id": company.id,
                 }

@@ -139,40 +139,48 @@ class QboTransferImporter(models.AbstractModel):
             )
             return None
 
-        # Get currency
+        # Get currency and exchange rate
         currency_code = transfer.get("CurrencyRef", {}).get("value", "CAD")
+        exchange_rate = float(transfer.get("ExchangeRate", 1.0) or 1.0)
         currency = company.env["res.currency"].search(
             [("name", "=", currency_code)], limit=1
         )
         if not currency:
             currency = company.currency_id
 
+        # Determine if foreign currency
+        is_foreign_currency = currency.id != company.currency_id.id
+
+        # Convert to company currency if needed
+        if is_foreign_currency and exchange_rate:
+            amount_company = amount * exchange_rate
+        else:
+            amount_company = amount
+
         # Build journal entry lines
+        from_line_vals = {
+            "account_id": from_account_id,
+            "name": f"Transfer to {to_ref.get('name', 'account')}",
+            "credit": amount_company,
+            "debit": 0,
+        }
+        to_line_vals = {
+            "account_id": to_account_id,
+            "name": f"Transfer from {from_ref.get('name', 'account')}",
+            "debit": amount_company,
+            "credit": 0,
+        }
+
+        # Add currency fields for foreign currency transfers
+        if is_foreign_currency:
+            from_line_vals["currency_id"] = currency.id
+            from_line_vals["amount_currency"] = -amount  # Credit = negative
+            to_line_vals["currency_id"] = currency.id
+            to_line_vals["amount_currency"] = amount  # Debit = positive
+
         line_ids = [
-            # Credit line (from account - source)
-            (
-                0,
-                0,
-                {
-                    "account_id": from_account_id,
-                    "name": f"Transfer to {to_ref.get('name', 'account')}",
-                    "credit": amount,
-                    "debit": 0,
-                    "currency_id": currency.id,
-                },
-            ),
-            # Debit line (to account - destination)
-            (
-                0,
-                0,
-                {
-                    "account_id": to_account_id,
-                    "name": f"Transfer from {from_ref.get('name', 'account')}",
-                    "debit": amount,
-                    "credit": 0,
-                    "currency_id": currency.id,
-                },
-            ),
+            (0, 0, from_line_vals),
+            (0, 0, to_line_vals),
         ]
 
         return {

@@ -100,6 +100,23 @@ class QboAccountImporter(models.AbstractModel):
             if acc.get("code"):
                 used_codes.add(acc["code"])
 
+        # Archive standard Odoo accounts that don't have QBO IDs
+        # (fresh database - no transactions to worry about)
+        odoo_default_accounts = ctx.env["account.account"].search(
+            [("company_ids", "in", [company.id]), ("qbo_id", "=", False)]
+        )
+
+        if odoo_default_accounts:
+            _logger.info(
+                f"Found {len(odoo_default_accounts)} Odoo default accounts to archive "
+                f"(fresh database - no transaction check needed)"
+            )
+            odoo_default_accounts.write({"active": False})
+            _logger.info(
+                f"Archived {len(odoo_default_accounts)} Odoo default accounts: "
+                f"{', '.join(odoo_default_accounts.mapped('code'))}"
+            )
+
         for account in accounts:
             # Skip accounts without account number
             acct_num = account.get("AcctNum")
@@ -152,7 +169,7 @@ class QboAccountImporter(models.AbstractModel):
 
     @ETL.load()
     def load_accounts(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Load accounts into Odoo."""
+        """Load accounts into Odoo and set proper defaults."""
         account_vals = transformed.get("transform_accounts", [])
 
         if not account_vals:
@@ -163,7 +180,109 @@ class QboAccountImporter(models.AbstractModel):
         accounts = ctx.env["account.account"].create(account_vals)
         _logger.info(f"Created {len(accounts)} accounts")
 
+        # Set account defaults based on QBO accounts
+        self._set_account_defaults(ctx)
+
         # Update last sync timestamp
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
         if connection:
             connection.last_account_sync = ctx.env.cr.now()
+
+    def _set_account_defaults(self, ctx: ETLContext) -> None:
+        """Set proper account defaults based on imported QBO accounts."""
+        company = ctx.env.company
+        IrDefault = ctx.env["ir.default"].sudo()
+
+        # Find common account types from QBO accounts
+        qbo_accounts = ctx.env["account.account"].search(
+            [("company_ids", "in", [company.id]), ("qbo_id", "!=", False)]
+        )
+
+        if not qbo_accounts:
+            _logger.warning("No QBO accounts found for setting defaults")
+            return
+
+        _logger.info(f"Setting account defaults from {len(qbo_accounts)} QBO accounts")
+
+        # Default bank account (for bank journals)
+        bank_accounts = qbo_accounts.filtered(
+            lambda a: a.account_type == "asset_cash"
+        ).sorted("code")
+        if bank_accounts:
+            bank_account = bank_accounts[0]
+            # Set as default for new bank journals
+            IrDefault.set("account.journal", "default_account_id", bank_account.id)
+            _logger.info(
+                f"Set default bank account: {bank_account.code} - {bank_account.name}"
+            )
+
+        # Default income account (for sale journals)
+        income_accounts = qbo_accounts.filtered(
+            lambda a: a.account_type == "income"
+        ).sorted("code")
+        if income_accounts:
+            income_account = income_accounts[0]
+            # Set as default for product categories
+            IrDefault.set(
+                "product.category",
+                "property_account_income_categ_id",
+                income_account.id,
+            )
+            # Update existing sale journals
+            sale_journals = ctx.env["account.journal"].search(
+                [("type", "=", "sale"), ("company_id", "=", company.id)]
+            )
+            if sale_journals:
+                sale_journals.write({"default_account_id": income_account.id})
+                _logger.info(
+                    f"Updated {len(sale_journals)} sale journals with default income account: {income_account.code}"
+                )
+            _logger.info(
+                f"Set default income account: {income_account.code} - {income_account.name}"
+            )
+
+        # Default expense account (for purchase journals)
+        expense_accounts = qbo_accounts.filtered(
+            lambda a: a.account_type in ["expense", "expense_direct_cost"]
+        ).sorted("code")
+        if expense_accounts:
+            expense_account = expense_accounts[0]
+            # Set as default for product categories
+            IrDefault.set(
+                "product.category",
+                "property_account_expense_categ_id",
+                expense_account.id,
+            )
+            # Update existing purchase journals
+            purchase_journals = ctx.env["account.journal"].search(
+                [("type", "=", "purchase"), ("company_id", "=", company.id)]
+            )
+            if purchase_journals:
+                purchase_journals.write({"default_account_id": expense_account.id})
+                _logger.info(
+                    f"Updated {len(purchase_journals)} purchase journals with default expense account: {expense_account.code}"
+                )
+            _logger.info(
+                f"Set default expense account: {expense_account.code} - {expense_account.name}"
+            )
+
+        # Default stock account (if exists)
+        stock_accounts = qbo_accounts.filtered(
+            lambda a: a.account_type in ["asset_current", "asset_non_current"]
+        ).sorted("code")
+        if stock_accounts:
+            stock_account = stock_accounts[0]
+            # Set as default for product categories
+            IrDefault.set(
+                "product.category",
+                "property_stock_valuation_account_id",
+                stock_account.id,
+            )
+            _logger.info(
+                f"Set default stock account: {stock_account.code} - {stock_account.name}"
+            )
+
+        # Trigger auto-detection of AR/AP accounts (this already exists in qbo_connection)
+        connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
+        if connection:
+            connection._auto_detect_default_accounts()
