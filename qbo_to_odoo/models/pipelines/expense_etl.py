@@ -139,42 +139,56 @@ class QboExpenseImporter(models.AbstractModel):
                 f"Payment account not found for QBO ID {payment_account_qbo_id}"
             )
 
-        # Get currency
+        # Get currency and exchange rate
         currency_code = purchase.get("CurrencyRef", {}).get("value", "USD")
+        exchange_rate = float(purchase.get("ExchangeRate", 1.0) or 1.0)
         currency = company.env["res.currency"].search(
             [("name", "=", currency_code)], limit=1
         )
         if not currency:
             currency = company.currency_id
 
+        # Determine if foreign currency
+        is_foreign_currency = currency.id != company.currency_id.id
+
         # Build journal entry lines
         line_ids = []
-        total_amount = 0.0
+        total_amount_foreign = 0.0
+        total_amount_company = 0.0
 
         for line in purchase.get("Line", []):
             line_vals = self._transform_purchase_line(
-                line, account_map, product_map, currency
+                line,
+                account_map,
+                product_map,
+                currency,
+                exchange_rate,
+                is_foreign_currency,
+                company,
             )
             if line_vals:
                 line_ids.append((0, 0, line_vals))
-                total_amount += line_vals.get("debit", 0)
+                total_amount_foreign += line_vals.get("_amount_foreign", 0)
+                total_amount_company += line_vals.get("debit", 0)
+                # Remove internal tracking field
+                if "_amount_foreign" in line_vals:
+                    del line_vals["_amount_foreign"]
 
         if not line_ids:
             return None
 
         # Add credit line for payment account
-        line_ids.append(
-            (
-                0,
-                0,
-                {
-                    "account_id": payment_account_id,
-                    "credit": total_amount,
-                    "currency_id": currency.id,
-                    "name": f"Payment - {purchase.get('PaymentType', 'Expense')}",
-                },
-            )
-        )
+        credit_line_vals = {
+            "account_id": payment_account_id,
+            "credit": total_amount_company,
+            "debit": 0,
+            "name": f"Payment - {purchase.get('PaymentType', 'Expense')}",
+        }
+        if is_foreign_currency:
+            credit_line_vals["currency_id"] = currency.id
+            credit_line_vals["amount_currency"] = -total_amount_foreign
+
+        line_ids.append((0, 0, credit_line_vals))
 
         return {
             "move_type": "entry",
@@ -192,19 +206,33 @@ class QboExpenseImporter(models.AbstractModel):
         account_map: Dict,
         product_map: Dict,
         currency,
+        exchange_rate: float,
+        is_foreign_currency: bool,
+        company,
     ) -> Optional[Dict]:
         """Transform a single purchase line into account.move.line values."""
         detail_type = line.get("DetailType", "")
-        amount = float(line.get("Amount", 0) or 0)
+        amount_foreign = float(line.get("Amount", 0) or 0)
 
-        if amount <= 0:
+        if amount_foreign <= 0:
             return None
 
+        # Convert to company currency if needed
+        if is_foreign_currency and exchange_rate:
+            amount_company = amount_foreign * exchange_rate
+        else:
+            amount_company = amount_foreign
+
         line_vals = {
-            "debit": amount,
+            "debit": amount_company,
             "credit": 0,
-            "currency_id": currency.id,
+            "_amount_foreign": amount_foreign,  # Internal tracking, removed later
         }
+
+        # Add currency fields for foreign currency
+        if is_foreign_currency:
+            line_vals["currency_id"] = currency.id
+            line_vals["amount_currency"] = amount_foreign  # Debit = positive
 
         if line.get("Description"):
             line_vals["name"] = line.get("Description")
@@ -238,7 +266,7 @@ class QboExpenseImporter(models.AbstractModel):
             product_id = product_map.get(str(qbo_item_id))
 
             if product_id:
-                product = currency.env["product.product"].browse(product_id)
+                product = company.env["product.product"].browse(product_id)
                 account_id = (
                     product.property_account_expense_id.id
                     or product.categ_id.property_account_expense_categ_id.id
