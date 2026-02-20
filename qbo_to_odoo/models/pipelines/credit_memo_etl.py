@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_ERRORS
+from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_DB_ERRORS
 
 from .utils import get_api_client
 
@@ -255,7 +255,7 @@ class QboCreditMemoImporter(models.AbstractModel):
             try:
                 move.action_post()
                 posted += 1
-            except RETRYABLE_ERRORS:
+            except RETRYABLE_DB_ERRORS:
                 raise
             except Exception as e:
                 _logger.warning(f"Could not post credit memo {vals.get('ref')}: {e}")
