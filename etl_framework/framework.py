@@ -27,13 +27,14 @@ from dataclasses import dataclass, field
 import psycopg2
 import psycopg2.errors
 import psycopg2.extensions
+from contextlib import contextmanager
 from enum import Enum
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# Errors that should bubble up for retry by the orchestrator
-# These are transient database errors that can be resolved by retrying
-RETRYABLE_ERRORS = (
+# DB errors that must propagate for chunk-level retry.
+# Everything else inside a savepoint is safe to skip.
+RETRYABLE_DB_ERRORS = (
     psycopg2.errors.SerializationFailure,
     psycopg2.errors.DeadlockDetected,
     psycopg2.extensions.TransactionRollbackError,
@@ -74,11 +75,8 @@ class ChunkableData:
         return self.context.get(key, default)
 
 
-from contextlib import contextmanager
-
 from odoo import api
-from odoo.modules.registry import Registry
-from odoo.tools import mute_logger
+from .reporter import ETLReporter, PipelineReport, ReportLogHandler
 
 
 @contextmanager
@@ -147,6 +145,20 @@ class ETLContext:
     cr: Any  # Source database cursor
     env: Any  # Odoo environment
     source_config: Optional[Dict[str, Any]] = None  # Source-specific config
+    _reporter: Optional[Any] = field(default=None, repr=False)  # ETLReporter
+
+    @property
+    def report(self) -> PipelineReport:
+        """Get the current pipeline report for logging successes/warnings/failures.
+
+        Returns a no-op PipelineReport if no reporter is active, so callers
+        can always safely call ctx.report.success() etc.
+        """
+        if self._reporter and self._reporter.current:
+            return self._reporter.current
+        # Return a detached no-op report so pipeline code never has to
+        # check for None.
+        return PipelineReport(pipeline_name="_detached")
 
     def get_config(self, key: str, default: Any = None) -> Any:
         """Get a configuration value from source_config.
@@ -161,6 +173,35 @@ class ETLContext:
         if self.source_config:
             return self.source_config.get(key, default)
         return default
+
+    @contextmanager
+    def skippable(self, source_ref: str = ""):
+        """Context manager for per-record operations that may fail.
+
+        Wraps the block in a DB savepoint. If a retryable DB error occurs
+        (serialization, deadlock), it propagates so the framework can retry
+        the whole chunk. Any other exception is caught, logged as a warning
+        on the ETL report, and execution continues to the next record.
+
+        Usage::
+
+            for record in records:
+                with ctx.skippable(f"record {record.id}"):
+                    record.action_post()
+                    (line_a + line_b).reconcile()
+
+        Args:
+            source_ref: Human-readable reference for the report detail
+                (e.g. SAP document number).
+        """
+        try:
+            with self.env.cr.savepoint():
+                yield
+        except RETRYABLE_DB_ERRORS:
+            raise
+        except Exception as e:
+            _logger.warning("Skipping %s: %s", source_ref, e)
+            self.report.failure(message=str(e), source_ref=source_ref)
 
 
 @dataclass
@@ -531,32 +572,66 @@ class ETLExecutor:
 
     def execute(self) -> None:
         """Execute the complete ETL pipeline."""
+        pipeline_name = self.pipeline.importer_model_name
+        reporter = self.ctx._reporter
+
         _logger.info(
             f"Starting ETL pipeline for {self.pipeline.target_model} "
-            f"(importer: {self.pipeline.importer_model_name})"
+            f"(importer: {pipeline_name})"
         )
 
-        # Phase 1: Extract
-        extracted_data = self._execute_extract()
+        # Start reporter tracking for this pipeline
+        if reporter:
+            reporter.start_pipeline(
+                pipeline_name=pipeline_name,
+                target_model=self.pipeline.target_model,
+            )
 
-        # Phase 2: Decide execution strategy
-        record_count = self._get_record_count(extracted_data)
-        use_multiprocessing = self.pipeline.multiprocessing.should_use_multiprocessing(
-            record_count
-        )
+        # Install log handler to auto-capture WARNING+ messages
+        log_handler = None
+        if reporter and reporter.current:
+            log_handler = ReportLogHandler(reporter.current)
+            logging.getLogger().addHandler(log_handler)
 
-        _logger.info(
-            f"Extracted {record_count} records. "
-            f"Using {'multiprocessing' if use_multiprocessing else 'single-process'} mode."
-        )
+        state = "done"
+        try:
+            # Phase 1: Extract
+            extracted_data = self._execute_extract()
 
-        # Phase 3 & 4: Transform and Load
-        if use_multiprocessing:
-            self._execute_parallel(extracted_data)
-        else:
-            self._execute_sequential(extracted_data)
+            # Phase 2: Decide execution strategy
+            record_count = self._get_record_count(extracted_data)
 
-        _logger.info(f"[{self.pipeline.importer_model_name}] Completed ETL pipeline")
+            # Auto-track extracted count
+            if reporter and reporter.current:
+                reporter.current.extracted_count = record_count
+
+            use_multiprocessing = (
+                self.pipeline.multiprocessing.should_use_multiprocessing(record_count)
+            )
+
+            _logger.info(
+                f"Extracted {record_count} records. "
+                f"Using {'multiprocessing' if use_multiprocessing else 'single-process'} mode."
+            )
+
+            # Phase 3 & 4: Transform and Load
+            if use_multiprocessing:
+                self._execute_parallel(extracted_data)
+            else:
+                self._execute_sequential(extracted_data)
+
+            _logger.info(f"[{pipeline_name}] Completed ETL pipeline")
+        except Exception as e:
+            state = "failed"
+            # Record the uncaught exception as a failure detail
+            if reporter and reporter.current:
+                reporter.current.failure(message=str(e), source_ref="(uncaught)")
+            raise
+        finally:
+            if log_handler:
+                logging.getLogger().removeHandler(log_handler)
+            if reporter:
+                reporter.end_pipeline(state=state)
 
     def _execute_extract(self) -> Dict[str, Any]:
         """Execute all extraction methods.
@@ -569,7 +644,8 @@ class ETLExecutor:
             _logger.info(
                 f"[{self.pipeline.importer_model_name}] Extracting from {method.source_table}"
             )
-            result = method.func(self.importer, self.ctx)
+            bound = getattr(self.importer, method.func.__name__)
+            result = bound(self.ctx)
             results[method.func.__name__] = result
         return results
 
@@ -610,7 +686,8 @@ class ETLExecutor:
             _logger.info(
                 f"[{self.pipeline.importer_model_name}] Transforming with {method.func.__name__}"
             )
-            result = method.func(self.importer, self.ctx, extracted_data)
+            bound = getattr(self.importer, method.func.__name__)
+            result = bound(self.ctx, extracted_data)
             transformed_data[method.func.__name__] = result
 
         # Load
@@ -618,7 +695,8 @@ class ETLExecutor:
             _logger.info(
                 f"[{self.pipeline.importer_model_name}] Loading with {method.func.__name__}"
             )
-            method.func(self.importer, self.ctx, transformed_data)
+            bound = getattr(self.importer, method.func.__name__)
+            bound(self.ctx, transformed_data)
 
     def _execute_parallel(self, extracted_data: Dict[str, Any]) -> None:
         """Execute transform and load using multiprocessing.
@@ -630,7 +708,7 @@ class ETLExecutor:
         chunks = self._create_chunks(extracted_data)
 
         mp_config = self.pipeline.multiprocessing
-        workers = mp_config.get_workers()
+        workers = min(mp_config.get_workers(), len(chunks))
 
         _logger.info(
             f"[{self.pipeline.importer_model_name}] Processing {len(chunks)} chunks with {workers} workers."
@@ -672,7 +750,25 @@ class ETLExecutor:
                                     f"[{self.pipeline.importer_model_name}] Completed chunk {i}/{len(chunks)}"
                                 )
                                 break
-                            except RETRYABLE_ERRORS as e:
+                            except Exception as e:
+                                # Locate a retryable database error anywhere in the exception chain
+                                retryable_exc = self._find_retryable_db_error(e)
+
+                                _logger.warning(
+                                    "Chunk %s caught exception=%s, retryable=%s, chain=%s",
+                                    i,
+                                    type(e).__name__,
+                                    (
+                                        type(retryable_exc).__name__
+                                        if retryable_exc
+                                        else "None"
+                                    ),
+                                    self._summarize_exception_chain(e),
+                                )
+
+                                if not retryable_exc:
+                                    # Not a retryable error, crash immediately
+                                    raise
                                 if attempt < max_retries - 1:
                                     wait_time = 2**attempt  # Exponential backoff
                                     _logger.warning(
@@ -693,11 +789,6 @@ class ETLExecutor:
                                 else:
                                     # Max retries exceeded
                                     raise
-                            except Exception as e:
-                                _logger.error(
-                                    "Multiprocessing execution failed", exc_info=True
-                                )
-                                raise
             except Exception:
                 _logger.error("Multiprocessing execution failed", exc_info=True)
                 raise
@@ -721,6 +812,8 @@ class ETLExecutor:
         retryable = (
             psycopg2.errors.SerializationFailure,
             psycopg2.errors.DeadlockDetected,
+            psycopg2.errors.InFailedSqlTransaction,
+            psycopg2.errors.ActiveSqlTransaction,
             psycopg2.extensions.TransactionRollbackError,
         )
         for chained_exc in self._iter_exception_chain(exc):
@@ -833,34 +926,40 @@ class ETLExecutor:
             chunk: Data chunk to process.
             target_model: Target Odoo model name.
         """
-        from odoo.sql_db import db_connect
+        from odoo.modules.registry import Registry
 
-        # Use db_connect directly to get a fresh connection, avoiding
-        # inherited connection pool state issues after fork
-        db = db_connect(dbname)
-        cr = db.cursor()
-        try:
-            env = api.Environment(cr, uid, context)
-            importer = env[importer_name]
-            pipeline = importer._etl_pipeline  # type: ignore[attr-defined]
+        with Registry(dbname).cursor() as cr:
+            try:
+                env = api.Environment(cr, uid, context)
+                importer = env[importer_name]
+                pipeline = importer._etl_pipeline  # type: ignore[attr-defined]
 
-            # Create ETL context with Odoo cursor (no SAP cursor in multiprocessing)
-            ctx = ETLContext(cr=None, env=env)
+                ctx = ETLContext(cr=None, env=env)
 
-            # Transform
-            extracted_dict = chunk
-            transformed_data = {}
-            for method in pipeline.transform_methods:
-                result = method.func(importer, ctx, extracted_dict)
-                transformed_data[method.func.__name__] = result
+                # Transform
+                extracted_dict = chunk
+                transformed_data = {}
+                for method in pipeline.transform_methods:
+                    bound = getattr(importer, method.func.__name__)
+                    result = bound(ctx, extracted_dict)
+                    transformed_data[method.func.__name__] = result
 
-            # Load
-            for method in pipeline.load_methods:
-                method.func(importer, ctx, transformed_data)
+                # Load
+                for method in pipeline.load_methods:
+                    bound = getattr(importer, method.func.__name__)
+                    bound(ctx, transformed_data)
 
-            cr.commit()
-        finally:
-            cr.close()
+                cr.commit()
+            except Exception:
+                # Rollback the underlying PG connection directly so it is
+                # returned to the pool in a clean state.  Odoo's
+                # Cursor._close() deletes the psycopg2 cursor before
+                # calling rollback(), which can silently fail and leave
+                # the connection with an active transaction — causing
+                # "DISCARD ALL cannot run inside a transaction block" on
+                # the next borrow().
+                cr._cnx.rollback()
+                raise
 
 
 # =============================================================================
@@ -917,28 +1016,24 @@ class PipelineOrchestrator:
         execution_order = self._resolve_dependencies()
         _logger.info(f"Execution order: {execution_order}")
 
-        # Execute each pipeline
-        ctx = ETLContext(cr=cr, env=self.env, source_config=self.source_config)
+        # Create reporter and context
+        reporter = ETLReporter(self.env)
+        reporter.start_run()
+        ctx = ETLContext(
+            cr=cr,
+            env=self.env,
+            source_config=self.source_config,
+            _reporter=reporter,
+        )
 
-        for importer_name in execution_order:
-            pipeline = self.pipelines.get(importer_name)
-            if not pipeline:
-                _logger.warning(f"Pipeline for {importer_name} not found, skipping")
-                continue
-
-            # Get importer instance using the importer name
-            importer = self.env[importer_name]
-
-            _logger.info(
-                f"Starting ETL pipeline for {pipeline.target_model} (importer: {importer_name})"
-            )
-
-            # Execute pipeline
-            executor = ETLExecutor(pipeline, ctx, importer)
-            executor.execute()
-
-            # Commit after each pipeline
-            self.env.cr.commit()
+        run_state = "done"
+        try:
+            self._run_pipelines(execution_order, ctx)
+        except Exception:
+            run_state = "failed"
+            raise
+        finally:
+            reporter.end_run(state=run_state)
 
         _logger.info("Completed ETL orchestration for all pipelines")
 
@@ -955,9 +1050,36 @@ class PipelineOrchestrator:
         execution_order = self._resolve_dependencies_for(pipeline_names)
         _logger.info(f"Execution order: {execution_order}")
 
-        # Execute each pipeline
-        ctx = ETLContext(cr=cr, env=self.env, source_config=self.source_config)
+        # Create reporter and context
+        reporter = ETLReporter(self.env)
+        reporter.start_run()
+        ctx = ETLContext(
+            cr=cr,
+            env=self.env,
+            source_config=self.source_config,
+            _reporter=reporter,
+        )
 
+        run_state = "done"
+        try:
+            self._run_pipelines(execution_order, ctx)
+        except Exception:
+            run_state = "failed"
+            raise
+        finally:
+            reporter.end_run(state=run_state)
+
+        _logger.info(
+            f"Completed ETL orchestration for {len(execution_order)} pipelines"
+        )
+
+    def _run_pipelines(self, execution_order: List[str], ctx: ETLContext) -> None:
+        """Execute pipelines in the given order.
+
+        Args:
+            execution_order: List of importer names in execution order.
+            ctx: ETL context (with reporter attached).
+        """
         for importer_name in execution_order:
             pipeline = self.pipelines.get(importer_name)
             if not pipeline:
@@ -968,7 +1090,8 @@ class PipelineOrchestrator:
             importer = self.env[importer_name]
 
             _logger.info(
-                f"Starting ETL pipeline for {pipeline.target_model} (importer: {importer_name})"
+                f"Starting ETL pipeline for {pipeline.target_model} "
+                f"(importer: {importer_name})"
             )
 
             # Execute pipeline
@@ -977,10 +1100,6 @@ class PipelineOrchestrator:
 
             # Commit after each pipeline
             self.env.cr.commit()
-
-        _logger.info(
-            f"Completed ETL orchestration for {len(execution_order)} pipelines"
-        )
 
     def _resolve_dependencies(self) -> List[str]:
         """Resolve pipeline dependencies using topological sort.

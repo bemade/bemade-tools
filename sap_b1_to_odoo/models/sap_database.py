@@ -71,7 +71,6 @@ class SapDatabase(models.Model):
         - SAP_DB_PORT: Database port (default: 5432)
         - SAP_DB_SCHEMA: Database schema
         - SAP_FILESTORE_PATH: Filestore path (optional)
-        - SAP_AUTO_IMPORT: Set to '1' or 'true' to auto-run import_all()
         """
         # Check if we should run the setup
         if not os.getenv("SAP_DB_HOST"):
@@ -86,7 +85,6 @@ class SapDatabase(models.Model):
         db_port = int(os.getenv("SAP_DB_PORT", "5432"))
         db_schema = os.getenv("SAP_DB_SCHEMA")
         filestore_path = os.getenv("SAP_FILESTORE_PATH", "")
-        auto_import = os.getenv("SAP_AUTO_IMPORT", "").lower() in ("1", "true")
 
         # Validate required fields
         if not all([db_host, db_name, db_user, db_schema]):
@@ -120,15 +118,9 @@ class SapDatabase(models.Model):
         if existing:
             _logger.info(f"Updating existing sap.database record (ID: {existing.id})")
             existing.write(vals)
-            sap_db = existing
         else:
             _logger.info("Creating new sap.database record")
-            sap_db = self.create(vals)
-
-        if not auto_import:
-            _logger.info(
-                "SAP database record created. Set SAP_AUTO_IMPORT=1 to auto-run import_all()"
-            )
+            self.create(vals)
 
     ##################################################################
     # Public Action Methods (Called from UI)

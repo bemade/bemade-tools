@@ -167,3 +167,183 @@ class TestChunkingImporter(models.AbstractModel):
         vals_list = transformed.get("transform_bulk", [])
         if vals_list:
             ctx.env["res.partner.category"].create(vals_list)
+
+
+# =============================================================================
+# Failing Pipeline - For testing uncaught exception reporting
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="res.partner.category",
+    importer_name="test.failing.importer",
+    sap_source="test_fail",
+    allow_multiprocessing=False,
+)
+class TestFailingImporter(models.AbstractModel):
+    """Test importer that raises an exception during load."""
+
+    _name = "test.failing.importer"
+    _description = "Test Failing Importer"
+
+    @ETL.extract("test_fail")
+    def extract_data(self, ctx: ETLContext):
+        """Extract test data."""
+        return [{"name": "Will Fail"}]
+
+    @ETL.transform()
+    def transform_data(self, ctx: ETLContext, extracted: dict):
+        """Transform test data."""
+        return extracted.get("extract_data", [])
+
+    @ETL.load()
+    def load_data(self, ctx: ETLContext, transformed: dict):
+        """Load that intentionally fails."""
+        raise RuntimeError("Intentional test failure")
+
+
+# =============================================================================
+# Reporting Pipeline - For testing ctx.report usage
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="res.partner.category",
+    importer_name="test.reporting.importer",
+    sap_source="test_report",
+    allow_multiprocessing=False,
+)
+class TestReportingImporter(models.AbstractModel):
+    """Test importer that uses ctx.report to log successes/warnings/failures."""
+
+    _name = "test.reporting.importer"
+    _description = "Test Reporting Importer"
+
+    @ETL.extract("test_report")
+    def extract_data(self, ctx: ETLContext):
+        """Extract test data with some bad records."""
+        return [
+            {"name": "Good 1"},
+            {"name": "Good 2"},
+            {"name": ""},  # Will trigger warning
+            {"name": None},  # Will trigger failure
+        ]
+
+    @ETL.transform()
+    def transform_data(self, ctx: ETLContext, extracted: dict):
+        """Transform, filtering out bad records and reporting."""
+        raw = extracted.get("extract_data", [])
+        result = []
+        for i, item in enumerate(raw):
+            if item.get("name"):
+                result.append({"name": f"[RPT] {item['name']}"})
+            elif item.get("name") == "":
+                ctx.report.warning(
+                    message="Empty name, skipping",
+                    source_ref=f"row-{i}",
+                )
+            else:
+                ctx.report.failure(
+                    message="Null name, cannot import",
+                    source_ref=f"row-{i}",
+                )
+        return result
+
+    @ETL.load()
+    def load_data(self, ctx: ETLContext, transformed: dict):
+        """Load good records and report successes."""
+        vals_list = transformed.get("transform_data", [])
+        if vals_list:
+            records = ctx.env["res.partner.category"].create(vals_list)
+            ctx.report.success(len(records))
+
+
+# =============================================================================
+# Logging Pipeline - For testing auto-capture of log messages
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="res.partner.category",
+    importer_name="test.logging.importer",
+    sap_source="test_log",
+    allow_multiprocessing=False,
+)
+class TestLoggingImporter(models.AbstractModel):
+    """Test importer that uses _logger.warning/error during execution."""
+
+    _name = "test.logging.importer"
+    _description = "Test Logging Importer"
+
+    @ETL.extract("test_log")
+    def extract_data(self, ctx: ETLContext):
+        """Extract test data."""
+        return [
+            {"name": "Good"},
+            {"name": "warn_me"},
+            {"name": "error_me"},
+        ]
+
+    @ETL.transform()
+    def transform_data(self, ctx: ETLContext, extracted: dict):
+        """Transform with logged warnings and errors."""
+        raw = extracted.get("extract_data", [])
+        result = []
+        for item in raw:
+            if item["name"] == "warn_me":
+                _logger.warning("Suspicious record: %s", item["name"])
+            elif item["name"] == "error_me":
+                _logger.error("Bad record: %s", item["name"])
+            else:
+                result.append({"name": f"[LOG] {item['name']}"})
+        return result
+
+    @ETL.load()
+    def load_data(self, ctx: ETLContext, transformed: dict):
+        """Load good records."""
+        vals_list = transformed.get("transform_data", [])
+        if vals_list:
+            ctx.env["res.partner.category"].create(vals_list)
+
+
+# =============================================================================
+# Inherit Override Pipeline - For testing _inherit method resolution
+# =============================================================================
+
+
+class TestSimpleImporterOverride(models.AbstractModel):
+    """Inherits test.simple.importer and overrides transform + load.
+
+    Verifies that the ETL framework resolves methods via getattr on the
+    Odoo model instance (respecting _inherit MRO) rather than calling
+    the stored base-class function reference directly.
+    """
+
+    _inherit = "test.simple.importer"
+
+    # Class-level flags set by the override methods
+    _override_transform_called = False
+    _override_load_called = False
+
+    @ETL.transform()
+    def transform_data(self, ctx: ETLContext, extracted: dict):
+        """Override: add a marker to prove this ran instead of the base."""
+        TestSimpleImporterOverride._override_transform_called = True
+        raw_data = extracted.get("extract_data", [])
+        transformed = [{"name": f"[OVERRIDE] {item['name']}"} for item in raw_data]
+        TestSimpleImporter._last_transformed = transformed
+        return transformed
+
+    @ETL.load()
+    def load_data(self, ctx: ETLContext, transformed: dict):
+        """Override: set flag and delegate to create."""
+        TestSimpleImporterOverride._override_load_called = True
+        vals_list = transformed.get("transform_data", [])
+        if vals_list:
+            records = ctx.env["res.partner.category"].create(vals_list)
+            # Store on the base class so existing test helpers still work
+            from odoo.addons.test_etl_framework.models.test_importers import (
+                TestSimpleImporter,
+            )
+
+            TestSimpleImporter._last_loaded_ids = records.ids

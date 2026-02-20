@@ -772,7 +772,7 @@ class SaleOrderPostProcessor(models.AbstractModel):
         self._set_delivered_qty_for_closed_orders(sap_data.get("closed_orders", []))
 
         _logger.info("Confirming open orders...")
-        self._confirm_open_orders(sap_data.get("open_orders", []))
+        self._confirm_open_orders(ctx, sap_data.get("open_orders", []))
 
         _logger.info("Canceling canceled orders...")
         self._cancel_canceled_orders(sap_data.get("canceled_orders", []))
@@ -829,7 +829,7 @@ class SaleOrderPostProcessor(models.AbstractModel):
         self.env.cr.commit()
 
     @api.model
-    def _confirm_open_orders(self, open_orders):
+    def _confirm_open_orders(self, ctx, open_orders):
         """Confirm open orders (creates delivery orders)."""
 
         # Disable automations during confirmation
@@ -843,13 +843,8 @@ class SaleOrderPostProcessor(models.AbstractModel):
                 [("sap_docnum", "in", open_orders), ("state", "in", ["draft", "sent"])]
             )
             for order in orders:
-                try:
+                with ctx.skippable(f"confirm SO {order.name}"):
                     order.action_confirm()
-                except Exception as e:
-                    _logger.error(
-                        f"Failed to confirm order {order.name} "
-                        f"(sap_docnum={order.sap_docnum}): {e}"
-                    )
             self.env.cr.commit()
 
         active_automations.active = True
