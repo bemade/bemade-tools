@@ -107,6 +107,15 @@ class QboTaxImporter(models.AbstractModel):
         if not tax_group:
             tax_group = ctx.env["account.tax.group"].search([], limit=1)
 
+        # Create a default tax group if none exists
+        if not tax_group:
+            tax_group = ctx.env["account.tax.group"].create(
+                {
+                    "name": f"{company.name} Taxes",
+                    "company_id": company.id,
+                }
+            )
+
         tax_vals = []
 
         # First, create individual tax rates - duplicated for both sale and purchase
@@ -132,7 +141,7 @@ class QboTaxImporter(models.AbstractModel):
                     "type_tax_use": "sale",
                     "company_id": company.id,
                     "country_id": company.country_id.id,
-                    "tax_group_id": tax_group.id if tax_group else False,
+                    "tax_group_id": tax_group.id,
                 }
             )
 
@@ -147,7 +156,7 @@ class QboTaxImporter(models.AbstractModel):
                     "type_tax_use": "purchase",
                     "company_id": company.id,
                     "country_id": company.country_id.id,
-                    "tax_group_id": tax_group.id if tax_group else False,
+                    "tax_group_id": tax_group.id,
                 }
             )
 
@@ -165,7 +174,7 @@ class QboTaxImporter(models.AbstractModel):
                     "type_tax_use": "sale",
                     "company_id": company.id,
                     "country_id": company.country_id.id,
-                    "tax_group_id": tax_group.id if tax_group else False,
+                    "tax_group_id": tax_group.id,
                 }
                 tax_vals.append(vals)
 
@@ -181,7 +190,7 @@ class QboTaxImporter(models.AbstractModel):
                     "type_tax_use": "purchase",
                     "company_id": company.id,
                     "country_id": company.country_id.id,
-                    "tax_group_id": tax_group.id if tax_group else False,
+                    "tax_group_id": tax_group.id,
                 }
                 tax_vals.append(vals)
 

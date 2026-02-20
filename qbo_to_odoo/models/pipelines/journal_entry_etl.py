@@ -77,7 +77,18 @@ class QboJournalEntryImporter(models.AbstractModel):
         )
 
         if not journal:
-            raise ValueError("No general journal found for company")
+            # Create a general journal if none exists
+            journal = ctx.env["account.journal"].create(
+                {
+                    "name": "General Journal",
+                    "code": "GEN",
+                    "type": "general",
+                    "company_id": company.id,
+                }
+            )
+            _logger.info(
+                f"Created general journal {journal.name} for QBO journal entries"
+            )
 
         move_vals = []
         skipped = 0
@@ -169,7 +180,7 @@ class QboJournalEntryImporter(models.AbstractModel):
                 }
 
                 # Add currency fields for foreign currency entries
-                if is_foreign_currency:
+                if is_foreign_currency and currency:
                     line_data["currency_id"] = currency.id
                     line_data["amount_currency"] = amount_currency
 
