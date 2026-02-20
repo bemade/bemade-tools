@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_ERRORS
+from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_DB_ERRORS
 
 _logger = logging.getLogger(__name__)
 
@@ -269,7 +269,7 @@ class QboJournalEntryImporter(models.AbstractModel):
                 # Post the move
                 try:
                     move.action_post()
-                except RETRYABLE_ERRORS:
+                except RETRYABLE_DB_ERRORS:
                     raise
                 except Exception as e:
                     _logger.warning(
