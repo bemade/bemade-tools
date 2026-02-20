@@ -174,13 +174,12 @@ class QboAccountImporter(models.AbstractModel):
 
         if not account_vals:
             _logger.info("No new accounts to create")
-            return
+        else:
+            # Batch create accounts
+            accounts = ctx.env["account.account"].create(account_vals)
+            _logger.info(f"Created {len(accounts)} accounts")
 
-        # Batch create accounts
-        accounts = ctx.env["account.account"].create(account_vals)
-        _logger.info(f"Created {len(accounts)} accounts")
-
-        # Set account defaults based on QBO accounts
+        # Always set account defaults (fixes company fields even on re-runs)
         self._set_account_defaults(ctx)
 
         # Update last sync timestamp
@@ -286,3 +285,110 @@ class QboAccountImporter(models.AbstractModel):
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
         if connection:
             connection._auto_detect_default_accounts()
+
+        # Set early payment discount accounts to avoid payment processing errors
+        company = ctx.env.company
+
+        # Debug: Log current company settings
+        _logger.info(
+            f"Current early payment discount loss account: {company.account_journal_early_pay_discount_loss_account_id.code if company.account_journal_early_pay_discount_loss_account_id else 'None'}"
+        )
+        _logger.info(
+            f"Current early payment discount gain account: {company.account_journal_early_pay_discount_gain_account_id.code if company.account_journal_early_pay_discount_gain_account_id else 'None'}"
+        )
+
+        # Debug: Log available QBO accounts
+        expense_qbo_accounts = qbo_accounts.filtered(
+            lambda a: a.account_type in ["expense", "expense_direct_cost"]
+        )
+        income_qbo_accounts = qbo_accounts.filtered(
+            lambda a: a.account_type == "income"
+        )
+        _logger.info(
+            f"Available expense accounts: {[(a.code, a.name) for a in expense_qbo_accounts[:5]]}"
+        )
+        _logger.info(
+            f"Available income accounts: {[(a.code, a.name) for a in income_qbo_accounts[:5]]}"
+        )
+
+        # Enhanced inference for discount accounts
+        # Look for accounts with discount-related names first, then fall back to reasonable defaults
+
+        # Loss account: Look for expense accounts with discount-related names
+        discount_loss_accounts = qbo_accounts.filtered(
+            lambda a: a.account_type in ["expense", "expense_direct_cost"]
+            and any(
+                keyword in a.name.lower()
+                for keyword in ["discount", "fee", "loss", "charge"]
+            )
+        ).sorted("code")
+
+        _logger.info(
+            f"Found discount loss accounts: {[(a.code, a.name) for a in discount_loss_accounts]}"
+        )
+
+        # Fallback to general expense if no specific discount account found
+        expense_accounts = qbo_accounts.filtered(
+            lambda a: a.account_type in ["expense", "expense_direct_cost"]
+        ).sorted("code")
+
+        # Gain account: Look for income accounts with discount-related names (but not "refunds")
+        discount_gain_accounts = qbo_accounts.filtered(
+            lambda a: a.account_type == "income"
+            and any(
+                keyword in a.name.lower()
+                for keyword in ["early payment", "payment discount", "gain"]
+            )
+            and "refunds" not in a.name.lower()
+        ).sorted("code")
+
+        _logger.info(
+            f"Found discount gain accounts: {[(a.code, a.name) for a in discount_gain_accounts]}"
+        )
+
+        # Fallback to general income, avoiding accounts with "discounts" and "refunds" in the name
+        income_accounts = qbo_accounts.filtered(
+            lambda a: a.account_type == "income"
+            and "discounts" not in a.name.lower()
+            and "refunds" not in a.name.lower()
+        ).sorted("code")
+
+        # Set loss account with preference for discount-specific accounts
+        if discount_loss_accounts:
+            company.account_journal_early_pay_discount_loss_account_id = (
+                discount_loss_accounts[0].id
+            )
+            _logger.info(
+                f"Set early payment discount loss account to: {discount_loss_accounts[0].code} - {discount_loss_accounts[0].name}"
+            )
+        elif expense_accounts:
+            company.account_journal_early_pay_discount_loss_account_id = (
+                expense_accounts[0].id
+            )
+            _logger.info(
+                f"Set early payment discount loss account to general expense: {expense_accounts[0].code} - {expense_accounts[0].name}"
+            )
+
+        # Set gain account with preference for discount-specific accounts
+        if discount_gain_accounts:
+            company.account_journal_early_pay_discount_gain_account_id = (
+                discount_gain_accounts[0].id
+            )
+            _logger.info(
+                f"Set early payment discount gain account to: {discount_gain_accounts[0].code} - {discount_gain_accounts[0].name}"
+            )
+        elif income_accounts:
+            company.account_journal_early_pay_discount_gain_account_id = (
+                income_accounts[0].id
+            )
+            _logger.info(
+                f"Set early payment discount gain account to general income: {income_accounts[0].code} - {income_accounts[0].name}"
+            )
+
+        # Final verification
+        _logger.info(
+            f"FINAL - Early payment discount loss account: {company.account_journal_early_pay_discount_loss_account_id.code if company.account_journal_early_pay_discount_loss_account_id else 'None'}"
+        )
+        _logger.info(
+            f"FINAL - Early payment discount gain account: {company.account_journal_early_pay_discount_gain_account_id.code if company.account_journal_early_pay_discount_gain_account_id else 'None'}"
+        )
