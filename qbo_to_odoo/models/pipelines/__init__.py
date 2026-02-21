@@ -18,3 +18,6 @@ from . import journal_entry_etl
 from . import transfer_etl
 from . import employee_etl
 from . import expense_etl
+from . import deposit_etl
+from . import sales_receipt_etl
+from . import refund_receipt_etl

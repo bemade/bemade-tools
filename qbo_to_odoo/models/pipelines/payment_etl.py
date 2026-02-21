@@ -255,9 +255,11 @@ class QboPaymentImporter(models.AbstractModel):
     ) -> Optional[tuple[int, int]]:
         """Extract account and journal IDs from QBO payment data.
 
-        QBO Payment entity uses 'DepositToAccountRef' at the top level to
-        indicate the deposit account. Per QBO API docs, when this field is
-        absent the payment is applied to the Undeposited Funds account.
+        QBO customer Payment uses 'DepositToAccountRef' at the top level.
+        QBO BillPayment uses 'CheckPayment.BankAccountRef' for cheque
+        payments or 'CreditCardPayment.CCAccountRef' for credit card
+        payments. When none of these are present, the payment goes to
+        Undeposited Funds.
 
         Args:
             payment: QBO payment data
@@ -267,11 +269,23 @@ class QboPaymentImporter(models.AbstractModel):
         Returns:
             Tuple of (account_id, journal_id) or None if not found
         """
+        # Try DepositToAccountRef (customer payments)
         account_ref = payment.get("DepositToAccountRef", {})
 
+        # Try CheckPayment.BankAccountRef (bill payments by cheque)
         if not account_ref or not account_ref.get("value"):
-            # Per QBO API: when DepositToAccountRef is absent, payment goes
-            # to "Undeposited Funds". Look up that account in Odoo.
+            check_payment = payment.get("CheckPayment", {})
+            if check_payment:
+                account_ref = check_payment.get("BankAccountRef", {})
+
+        # Try CreditCardPayment.CCAccountRef (bill payments by credit card)
+        if not account_ref or not account_ref.get("value"):
+            cc_payment = payment.get("CreditCardPayment", {})
+            if cc_payment:
+                account_ref = cc_payment.get("CCAccountRef", {})
+
+        if not account_ref or not account_ref.get("value"):
+            # No account ref found — fall back to Undeposited Funds
             undeposited = ctx.env["account.account"].search(
                 [
                     ("name", "ilike", "Undeposited Funds"),
