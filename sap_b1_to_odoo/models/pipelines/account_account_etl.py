@@ -188,11 +188,13 @@ class AccountAccountImporter(models.AbstractModel):
 
         # Classify by SAP root account group (most reliable)
         if "asset" in root_name:
-            # Assets - classify by name and finanse flag
-            if finanse == "Y" or "cash" in name or "bank" in name or "checking" in name:
-                return "asset_cash"
-            elif "receivable" in name or "a/r" in name:
+            # Assets - check receivable first (A/R may have finanse='Y')
+            if "receivable" in name or "a/r" in name:
                 return "asset_receivable"
+            elif (
+                finanse == "Y" or "cash" in name or "bank" in name or "checking" in name
+            ):
+                return "asset_cash"
             elif "prepaid" in name:
                 return "asset_prepayments"
             elif (
@@ -263,9 +265,157 @@ class AccountAccountImporter(models.AbstractModel):
         """Create account.account records from transformed data."""
         account_vals = transformed.get("transform_accounts", [])
 
-        if not account_vals:
+        if account_vals:
+            accounts = ctx.env["account.account"].create(account_vals)
+            _logger.info(
+                f"Created {len(accounts)} account.account records from SAP OACT"
+            )
+        else:
             _logger.info("No new accounts to create")
+
+        # Always update company-wide defaults using ALL SAP accounts
+        # (not just newly created ones) to ensure ir.default is correct
+        all_sap_accounts = ctx.env["account.account"].search(
+            [("sap_acct_code", "!=", False)]
+        )
+        if all_sap_accounts:
+            self._set_default_partner_accounts(ctx, all_sap_accounts)
+
+    def _set_default_partner_accounts(self, ctx: ETLContext, accounts):
+        """Set company-wide default A/R and A/P accounts from imported SAP accounts.
+
+        Uses ir.default to override Odoo's out-of-the-box defaults so that all
+        new partners automatically get the SAP receivable/payable accounts.
+        """
+        company = ctx.env.company
+        IrDefault = ctx.env["ir.default"]
+
+        # Find the SAP receivable account (asset_receivable type)
+        receivable = accounts.filtered(lambda a: a.account_type == "asset_receivable")
+        if receivable:
+            receivable = receivable[0]
+            IrDefault.set(
+                "res.partner",
+                "property_account_receivable_id",
+                receivable.id,
+                company_id=company.id,
+            )
+            _logger.info(
+                f"Set default receivable account to {receivable.code} "
+                f"({receivable.name}) for company {company.name}."
+            )
+
+        # Find the SAP payable account (liability_payable type)
+        payable = accounts.filtered(lambda a: a.account_type == "liability_payable")
+        if payable:
+            payable = payable[0]
+            IrDefault.set(
+                "res.partner",
+                "property_account_payable_id",
+                payable.id,
+                company_id=company.id,
+            )
+            _logger.info(
+                f"Set default payable account to {payable.code} "
+                f"({payable.name}) for company {company.name}."
+            )
+
+        # Update default product category income/expense accounts via
+        # res.config.settings wizard + explicit ir.default.set, with assertions
+        # to verify the values are correctly persisted.
+        self._set_default_category_accounts(ctx, accounts)
+
+    def _set_default_category_accounts(self, ctx: ETLContext, accounts):
+        """Set default income/expense accounts via res.config.settings wizard.
+
+        Uses the wizard to ensure all Odoo mechanisms are triggered:
+        - res.company.income_account_id / expense_account_id
+        - ir.default for product.category properties
+        - Any other side effects from set_values()
+        """
+        company = ctx.env.company
+
+        # SAP general income account — first "income" type sorted by code
+        income_account = accounts.filtered(lambda a: a.account_type == "income").sorted(
+            "code"
+        )[:1]
+        # SAP general expense account — prefer expense_direct_cost (COGS),
+        # fall back to regular expense if none found
+        expense_account = accounts.filtered(
+            lambda a: a.account_type == "expense_direct_cost"
+        ).sorted("code")[:1]
+        if not expense_account:
+            expense_account = accounts.filtered(
+                lambda a: a.account_type == "expense"
+            ).sorted("code")[:1]
+
+        if not income_account and not expense_account:
+            _logger.warning(
+                "No SAP income or expense accounts found; "
+                "cannot update default product category accounts."
+            )
             return
 
-        accounts = ctx.env["account.account"].create(account_vals)
-        _logger.info(f"Created {len(accounts)} account.account records from SAP OACT")
+        # Write to company for the company-level fields
+        vals = {}
+        if income_account:
+            vals["income_account_id"] = income_account.id
+        if expense_account:
+            vals["expense_account_id"] = expense_account.id
+        company.write(vals)
+
+        # Explicitly set ir.default — company.write() calls _set_category_defaults()
+        # but it doesn't persist reliably in the ETL context
+        IrDefault = ctx.env["ir.default"]
+        if income_account:
+            IrDefault.set(
+                "product.category",
+                "property_account_income_categ_id",
+                income_account.id,
+                company_id=company.id,
+            )
+        if expense_account:
+            IrDefault.set(
+                "product.category",
+                "property_account_expense_categ_id",
+                expense_account.id,
+                company_id=company.id,
+            )
+        ctx.env.flush_all()
+        # Clear all caches to ensure _get returns fresh data
+        ctx.env.invalidate_all()
+
+        # Verify company values are set correctly
+        company.invalidate_recordset()
+        assert company.income_account_id == income_account, (
+            f"Company income_account_id not set! Expected {income_account.code}, "
+            f"got {company.income_account_id.code if company.income_account_id else 'None'}"
+        )
+        assert company.expense_account_id == expense_account, (
+            f"Company expense_account_id not set! Expected {expense_account.code}, "
+            f"got {company.expense_account_id.code if company.expense_account_id else 'None'}"
+        )
+
+        # Verify ir.default values are set correctly
+        IrDefault = ctx.env["ir.default"]
+        income_default = IrDefault._get(
+            "product.category",
+            "property_account_income_categ_id",
+            company_id=company.id,
+        )
+        expense_default = IrDefault._get(
+            "product.category",
+            "property_account_expense_categ_id",
+            company_id=company.id,
+        )
+        assert (
+            income_default == income_account.id
+        ), f"ir.default for income not set! Expected {income_account.id}, got {income_default}"
+        assert (
+            expense_default == expense_account.id
+        ), f"ir.default for expense not set! Expected {expense_account.id}, got {expense_default}"
+        _logger.info(
+            "Set default category accounts: income=%s, expense=%s (verified)",
+            income_account.code if income_account else "(unchanged)",
+            expense_account.code if expense_account else "(unchanged)",
+        )

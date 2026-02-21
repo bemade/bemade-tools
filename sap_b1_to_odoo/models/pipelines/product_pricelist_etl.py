@@ -144,17 +144,32 @@ class ProductPricelistItemImporter(models.AbstractModel):
         company_id = cache["company_id"]
 
         # Transform basic pricelists (OPLN)
-        basic_pricelist_vals = []
+        # Separate into base pricelists (self-referencing) and derived
+        # pricelists (referencing another list with a factor).
+        base_pricelist_vals = []
+        derived_pricelist_vals = []
         for pricelist in basic_pricelists:
-            if pricelist["listnum"] != 1:  # Skip listnum 1, it's the public pricelist
-                basic_pricelist_vals.append(
-                    {
-                        "sap_listnum": pricelist["listnum"],
-                        "name": pricelist["listname"],
-                    }
-                )
+            listnum = pricelist["listnum"]
+            base_num = pricelist["base_num"]
+            factor = float(pricelist["factor"] or 1.0)
+            vals = {
+                "sap_listnum": listnum,
+                "name": pricelist["listname"],
+                "company_id": company_id,
+            }
+            if base_num == listnum:
+                # Self-referencing: standalone base pricelist
+                base_pricelist_vals.append(vals)
+            else:
+                # Derived: references another pricelist with a factor
+                vals["_base_listnum"] = base_num
+                vals["_factor"] = factor
+                derived_pricelist_vals.append(vals)
 
-        _logger.info(f"Transformed {len(basic_pricelist_vals)} basic pricelists.")
+        _logger.info(
+            f"Transformed {len(base_pricelist_vals)} base pricelists "
+            f"and {len(derived_pricelist_vals)} derived pricelists."
+        )
 
         # Transform customer pricelists (blanket orders for customers)
         customer_pricelist_vals = []
@@ -227,7 +242,8 @@ class ProductPricelistItemImporter(models.AbstractModel):
         _logger.info(f"Transformed {len(customer_pricelist_vals)} customer pricelists.")
 
         return {
-            "basic_pricelist_vals": basic_pricelist_vals,
+            "base_pricelist_vals": base_pricelist_vals,
+            "derived_pricelist_vals": derived_pricelist_vals,
             "customer_pricelist_vals": customer_pricelist_vals,
         }
 
@@ -240,42 +256,52 @@ class ProductPricelistItemImporter(models.AbstractModel):
             transformed: Dictionary containing transformed data.
         """
         data = transformed["transform_pricelists_and_blankets"]
-        basic_pricelist_vals = data["basic_pricelist_vals"]
+        base_pricelist_vals = data["base_pricelist_vals"]
+        derived_pricelist_vals = data["derived_pricelist_vals"]
         customer_pricelist_vals = data["customer_pricelist_vals"]
 
-        # Load basic pricelists
-        if basic_pricelist_vals:
-            # Get public pricelist to use as base
-            public_pricelist = ctx.env["product.pricelist"].search(
-                [
-                    ("name", "ilike", "public"),
-                    ("currency_id", "=", ctx.env.ref("base.CAD").id),
-                ],
-                limit=1,
-            )
+        # 1. Create base pricelists first (no items — uses Sales Price)
+        Pricelist = ctx.env["product.pricelist"]
+        if base_pricelist_vals:
+            Pricelist.create(base_pricelist_vals)
+            _logger.info(f"Created {len(base_pricelist_vals)} base pricelists.")
 
-            if not public_pricelist:
+        # Build listnum → pricelist.id map for derived pricelists
+        all_sap_pricelists = Pricelist.search([("sap_listnum", "!=", False)])
+        listnum_to_id = {pl.sap_listnum: pl.id for pl in all_sap_pricelists}
+
+        # 2. Create derived pricelists with factor-based formula rules
+        valid_derived_vals = []
+        for vals in derived_pricelist_vals:
+            base_listnum = vals.pop("_base_listnum")
+            factor = vals.pop("_factor")
+            base_pl_id = listnum_to_id.get(base_listnum)
+            if not base_pl_id:
                 _logger.warning(
-                    "Public pricelist not found. Creating basic pricelists without base pricelist."
+                    f"Base pricelist listnum {base_listnum} not found "
+                    f"for derived pricelist '{vals['name']}'. Skipping."
                 )
-                # Create without base pricelist - they'll be standalone
-                ctx.env["product.pricelist"].create(basic_pricelist_vals)
-            else:
-                # Add base pricelist reference to each
-                for vals in basic_pricelist_vals:
-                    vals["item_ids"] = [
-                        Command.create(
-                            {
-                                "applied_on": "3_global",
-                                "base": "pricelist",
-                                "base_pricelist_id": public_pricelist.id,
-                            }
-                        )
-                    ]
+                continue
+            # Factor is a markup multiplier: Retail = Base × 1.75
+            # Odoo formula: price = base - (base * discount / 100)
+            # So discount = -(factor - 1) * 100  (negative = markup)
+            discount = -(factor - 1.0) * 100.0
+            vals["item_ids"] = [
+                Command.create(
+                    {
+                        "applied_on": "3_global",
+                        "compute_price": "formula",
+                        "base": "pricelist",
+                        "base_pricelist_id": base_pl_id,
+                        "price_discount": discount,
+                    }
+                )
+            ]
+            valid_derived_vals.append(vals)
 
-                ctx.env["product.pricelist"].create(basic_pricelist_vals)
-
-            _logger.info(f"Created {len(basic_pricelist_vals)} basic pricelists.")
+        if valid_derived_vals:
+            Pricelist.create(valid_derived_vals)
+            _logger.info(f"Created {len(valid_derived_vals)} derived pricelists.")
 
         # Load customer pricelists
         if customer_pricelist_vals:
