@@ -22,23 +22,24 @@
     "version": "19.0.0.0.1",
     "summary": "Migrate QuickBooks Online data to Odoo using ETL Framework",
     "description": """
-    Migrate QuickBooks Online data to Odoo including:
+Migrate QuickBooks Online data to Odoo including:
 
-    * Chart of Accounts
-    * Customers
-    * Vendors
-    * Products/Services
-    * Invoices
-    * Bills
-    * Payments
-    * Journal Entries
+* Chart of Accounts
+* Customers
+* Vendors
+* Products/Services
+* Invoices
+* Bills
+* Payments
+* Journal Entries
 
-    Features:
-    * OAuth2 authentication with QBO API
-    * Rate limiting to respect QBO API limits
-    * Incremental imports based on last sync date
-    * ETL framework integration for reliable data migration
-    """,
+Features:
+
+* OAuth2 authentication with QBO API
+* Rate limiting to respect QBO API limits
+* Incremental imports based on last sync date
+* ETL framework integration for reliable data migration
+""",
     "category": "Data Migration",
     "author": "Bemade Inc.",
     "website": "http://www.bemade.org",

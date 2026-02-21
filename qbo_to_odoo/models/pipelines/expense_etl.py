@@ -47,14 +47,16 @@ class QboExpenseImporter(models.AbstractModel):
         api_client = get_api_client(ctx)
 
         # Get existing QBO expense IDs
-        try:
+        ctx.env.cr.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'account_move' AND column_name = 'qbo_expense_id'"
+        )
+        if ctx.env.cr.fetchone():
             ctx.env.cr.execute(
                 "SELECT qbo_expense_id FROM account_move WHERE qbo_expense_id IS NOT NULL"
             )
             existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
-        except Exception:
-            # Column may not exist yet if module not upgraded
-            ctx.env.cr.rollback()
+        else:
             existing_ids = set()
             _logger.warning("qbo_expense_id column not found - module upgrade required")
         _logger.info(f"Found {len(existing_ids)} existing expenses in Odoo")
@@ -303,9 +305,11 @@ class QboExpenseImporter(models.AbstractModel):
         posted = 0
 
         for vals in move_vals_list:
-            move = ctx.env["account.move"].create(vals)
-            created += 1
-            move.action_post()
-            posted += 1
+            qbo_id = vals.get("qbo_expense_id", "?")
+            with ctx.skippable(f"expense QBO#{qbo_id}"):
+                move = ctx.env["account.move"].create(vals)
+                created += 1
+                move.action_post()
+                posted += 1
 
         _logger.info(f"Created {created} expense entries ({posted} posted)")

@@ -172,20 +172,11 @@ class QboExchangeRateImporter(models.AbstractModel):
             _logger.info("No new exchange rates to create")
             return
 
-        # Batch create rates
         created = 0
-        errors = 0
 
         for vals in rate_vals:
-            try:
+            with ctx.skippable(f"rate {vals.get('name', '?')}"):
                 ctx.env["res.currency.rate"].create(vals)
                 created += 1
-            except Exception as e:
-                # Handle race condition duplicates gracefully
-                if "unique constraint" in str(e).lower():
-                    _logger.debug(f"Rate already exists for {vals['name']}")
-                else:
-                    _logger.warning(f"Failed to create rate: {e}")
-                    errors += 1
 
-        _logger.info(f"Created {created} exchange rates ({errors} errors)")
+        _logger.info(f"Created {created} exchange rates")

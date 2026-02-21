@@ -39,13 +39,16 @@ class QboTransferImporter(models.AbstractModel):
         api_client = get_api_client(ctx)
 
         # Get existing QBO transfer IDs
-        try:
+        ctx.env.cr.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'account_move' AND column_name = 'qbo_transfer_id'"
+        )
+        if ctx.env.cr.fetchone():
             ctx.env.cr.execute(
                 "SELECT qbo_transfer_id FROM account_move WHERE qbo_transfer_id IS NOT NULL"
             )
             existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
-        except Exception:
-            ctx.env.cr.rollback()
+        else:
             existing_ids = set()
             _logger.warning(
                 "qbo_transfer_id column not found - module upgrade required"
@@ -205,11 +208,13 @@ class QboTransferImporter(models.AbstractModel):
 
         created = 0
         posted = 0
-        errors = 0
 
         for vals in move_vals_list:
-            move = ctx.env["account.move"].create(vals)
-            created += 1
-            move.action_post()
-            posted += 1
-        _logger.info(f"Created {created} transfers ({posted} posted, {errors} errors)")
+            qbo_id = vals.get("qbo_transfer_id", "?")
+            with ctx.skippable(f"transfer QBO#{qbo_id}"):
+                move = ctx.env["account.move"].create(vals)
+                created += 1
+                move.action_post()
+                posted += 1
+
+        _logger.info(f"Created {created} transfers ({posted} posted)")

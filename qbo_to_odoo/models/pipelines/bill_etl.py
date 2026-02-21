@@ -326,10 +326,11 @@ class QboBillImporter(models.AbstractModel):
         posted = 0
 
         for vals in move_vals:
-            move = ctx.env["account.move"].create(vals)
-            created += 1
-            move.action_post()
-            posted += 1
+            with ctx.skippable(f"bill QBO#{vals.get('qbo_bill_id', '?')}"):
+                move = ctx.env["account.move"].create(vals)
+                created += 1
+                move.action_post()
+                posted += 1
 
         _logger.info(f"Created {created} bills ({posted} posted)")
 

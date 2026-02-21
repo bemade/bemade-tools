@@ -5,7 +5,7 @@ using the ETL framework.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from odoo import models
 
@@ -107,6 +107,31 @@ class QboAccountImporter(models.AbstractModel):
         )
 
         if odoo_default_accounts:
+            # Clear company fields that reference default accounts before archiving,
+            # otherwise Odoo will error when those accounts are used (e.g. during
+            # payment posting which checks early payment discount accounts)
+            account_fields = [
+                "account_journal_early_pay_discount_loss_account_id",
+                "account_journal_early_pay_discount_gain_account_id",
+                "default_cash_difference_income_account_id",
+                "default_cash_difference_expense_account_id",
+                "account_journal_suspense_account_id",
+                "income_currency_exchange_account_id",
+                "expense_currency_exchange_account_id",
+                "deferred_expense_account_id",
+                "deferred_revenue_account_id",
+                "income_account_id",
+                "expense_account_id",
+            ]
+            for field_name in account_fields:
+                account = getattr(company, field_name, None)
+                if account and account in odoo_default_accounts:
+                    setattr(company, field_name, False)
+                    _logger.info(
+                        f"Cleared company.{field_name} ({account.code}) "
+                        f"before archiving"
+                    )
+
             _logger.info(
                 f"Found {len(odoo_default_accounts)} Odoo default accounts to archive "
                 f"(fresh database - no transaction check needed)"
@@ -131,6 +156,12 @@ class QboAccountImporter(models.AbstractModel):
             # Map QBO account type to Odoo
             qbo_type = account.get("AccountType", "")
             odoo_type = QBO_ACCOUNT_TYPE_MAP.get(qbo_type, "asset_current")
+
+            # Override: "Undeposited Funds" is classified as Other Current Asset
+            # in QBO but functions as a bank/cash account for payment processing
+            acct_name = account.get("Name", "")
+            if "undeposited funds" in acct_name.lower():
+                odoo_type = "asset_cash"
 
             # Check for duplicate code (both in DB and in current batch)
             code = str(acct_num)
@@ -188,9 +219,15 @@ class QboAccountImporter(models.AbstractModel):
             connection.last_account_sync = ctx.env.cr.now()
 
     def _set_account_defaults(self, ctx: ETLContext) -> None:
-        """Set proper account defaults based on imported QBO accounts."""
+        """Set proper account defaults based on imported QBO accounts.
+
+        Uses QBO API AccountSubType queries to find the correct accounts for
+        each company-level setting, then falls back to Odoo account type
+        filtering for journal and product category defaults.
+        """
         company = ctx.env.company
         IrDefault = ctx.env["ir.default"].sudo()
+        api_client = ctx.get_config("api_client")
 
         # Find common account types from QBO accounts
         qbo_accounts = ctx.env["account.account"].search(
@@ -203,31 +240,104 @@ class QboAccountImporter(models.AbstractModel):
 
         _logger.info(f"Setting account defaults from {len(qbo_accounts)} QBO accounts")
 
+        # --- QBO AccountSubType-based company settings ---
+        if api_client:
+            self._set_account_from_qbo_subtype(
+                ctx,
+                api_client,
+                company,
+                qbo_accounts,
+                subtype="ExchangeGainOrLoss",
+                fields=[
+                    "income_currency_exchange_account_id",
+                    "expense_currency_exchange_account_id",
+                ],
+                label="exchange difference",
+            )
+            self._set_account_from_qbo_subtype(
+                ctx,
+                api_client,
+                company,
+                qbo_accounts,
+                subtype="DiscountsRefundsGiven",
+                fields=[
+                    "account_journal_early_pay_discount_loss_account_id",
+                    "account_journal_early_pay_discount_gain_account_id",
+                ],
+                label="early payment discount",
+            )
+            self._set_account_from_qbo_subtype(
+                ctx,
+                api_client,
+                company,
+                qbo_accounts,
+                subtype="PrepaidExpensesPayable",
+                fields=["deferred_expense_account_id"],
+                label="deferred expense",
+            )
+            self._set_account_from_qbo_subtype(
+                ctx,
+                api_client,
+                company,
+                qbo_accounts,
+                subtype="AccrualsAndDeferredIncome",
+                fields=["deferred_revenue_account_id"],
+                label="deferred revenue",
+            )
+            self._set_account_from_qbo_subtype(
+                ctx,
+                api_client,
+                company,
+                qbo_accounts,
+                subtype="SalesOfProductIncome",
+                fields=["income_account_id"],
+                label="product income",
+            )
+            self._set_account_from_qbo_subtype(
+                ctx,
+                api_client,
+                company,
+                qbo_accounts,
+                fields=["expense_account_id"],
+                label="product expense",
+                account_type="Cost of Goods Sold",
+            )
+            self._set_account_from_qbo_subtype(
+                ctx,
+                api_client,
+                company,
+                qbo_accounts,
+                subtype="Inventory",
+                fields=[],
+                label="stock valuation",
+                ir_default_model="product.category",
+                ir_default_field="property_stock_valuation_account_id",
+            )
+
+        # --- Odoo account type-based defaults for journals ---
+
         # Default bank account (for bank journals)
         bank_accounts = qbo_accounts.filtered(
             lambda a: a.account_type == "asset_cash"
         ).sorted("code")
         if bank_accounts:
             bank_account = bank_accounts[0]
-            # Set as default for new bank journals
             IrDefault.set("account.journal", "default_account_id", bank_account.id)
             _logger.info(
                 f"Set default bank account: {bank_account.code} - {bank_account.name}"
             )
 
-        # Default income account (for sale journals)
+        # Default income account (for sale journals + product categories)
         income_accounts = qbo_accounts.filtered(
             lambda a: a.account_type == "income"
         ).sorted("code")
         if income_accounts:
             income_account = income_accounts[0]
-            # Set as default for product categories
             IrDefault.set(
                 "product.category",
                 "property_account_income_categ_id",
                 income_account.id,
             )
-            # Update existing sale journals
             sale_journals = ctx.env["account.journal"].search(
                 [("type", "=", "sale"), ("company_id", "=", company.id)]
             )
@@ -240,19 +350,17 @@ class QboAccountImporter(models.AbstractModel):
                 f"Set default income account: {income_account.code} - {income_account.name}"
             )
 
-        # Default expense account (for purchase journals)
+        # Default expense account (for purchase journals + product categories)
         expense_accounts = qbo_accounts.filtered(
             lambda a: a.account_type in ["expense", "expense_direct_cost"]
         ).sorted("code")
         if expense_accounts:
             expense_account = expense_accounts[0]
-            # Set as default for product categories
             IrDefault.set(
                 "product.category",
                 "property_account_expense_categ_id",
                 expense_account.id,
             )
-            # Update existing purchase journals
             purchase_journals = ctx.env["account.journal"].search(
                 [("type", "=", "purchase"), ("company_id", "=", company.id)]
             )
@@ -265,130 +373,83 @@ class QboAccountImporter(models.AbstractModel):
                 f"Set default expense account: {expense_account.code} - {expense_account.name}"
             )
 
-        # Default stock account (if exists)
-        stock_accounts = qbo_accounts.filtered(
-            lambda a: a.account_type in ["asset_current", "asset_non_current"]
-        ).sorted("code")
-        if stock_accounts:
-            stock_account = stock_accounts[0]
-            # Set as default for product categories
-            IrDefault.set(
-                "product.category",
-                "property_stock_valuation_account_id",
-                stock_account.id,
-            )
-            _logger.info(
-                f"Set default stock account: {stock_account.code} - {stock_account.name}"
-            )
-
         # Trigger auto-detection of AR/AP accounts (this already exists in qbo_connection)
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
         if connection:
             connection._auto_detect_default_accounts()
 
-        # Set early payment discount accounts to avoid payment processing errors
-        company = ctx.env.company
+    def _set_account_from_qbo_subtype(
+        self,
+        ctx: ETLContext,
+        api_client,
+        company,
+        qbo_accounts,
+        fields: list,
+        label: str,
+        subtype: Optional[str] = None,
+        account_type: Optional[str] = None,
+        ir_default_model: Optional[str] = None,
+        ir_default_field: Optional[str] = None,
+    ) -> None:
+        """Find a QBO account by AccountSubType/AccountType and set company fields.
 
-        # Debug: Log current company settings
-        _logger.info(
-            f"Current early payment discount loss account: {company.account_journal_early_pay_discount_loss_account_id.code if company.account_journal_early_pay_discount_loss_account_id else 'None'}"
-        )
-        _logger.info(
-            f"Current early payment discount gain account: {company.account_journal_early_pay_discount_gain_account_id.code if company.account_journal_early_pay_discount_gain_account_id else 'None'}"
-        )
+        Queries the QBO API for accounts matching the given filters,
+        finds the corresponding Odoo account (lowest code), and sets the
+        specified company fields or ir.default.
 
-        # Debug: Log available QBO accounts
-        expense_qbo_accounts = qbo_accounts.filtered(
-            lambda a: a.account_type in ["expense", "expense_direct_cost"]
-        )
-        income_qbo_accounts = qbo_accounts.filtered(
-            lambda a: a.account_type == "income"
-        )
-        _logger.info(
-            f"Available expense accounts: {[(a.code, a.name) for a in expense_qbo_accounts[:5]]}"
-        )
-        _logger.info(
-            f"Available income accounts: {[(a.code, a.name) for a in income_qbo_accounts[:5]]}"
-        )
+        Args:
+            ctx: ETL context.
+            api_client: QBO API client.
+            company: res.company record.
+            qbo_accounts: All QBO-imported Odoo accounts.
+            fields: List of company field names to set.
+            label: Human-readable label for logging.
+            subtype: Optional QBO AccountSubType filter.
+            account_type: Optional QBO AccountType filter.
+            ir_default_model: If set, use ir.default instead of company fields.
+            ir_default_field: Field name for ir.default.
+        """
+        conditions = ["Active = true"]
+        if subtype:
+            conditions.append(f"AccountSubType = '{subtype}'")
+        if account_type:
+            conditions.append(f"AccountType = '{account_type}'")
+        where = " AND ".join(conditions)
 
-        # Enhanced inference for discount accounts
-        # Look for accounts with discount-related names first, then fall back to reasonable defaults
-
-        # Loss account: Look for expense accounts with discount-related names
-        discount_loss_accounts = qbo_accounts.filtered(
-            lambda a: a.account_type in ["expense", "expense_direct_cost"]
-            and any(
-                keyword in a.name.lower()
-                for keyword in ["discount", "fee", "loss", "charge"]
+        qbo_accts = api_client.query_all(entity="Account", where=where)
+        filter_desc = subtype or account_type
+        if not qbo_accts:
+            _logger.warning(
+                f"No QBO account matching '{filter_desc}' found. "
+                f"{label.capitalize()} accounts not set."
             )
-        ).sorted("code")
+            return
 
-        _logger.info(
-            f"Found discount loss accounts: {[(a.code, a.name) for a in discount_loss_accounts]}"
+        # Find matching Odoo accounts sorted by code (lowest first)
+        qbo_ids = [int(a.get("Id")) for a in qbo_accts]
+        odoo_matches = qbo_accounts.filtered(lambda a: a.qbo_id in qbo_ids).sorted(
+            "code"
         )
 
-        # Fallback to general expense if no specific discount account found
-        expense_accounts = qbo_accounts.filtered(
-            lambda a: a.account_type in ["expense", "expense_direct_cost"]
-        ).sorted("code")
-
-        # Gain account: Look for income accounts with discount-related names (but not "refunds")
-        discount_gain_accounts = qbo_accounts.filtered(
-            lambda a: a.account_type == "income"
-            and any(
-                keyword in a.name.lower()
-                for keyword in ["early payment", "payment discount", "gain"]
+        if not odoo_matches:
+            _logger.warning(
+                f"QBO accounts for '{filter_desc}' found but no matching Odoo "
+                f"accounts. {label.capitalize()} accounts not set."
             )
-            and "refunds" not in a.name.lower()
-        ).sorted("code")
+            return
 
-        _logger.info(
-            f"Found discount gain accounts: {[(a.code, a.name) for a in discount_gain_accounts]}"
-        )
+        account = odoo_matches[0]
 
-        # Fallback to general income, avoiding accounts with "discounts" and "refunds" in the name
-        income_accounts = qbo_accounts.filtered(
-            lambda a: a.account_type == "income"
-            and "discounts" not in a.name.lower()
-            and "refunds" not in a.name.lower()
-        ).sorted("code")
-
-        # Set loss account with preference for discount-specific accounts
-        if discount_loss_accounts:
-            company.account_journal_early_pay_discount_loss_account_id = (
-                discount_loss_accounts[0].id
+        if ir_default_model and ir_default_field:
+            ctx.env["ir.default"].sudo().set(
+                ir_default_model, ir_default_field, account.id
             )
             _logger.info(
-                f"Set early payment discount loss account to: {discount_loss_accounts[0].code} - {discount_loss_accounts[0].name}"
+                f"Set {label} account (ir.default): " f"{account.code} - {account.name}"
             )
-        elif expense_accounts:
-            company.account_journal_early_pay_discount_loss_account_id = (
-                expense_accounts[0].id
-            )
+        else:
+            for field_name in fields:
+                setattr(company, field_name, account.id)
             _logger.info(
-                f"Set early payment discount loss account to general expense: {expense_accounts[0].code} - {expense_accounts[0].name}"
+                f"Set {label} account(s) to: " f"{account.code} - {account.name}"
             )
-
-        # Set gain account with preference for discount-specific accounts
-        if discount_gain_accounts:
-            company.account_journal_early_pay_discount_gain_account_id = (
-                discount_gain_accounts[0].id
-            )
-            _logger.info(
-                f"Set early payment discount gain account to: {discount_gain_accounts[0].code} - {discount_gain_accounts[0].name}"
-            )
-        elif income_accounts:
-            company.account_journal_early_pay_discount_gain_account_id = (
-                income_accounts[0].id
-            )
-            _logger.info(
-                f"Set early payment discount gain account to general income: {income_accounts[0].code} - {income_accounts[0].name}"
-            )
-
-        # Final verification
-        _logger.info(
-            f"FINAL - Early payment discount loss account: {company.account_journal_early_pay_discount_loss_account_id.code if company.account_journal_early_pay_discount_loss_account_id else 'None'}"
-        )
-        _logger.info(
-            f"FINAL - Early payment discount gain account: {company.account_journal_early_pay_discount_gain_account_id.code if company.account_journal_early_pay_discount_gain_account_id else 'None'}"
-        )

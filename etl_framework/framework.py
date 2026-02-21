@@ -38,6 +38,7 @@ RETRYABLE_DB_ERRORS = (
     psycopg2.errors.SerializationFailure,
     psycopg2.errors.DeadlockDetected,
     psycopg2.extensions.TransactionRollbackError,
+    psycopg2.OperationalError,
 )
 
 
@@ -927,39 +928,29 @@ class ETLExecutor:
             target_model: Target Odoo model name.
         """
         from odoo.modules.registry import Registry
+        from odoo.tools import mute_logger
 
         with Registry(dbname).cursor() as cr:
-            try:
-                env = api.Environment(cr, uid, context)
-                importer = env[importer_name]
-                pipeline = importer._etl_pipeline  # type: ignore[attr-defined]
+            env = api.Environment(cr, uid, context)
+            importer = env[importer_name]
+            pipeline = importer._etl_pipeline  # type: ignore[attr-defined]
 
-                ctx = ETLContext(cr=None, env=env)
+            ctx = ETLContext(cr=None, env=env)
 
-                # Transform
-                extracted_dict = chunk
-                transformed_data = {}
-                for method in pipeline.transform_methods:
-                    bound = getattr(importer, method.func.__name__)
-                    result = bound(ctx, extracted_dict)
-                    transformed_data[method.func.__name__] = result
+            # Transform
+            extracted_dict = chunk
+            transformed_data = {}
+            for method in pipeline.transform_methods:
+                bound = getattr(importer, method.func.__name__)
+                result = bound(ctx, extracted_dict)
+                transformed_data[method.func.__name__] = result
 
-                # Load
-                for method in pipeline.load_methods:
-                    bound = getattr(importer, method.func.__name__)
-                    bound(ctx, transformed_data)
+            # Load
+            for method in pipeline.load_methods:
+                bound = getattr(importer, method.func.__name__)
+                bound(ctx, transformed_data)
 
-                cr.commit()
-            except Exception:
-                # Rollback the underlying PG connection directly so it is
-                # returned to the pool in a clean state.  Odoo's
-                # Cursor._close() deletes the psycopg2 cursor before
-                # calling rollback(), which can silently fail and leave
-                # the connection with an active transaction — causing
-                # "DISCARD ALL cannot run inside a transaction block" on
-                # the next borrow().
-                cr._cnx.rollback()
-                raise
+            cr.commit()
 
 
 # =============================================================================
