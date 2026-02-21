@@ -10,7 +10,7 @@ from typing import Dict, List
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_DB_ERRORS
+from odoo.addons.etl_framework import ETL, ETLContext
 
 from .utils import get_api_client
 
@@ -289,24 +289,10 @@ class QboInvoiceImporter(models.AbstractModel):
             _logger.info("No new invoices to create")
             return
 
-        created = 0
-        posted = 0
-        errors = 0
-
-        for vals in move_vals:
-            move = ctx.env["account.move"].create(vals)
-            created += 1
-
-            # Try to post the invoice
-            try:
-                move.action_post()
-                posted += 1
-            except RETRYABLE_DB_ERRORS:
-                raise
-            except Exception as e:
-                _logger.warning(f"Could not post invoice {vals.get('ref')}: {e}")
-
-        _logger.info(f"Created {created} invoices ({posted} posted), {errors} errors")
+        moves = ctx.env["account.move"].create(move_vals)
+        _logger.info(f"Created {len(moves)} invoices")
+        moves.action_post()
+        _logger.info(f"Posted {len(moves)} invoices")
 
         # Update last sync timestamp
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))

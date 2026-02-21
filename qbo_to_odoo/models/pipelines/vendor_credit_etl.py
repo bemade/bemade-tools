@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_DB_ERRORS
+from odoo.addons.etl_framework import ETL, ETLContext
 
 from .utils import get_api_client
 
@@ -283,20 +283,7 @@ class QboVendorCreditImporter(models.AbstractModel):
             _logger.info("No new vendor credits to create")
             return
 
-        created = 0
-        posted = 0
-        errors = 0
-
-        for vals in move_vals:
-            move = ctx.env["account.move"].create(vals)
-            created += 1
-
-            try:
-                move.action_post()
-                posted += 1
-            except RETRYABLE_DB_ERRORS:
-                raise
-            except Exception as e:
-                _logger.warning(f"Could not post vendor credit {vals.get('ref')}: {e}")
-
-        _logger.info(f"Created {created} vendor credits ({posted} posted)")
+        moves = ctx.env["account.move"].create(move_vals)
+        _logger.info(f"Created {len(moves)} vendor credits")
+        moves.action_post()
+        _logger.info(f"Posted {len(moves)} vendor credits")
