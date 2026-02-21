@@ -62,3 +62,21 @@ class AccountMove(models.Model):
         copy=False,
         help="QuickBooks Online Transfer ID (bank transfers)",
     )
+    qbo_deposit_id = fields.Integer(
+        string="QBO Deposit ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online Deposit ID (bank deposits)",
+    )
+    qbo_sales_receipt_id = fields.Integer(
+        string="QBO Sales Receipt ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online SalesReceipt ID (cash sales)",
+    )
+    qbo_refund_receipt_id = fields.Integer(
+        string="QBO Refund Receipt ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online RefundReceipt ID (customer refunds)",
+    )
