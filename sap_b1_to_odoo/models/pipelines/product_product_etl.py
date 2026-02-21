@@ -53,10 +53,15 @@ class ProductImporter(models.AbstractModel):
         )
         _logger.info(f"Found {len(existing_products)} existing products.")
 
-        # Query SAP
-        sql = "SELECT * FROM oitm"
+        # Query SAP — join ITM1 to get base pricelist price (listnum 3)
+        sql = (
+            "SELECT oitm.*, itm1.price AS base_price"
+            " FROM oitm"
+            " LEFT JOIN itm1 ON oitm.itemcode = itm1.itemcode"
+            "   AND itm1.pricelist = 3"
+        )
         if existing_products:
-            sql += " WHERE itemcode NOT IN %s"
+            sql += " WHERE oitm.itemcode NOT IN %s"
             ctx.cr.execute(SQL(sql, existing_products))
         else:
             ctx.cr.execute(sql)
@@ -135,11 +140,13 @@ class ProductImporter(models.AbstractModel):
                 default_code = False
 
             # Build product values
+            base_price = sap_product.get("base_price") or 0.0
             vals = {
                 "sap_item_code": sap_product["itemcode"],
                 "sap_atcentry": sap_product["atcentry"],
                 "name": name,
                 "default_code": default_code,
+                "list_price": float(base_price),
                 "sale_ok": sap_product["sellitem"] == "Y",
                 "purchase_ok": sap_product["prchseitem"] == "Y",
                 "active": sap_product["validfor"] == "Y",

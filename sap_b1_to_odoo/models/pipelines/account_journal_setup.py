@@ -201,6 +201,27 @@ class AccountJournalSetup(models.AbstractModel):
 
         journal_vals = []
 
+        # Update existing journals if their default_account_id points to an archived account
+        for journal in active_journals:
+            if journal.type == "sale" and income_account:
+                if (
+                    not journal.default_account_id
+                    or not journal.default_account_id.active
+                ):
+                    journal.default_account_id = income_account
+                    _logger.info(
+                        f"Updated {journal.code} journal default_account_id to {income_account.code}"
+                    )
+            elif journal.type == "purchase" and expense_account:
+                if (
+                    not journal.default_account_id
+                    or not journal.default_account_id.active
+                ):
+                    journal.default_account_id = expense_account
+                    _logger.info(
+                        f"Updated {journal.code} journal default_account_id to {expense_account.code}"
+                    )
+
         # 1. Sale Journal
         # Use INV code to match Odoo's default (accountant module creates INV for sales)
         if "sale" not in existing_types and "INV" not in existing_codes:
