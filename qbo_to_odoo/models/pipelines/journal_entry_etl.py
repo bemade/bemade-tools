@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext, RETRYABLE_DB_ERRORS
+from odoo.addons.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
 
@@ -160,12 +160,12 @@ class QboJournalEntryImporter(models.AbstractModel):
                     amount_company = amount_foreign
 
                 if posting_type == "Debit":
-                    debit = amount_company
+                    debit = round(amount_company, 2)
                     credit = 0.0
                     amount_currency = amount_foreign if is_foreign_currency else 0
                 elif posting_type == "Credit":
                     debit = 0.0
-                    credit = amount_company
+                    credit = round(amount_company, 2)
                     amount_currency = -amount_foreign if is_foreign_currency else 0
                 else:
                     continue
@@ -190,41 +190,9 @@ class QboJournalEntryImporter(models.AbstractModel):
                 skipped += 1
                 continue
 
-            # Fix rounding differences to ensure entry balances
-            total_debit = sum(l[2]["debit"] for l in line_vals)
-            total_credit = sum(l[2]["credit"] for l in line_vals)
-            diff = round(total_debit - total_credit, 2)
-
-            if diff != 0:
-                adjusted = False
-                # Try to adjust a credit line first (if debit > credit)
-                if diff > 0:
-                    for i in range(len(line_vals) - 1, -1, -1):
-                        if line_vals[i][2]["credit"] > 0:
-                            line_vals[i][2]["credit"] = round(
-                                line_vals[i][2]["credit"] + diff, 2
-                            )
-                            adjusted = True
-                            break
-                # Try to adjust a debit line (if credit > debit)
-                else:
-                    for i in range(len(line_vals) - 1, -1, -1):
-                        if line_vals[i][2]["debit"] > 0:
-                            line_vals[i][2]["debit"] = round(
-                                line_vals[i][2]["debit"] - diff, 2
-                            )
-                            adjusted = True
-                            break
-
-                if adjusted:
-                    _logger.debug(f"Adjusted by {diff} to balance JE {entry.get('Id')}")
-                else:
-                    _logger.warning(
-                        f"Could not balance JE {entry.get('Id')}: "
-                        f"debit={total_debit}, credit={total_credit}"
-                    )
-                    skipped += 1
-                    continue
+            # Fix rounding differences to ensure entry balances.
+            # For foreign currency entries, also balance amount_currency.
+            self._balance_journal_entry_lines(line_vals, entry, is_foreign_currency)
 
             # Build move values
             move_val = {
@@ -250,6 +218,81 @@ class QboJournalEntryImporter(models.AbstractModel):
         _logger.info(f"Transformed {len(move_vals)} journal entries, skipped {skipped}")
         return move_vals
 
+    @staticmethod
+    def _balance_journal_entry_lines(
+        line_vals: list, entry: dict, is_foreign_currency: bool
+    ) -> None:
+        """Adjust journal entry lines so debit/credit (and amount_currency) balance.
+
+        Handles rounding differences caused by exchange rate multiplication.
+        Adjusts the largest line on the side that needs correction.
+        """
+        # Balance company currency (debit/credit)
+        total_debit = sum(l[2]["debit"] for l in line_vals)
+        total_credit = sum(l[2]["credit"] for l in line_vals)
+        diff = round(total_debit - total_credit, 2)
+
+        if diff != 0:
+            if diff > 0:
+                # Debit exceeds credit — increase the largest credit line
+                target = max(
+                    (l for l in line_vals if l[2]["credit"] > 0),
+                    key=lambda l: l[2]["credit"],
+                    default=None,
+                )
+                if target:
+                    target[2]["credit"] = round(target[2]["credit"] + diff, 2)
+            else:
+                # Credit exceeds debit — increase the largest debit line
+                target = max(
+                    (l for l in line_vals if l[2]["debit"] > 0),
+                    key=lambda l: l[2]["debit"],
+                    default=None,
+                )
+                if target:
+                    target[2]["debit"] = round(target[2]["debit"] - diff, 2)
+
+            _logger.debug(
+                f"Adjusted company currency by {diff} to balance "
+                f"JE {entry.get('Id')}"
+            )
+
+        # Balance foreign currency (amount_currency) if applicable
+        if is_foreign_currency:
+            total_amount_currency = sum(
+                l[2].get("amount_currency", 0) for l in line_vals
+            )
+            fc_diff = round(total_amount_currency, 2)
+
+            if fc_diff != 0:
+                if fc_diff > 0:
+                    # Positive excess — adjust the most negative line
+                    target = min(
+                        (l for l in line_vals if l[2].get("amount_currency", 0) < 0),
+                        key=lambda l: l[2]["amount_currency"],
+                        default=None,
+                    )
+                    if target:
+                        target[2]["amount_currency"] = round(
+                            target[2]["amount_currency"] - fc_diff, 2
+                        )
+                else:
+                    # Negative excess — adjust the most positive line
+                    target = max(
+                        (l for l in line_vals if l[2].get("amount_currency", 0) > 0),
+                        key=lambda l: l[2]["amount_currency"],
+                        default=None,
+                    )
+                    if target:
+                        target[2]["amount_currency"] = round(
+                            target[2]["amount_currency"] - fc_diff, 2
+                        )
+
+                _logger.debug(
+                    f"Adjusted foreign currency by {fc_diff} to balance "
+                    f"JE {entry.get('Id')}"
+                )
+
     @ETL.load()
     def load_journal_entries(self, ctx: ETLContext, transformed: Dict) -> None:
         """Load journal entries into Odoo."""
@@ -259,37 +302,18 @@ class QboJournalEntryImporter(models.AbstractModel):
             _logger.info("No new journal entries to create")
             return
 
-        # Create moves one by one to handle potential errors
         created = 0
-        errors = 0
+        posted = 0
         for vals in move_vals:
-            try:
+            with ctx.skippable(
+                f"journal entry QBO#{vals.get('qbo_journal_entry_id', '?')}"
+            ):
                 move = ctx.env["account.move"].create(vals)
                 created += 1
-                # Post the move
-                try:
-                    move.action_post()
-                except RETRYABLE_DB_ERRORS:
-                    raise
-                except Exception as e:
-                    _logger.warning(
-                        f"Could not post journal entry {vals.get('ref')}: {e}"
-                    )
-            except Exception as e:
-                errors += 1
-                # Log details for debugging
-                total_debit = sum(
-                    l[2].get("debit", 0) for l in vals.get("line_ids", [])
-                )
-                total_credit = sum(
-                    l[2].get("credit", 0) for l in vals.get("line_ids", [])
-                )
-                _logger.error(
-                    f"Failed to create journal entry {vals.get('ref')}: {e}. "
-                    f"Debit={total_debit}, Credit={total_credit}, Diff={total_debit - total_credit}"
-                )
+                move.action_post()
+                posted += 1
 
-        _logger.info(f"Created {created} journal entries")
+        _logger.info(f"Created {created} journal entries ({posted} posted)")
 
         # Update last sync timestamp
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))

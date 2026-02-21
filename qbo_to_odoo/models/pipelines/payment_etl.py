@@ -255,58 +255,54 @@ class QboPaymentImporter(models.AbstractModel):
     ) -> Optional[tuple[int, int]]:
         """Extract account and journal IDs from QBO payment data.
 
-        QBO payments reference accounts via different fields:
-        - Customer payments: 'DepositToAccountRef' field
-        - Bill payments: 'BankAccountRef' field or 'APAccountRef'
-
-        The referenced account is used as-is without type validation,
-        matching whatever account QBO has linked to the payment.
+        QBO Payment entity uses 'DepositToAccountRef' at the top level to
+        indicate the deposit account. Per QBO API docs, when this field is
+        absent the payment is applied to the Undeposited Funds account.
 
         Args:
-            payment: QBO payment or bill payment data
+            payment: QBO payment data
             account_map: Mapping of QBO account IDs to Odoo account IDs
             ctx: ETL context for database access
 
         Returns:
             Tuple of (account_id, journal_id) or None if not found
         """
-        # Try different account reference fields based on payment type
-        account_ref = None
+        account_ref = payment.get("DepositToAccountRef", {})
 
-        # Check for DepositToAccountRef (customer payments)
-        if "DepositToAccountRef" in payment:
-            account_ref = payment.get("DepositToAccountRef", {})
-
-        # Check for BankAccountRef (bill payments)
-        elif "BankAccountRef" in payment:
-            account_ref = payment.get("BankAccountRef", {})
-
-        # Check for APAccountRef (some bill payments)
-        elif "APAccountRef" in payment:
-            account_ref = payment.get("APAccountRef", {})
-
-        if not account_ref:
-            _logger.debug(
-                f"No account reference found in payment {payment.get('Id')}. "
-                f"Available fields: {list(payment.keys())}"
+        if not account_ref or not account_ref.get("value"):
+            # Per QBO API: when DepositToAccountRef is absent, payment goes
+            # to "Undeposited Funds". Look up that account in Odoo.
+            undeposited = ctx.env["account.account"].search(
+                [
+                    ("name", "ilike", "Undeposited Funds"),
+                    ("company_ids", "in", [ctx.env.company.id]),
+                ],
+                limit=1,
             )
-            return None
+            if undeposited:
+                _logger.debug(
+                    f"Payment {payment.get('Id')} has no account ref, "
+                    f"using Undeposited Funds ({undeposited.code})"
+                )
+                account_id = undeposited.id
+            else:
+                _logger.warning(
+                    f"No account reference found in payment {payment.get('Id')} "
+                    f"and no 'Undeposited Funds' account in Odoo. "
+                    f"Available fields: {list(payment.keys())}"
+                )
+                return None
+        else:
+            qbo_account_id = str(account_ref.get("value", 0))
 
-        qbo_account_id = str(account_ref.get("value", 0))
-        if not qbo_account_id or qbo_account_id == "0":
-            _logger.debug(
-                f"Invalid account reference value in payment {payment.get('Id')}: {account_ref}"
-            )
-            return None
-
-        # Look up the Odoo account ID
-        account_id = account_map.get(qbo_account_id)
-        if not account_id:
-            _logger.warning(
-                f"Account with QBO ID {qbo_account_id} not found in Odoo "
-                f"for payment {payment.get('Id')}"
-            )
-            return None
+            # Look up the Odoo account ID
+            account_id = account_map.get(qbo_account_id)
+            if not account_id:
+                _logger.warning(
+                    f"Account with QBO ID {qbo_account_id} not found in Odoo "
+                    f"for payment {payment.get('Id')}"
+                )
+                return None
 
         # Find a general journal for the payment entry
         company = ctx.env.company
