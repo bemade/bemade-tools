@@ -1,6 +1,6 @@
 {
     "name": "ETL Framework",
-    "version": "2.2.0",
+    "version": "3.0.0",
     "category": "Technical",
     "summary": "Declarative, self-optimizing ETL framework for Odoo",
     "description": """
@@ -13,7 +13,7 @@ for migrating data into Odoo from external sources.
 Key Features:
 
 * Declarative pipeline definition using decorators
-* Automatic multiprocessing based on data volume
+* Automatic parallelism via HTTP worker dispatch
 * Dependency resolution between models
 * Memory-efficient execution
 * Built-in retry logic for serialization failures

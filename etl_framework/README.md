@@ -1,13 +1,13 @@
 # ETL Framework for Odoo
 
-**Version:** 2.3  
-**Last Updated:** February 6, 2026
+**Version:** 3.0
+**Last Updated:** February 23, 2026
 
 ---
 
 ## Overview
 
-A declarative, self-optimizing ETL framework for migrating data from external sources into Odoo. Provides clean separation between Extract, Transform, and Load phases with automatic multiprocessing optimization.
+A declarative, self-optimizing ETL framework for migrating data from external sources into Odoo. Provides clean separation between Extract, Transform, and Load phases with automatic parallel execution via HTTP worker dispatch.
 
 ---
 
@@ -38,7 +38,7 @@ from odoo.addons.etl_framework import ETL, ETLContext, PipelineOrchestrator
 - Minimal boilerplate code
 
 ### 2. **Self-Optimizing Execution**
-- Framework automatically decides single-process vs. multiprocessing based on data volume
+- Framework automatically decides single-process vs. parallel HTTP dispatch based on data volume
 - No manual optimization decisions required
 - Configurable thresholds per model
 
@@ -73,7 +73,7 @@ graph TD
     B["**Pipeline Orchestrator**<br/>• Resolves model dependencies (topological sort)<br/>• Executes pipelines in correct order<br/>• Manages database connections and commits<br/>• Creates ETLReporter for the run"]
     C["**ETL Executor**<br/>1. Execute Extract methods<br/>2. Count extracted records<br/>3. Install log handler (auto-capture WARNING+)<br/>4. Decide: Single-process or Multiprocessing?<br/>5. Execute Transform + Load accordingly<br/>6. Persist pipeline report"]
     D["**Single Process**<br/>• Sequential<br/>• Simple<br/>• Fast for small"]
-    E["**Multiprocessing**<br/>• Chunk data<br/>• Fork workers<br/>• Fast for large"]
+    E["**HTTP Dispatch**<br/>• Chunk data<br/>• POST to workers<br/>• Fast for large"]
     F["**ETL Reporter**<br/>• Tracks per-pipeline results<br/>• Auto-captures log messages<br/>• Persists to etl.import.report"]
 
     A --> B --> C
@@ -123,7 +123,7 @@ class MultiprocessingConfig:
     enabled: bool = True              # Allow multiprocessing
     threshold: int = 1000             # Min records to trigger MP
     chunk_size: int = 500             # Records per chunk
-    max_workers: Optional[int] = None # None = cpu_count - 1
+    max_workers: Optional[int] = None # None = odoo workers - 1
     
     def should_use_multiprocessing(self, record_count: int) -> bool:
         return self.enabled and record_count >= self.threshold
@@ -214,7 +214,7 @@ class AccountPaymentTermImporter(models.AbstractModel):
         ctx.env["account.payment.term"].create(term_vals)
 ```
 
-### Complex Model (With Multiprocessing)
+### Complex Model (With Parallel Dispatch)
 
 ```python
 @ETL.pipeline(
@@ -229,59 +229,57 @@ class AccountPaymentTermImporter(models.AbstractModel):
 class SaleOrderHeaderImporter(models.AbstractModel):
     _name = 'sale.order.header.importer'
     _description = 'SAP Sale Order Header Importer (ORDR)'
-    _inherit = 'sale.purchase.order.etl.mixin'
-    
-    _lookup_cache = {}
-    
+
     @ETL.extract('ordr')
-    def extract_headers(self, ctx: ETLContext) -> List[Dict]:
+    def extract_headers(self, ctx: ETLContext) -> ChunkableData:
         # Get existing orders (idempotence)
         ctx.env.cr.execute(
             "SELECT DISTINCT sap_docnum FROM sale_order WHERE sap_docnum IS NOT NULL"
         )
         existing_docnums = tuple(row[0] for row in ctx.env.cr.fetchall())
-        
+
         # Extract new order headers
         sql = "SELECT * FROM ordr"
         if existing_docnums:
             sql += " WHERE docnum NOT IN %s"
-            ctx.cr.execute(SQL(sql, existing_docnums))
+            ctx.cr.execute(sql, (existing_docnums,))
         else:
             ctx.cr.execute(sql)
-        
         headers = ctx.cr.dictfetchall()
-        
+
         # Pre-compute lookups for transform phase
-        partners = ctx.env["res.partner"].search([...])
-        partners_map = {partner.sap_card_code: partner.id for partner in partners}
-        
-        # Store in class-level cache (only primitive types!)
-        SaleOrderHeaderImporter._lookup_cache = {
-            "partners_map": partners_map,
-            # ... other lookups
-        }
-        
-        return headers
-    
+        ctx.env.cr.execute(
+            "SELECT sap_card_code, id FROM res_partner WHERE sap_card_code IS NOT NULL"
+        )
+        partners_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+
+        # ChunkableData: records are chunked across workers,
+        # context (lookup maps) is passed to every chunk unchanged.
+        return ChunkableData(
+            records=headers,
+            context={"partners_map": partners_map},
+        )
+
     @ETL.transform()
     def transform_headers(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
-        headers = extracted['extract_headers']
-        cache = SaleOrderHeaderImporter._lookup_cache
-        
+        data = extracted.get('extract_headers')
+        headers = data.records if data else []
+        partners_map = data.context.get("partners_map", {}) if data else {}
+
         order_vals = []
         for header in headers:
-            partner_id = self.get_partner_id(header, cache)
-            
+            partner_id = partners_map.get(header["cardcode"])
+            if not partner_id:
+                continue
             vals = {
                 "sap_docnum": header["docnum"],
                 "partner_id": partner_id,
-                "date_order": fix_tz(header["docdate"]),
-                # ... other fields
+                "date_order": header["docdate"],
             }
             order_vals.append(vals)
-        
+
         return order_vals
-    
+
     @ETL.load()
     def load_headers(self, ctx: ETLContext, transformed: Dict) -> None:
         order_vals = transformed['transform_headers']
@@ -294,9 +292,9 @@ class SaleOrderHeaderImporter(models.AbstractModel):
 
 ## Best Practices
 
-### Multiprocessing
-1. **Cache Primitive Types Only**: Store only IDs (integers/strings) in class-level caches, never Odoo recordsets
-2. **Pre-compute in Extract**: Build all lookup dictionaries in the extract phase before multiprocessing begins
+### Parallel Execution
+1. **Pre-compute in Extract**: Build all lookup dictionaries in the extract phase before parallel dispatch begins
+2. **Primitive Types Only**: Lookup maps should contain only plain Python types (dicts, lists, ints, strings) — never Odoo recordsets, which cannot be serialized
 3. **Conservative Settings**: Start with lower worker counts (4-8) and larger chunk sizes (100-500)
 4. **Error Propagation**: Remove try/except blocks in worker processes to ensure exceptions bubble up
 
@@ -348,10 +346,6 @@ This allows:
 - **Cause**: Trying to access recordset attributes in transform phase
 - **Solution**: Pre-compute all lookups in extract phase, store only IDs in cache
 
-**Issue**: Multiprocessing warnings about fork in multi-threaded process
-- **Cause**: Debugpy and other tools warn about forking
-- **Solution**: Framework automatically suppresses these warnings
-
 **Issue**: Records being skipped
 - **Cause**: Missing foreign key references (e.g., partner not found)
 - **Solution**: Check logs for warnings, ensure dependencies are imported first
@@ -363,10 +357,6 @@ This allows:
 **Issue**: `SerializationFailure: could not serialize access due to concurrent update`
 - **Cause**: Multiple workers updating the same records (e.g., `res_partner.write_date`)
 - **Solution**: Framework automatically retries with exponential backoff (up to 5 attempts). If persistent, reduce `max_workers` or increase `chunk_size`
-
-**Issue**: Noisy "bad query" ERROR logs during multiprocessing
-- **Cause**: PostgreSQL serialization failures logged by `odoo.sql_db`
-- **Solution**: Framework v2.1+ automatically mutes these in worker processes. Errors still propagate for retry handling.
 
 ---
 
@@ -430,12 +420,15 @@ See inline documentation in `framework.py` and `reporter.py` for complete API de
 
 ## Changelog
 
-### v2.3 (February 2026)
+### v3.0 (February 2026)
+- **HTTP worker dispatch**: Replaced fork-based multiprocessing with HTTP POST dispatch to Odoo workers via `/etl/process_chunk` (bearer-authenticated). Eliminates pickle-boundary issues with Odoo environments and database cursors.
+- **Pickle serialization**: Chunk data is serialized with `pickle` + `base64` for the HTTP transport, natively preserving all Python types (int dict keys, tuples, sets, dates, dataclasses)
+- **ChunkableData**: New `ChunkableData` dataclass for extract methods that return both chunkable records and shared context (lookup maps). Records are split across workers; context is passed to each chunk unchanged.
+- **Temporary API keys**: Orchestrator auto-creates and cleans up a short-lived API key for each dispatch run
 - **Import reporting**: Persistent ETL run reports with per-pipeline success/warning/failure tracking
 - **Auto-capture of log messages**: `WARNING` and `ERROR` log messages during pipeline execution are automatically recorded as report details
 - **Explicit reporting API**: Pipelines can log successes, warnings, and failures via `ctx.report` without raising exceptions
 - **Browsable report views**: Tree and form views under **ETL > Import Reports** with state indicators and drill-down to details
-- **Worker error handling**: Worker processes now rollback cleanly on error, preventing `InFailedSqlTransaction` from masking the original exception
 
 ### v2.2 (January 2026)
 - **Generic source configuration**: Replaced SAP-specific `sap_db_id` with generic `source_config` dictionary
