@@ -20,7 +20,6 @@ import multiprocessing
 import os
 import time
 import warnings
-from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
@@ -30,7 +29,7 @@ import psycopg2.extensions
 from contextlib import contextmanager
 from enum import Enum
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 # DB errors that must propagate for chunk-level retry.
 # Everything else inside a savepoint is safe to skip.
@@ -39,6 +38,7 @@ RETRYABLE_DB_ERRORS = (
     psycopg2.errors.DeadlockDetected,
     psycopg2.extensions.TransactionRollbackError,
     psycopg2.OperationalError,
+    psycopg2.InternalError,
 )
 
 
@@ -109,7 +109,7 @@ def mute_retryable_errors():
     try:
         yield
     finally:
-        sql_logger.removeFilter(error_filter)
+       sql_logger.removeFilter(error_filter)
 
 
 _logger = logging.getLogger(__name__)
@@ -236,7 +236,7 @@ class MultiprocessingConfig:
         """Get the number of worker processes to use.
 
         Returns:
-            Number of workers (defaults to cpu_count - 1).
+            Number of workers (defaults to cpu_count - 2).
         """
         if self.max_workers is not None:
             return self.max_workers
@@ -816,6 +816,9 @@ class ETLExecutor:
             psycopg2.errors.InFailedSqlTransaction,
             psycopg2.errors.ActiveSqlTransaction,
             psycopg2.extensions.TransactionRollbackError,
+            psycopg2.OperationalError,
+            psycopg2.InternalError,
+            psycopg2.DatabaseError,
         )
         for chained_exc in self._iter_exception_chain(exc):
             if isinstance(chained_exc, retryable):

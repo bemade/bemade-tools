@@ -166,8 +166,14 @@ class QboDepositImporter(models.AbstractModel):
         total_credit_company = 0.0
 
         for line in deposit.get("Line", []):
-            detail_type = line.get("DetailType", "")
-            if detail_type != "DepositLineDetail":
+            # QBO deposit lines may have DetailType="DepositLineDetail" OR
+            # just a "DepositLineDetail" key with no DetailType (payment
+            # sweep lines linked to a Payment transaction).
+            if "DepositLineDetail" not in line:
+                _logger.debug(
+                    f"Deposit {qbo_id} line has no DepositLineDetail, "
+                    f"keys={list(line.keys())}"
+                )
                 continue
 
             line_vals = self._transform_deposit_line(
@@ -184,11 +190,20 @@ class QboDepositImporter(models.AbstractModel):
             if line_vals:
                 amount_foreign = line_vals.pop("_amount_foreign", 0)
                 total_credit_foreign += amount_foreign
-                total_credit_company += line_vals["credit"]
+                total_credit_company += line_vals["credit"] - line_vals["debit"]
                 line_ids.append((0, 0, line_vals))
 
         if not line_ids:
-            _logger.warning(f"Deposit {qbo_id} has no valid lines, skipping")
+            detail_types = [
+                l.get("DetailType", "MISSING") for l in deposit.get("Line", [])
+            ]
+            _logger.warning(
+                f"Deposit {qbo_id} has no valid lines, skipping. "
+                f"Line count={len(deposit.get('Line', []))}, "
+                f"DetailTypes={detail_types}"
+            )
+            if not detail_types:
+                _logger.warning(f"Deposit {qbo_id} raw keys: {list(deposit.keys())}")
             return None
 
         # Debit line for bank account (DepositToAccountRef)
@@ -241,37 +256,63 @@ class QboDepositImporter(models.AbstractModel):
             return None
 
         amount_foreign = float(line.get("Amount", 0) or 0)
-        if amount_foreign <= 0:
+        if amount_foreign == 0:
             return None
 
-        # Get credit account from line
+        # Get credit account from line.  Payment sweep lines (linked to a
+        # QBO Payment) typically have no AccountRef — they clear Undeposited
+        # Funds.
         account_ref = detail.get("AccountRef", {})
         qbo_account_id = account_ref.get("value")
-        account_id = account_map.get(str(qbo_account_id))
+        account_id = account_map.get(str(qbo_account_id)) if qbo_account_id else None
         if not account_id:
-            _logger.warning(
-                f"Account not found for QBO ID {qbo_account_id} "
-                f"in deposit {deposit_qbo_id}"
+            # Fall back to Undeposited Funds (payment sweep lines)
+            uf_account = company.env["account.account"].search(
+                [
+                    ("name", "ilike", "Undeposited Funds"),
+                    ("company_ids", "in", [company.id]),
+                ],
+                limit=1,
             )
-            return None
+            if not uf_account:
+                _logger.warning(
+                    f"No account and no Undeposited Funds fallback "
+                    f"for deposit {deposit_qbo_id}"
+                )
+                return None
+            account_id = uf_account.id
 
         # Convert to company currency
+        abs_foreign = abs(amount_foreign)
         if is_foreign_currency and exchange_rate:
-            amount_company = round(amount_foreign * exchange_rate, 2)
+            abs_company = round(abs_foreign * exchange_rate, 2)
         else:
-            amount_company = amount_foreign
+            abs_company = abs_foreign
 
-        line_vals = {
-            "account_id": account_id,
-            "credit": amount_company,
-            "debit": 0,
-            "name": line.get("Description") or detail.get("CheckNum") or "/",
-            "_amount_foreign": amount_foreign,
-        }
+        # Positive amounts are credits (funds deposited), negative amounts
+        # are debits (e.g. bank service charges deducted from deposit).
+        if amount_foreign > 0:
+            line_vals = {
+                "account_id": account_id,
+                "credit": abs_company,
+                "debit": 0,
+                "name": line.get("Description") or detail.get("CheckNum") or "/",
+                "_amount_foreign": amount_foreign,
+            }
+        else:
+            line_vals = {
+                "account_id": account_id,
+                "debit": abs_company,
+                "credit": 0,
+                "name": line.get("Description") or detail.get("CheckNum") or "/",
+                "_amount_foreign": amount_foreign,
+            }
 
         if is_foreign_currency:
             line_vals["currency_id"] = currency.id
-            line_vals["amount_currency"] = -amount_foreign  # Credit = negative
+            # amount_currency sign follows debit/credit: negative for credit,
+            # positive for debit.
+            line_vals["amount_currency"] = -amount_foreign
 
         # Resolve partner from Entity reference
         entity = detail.get("Entity", {})

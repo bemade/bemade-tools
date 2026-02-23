@@ -26,6 +26,7 @@ _logger = logging.getLogger(__name__)
         "qbo.item.importer",
         "qbo.tax.importer",
         "qbo.estimate.importer",
+        "qbo.partner.account.linker",
     ],
 )
 class QboInvoiceImporter(models.AbstractModel):
@@ -84,6 +85,20 @@ class QboInvoiceImporter(models.AbstractModel):
             "SELECT qbo_tax_rate_id, id FROM account_tax WHERE qbo_tax_rate_id IS NOT NULL AND type_tax_use = 'sale'"
         )
         tax_rate_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+
+        ctx.env.cr.execute(
+            "SELECT qbo_id, id FROM account_account WHERE qbo_id IS NOT NULL"
+        )
+        account_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+
+        products_with_income = ctx.env["product.product"].search(
+            [("property_account_income_id", "!=", False)]
+        )
+        product_income_map = {
+            p.id: p.property_account_income_id.id
+            for p in products_with_income
+            if p.property_account_income_id
+        }
 
         # Build sale order lookup for linking invoices to estimates
         ctx.env.cr.execute(
@@ -152,7 +167,7 @@ class QboInvoiceImporter(models.AbstractModel):
             line_vals = []
             for line in inv.get("Line", []):
                 line_data = self._transform_invoice_line(
-                    line, product_map, tax_map, tax_rate_map, inv, ctx
+                    line, product_map, product_income_map, tax_map, tax_rate_map, inv, ctx
                 )
                 if line_data:
                     line_vals.append((0, 0, line_data))
@@ -210,6 +225,7 @@ class QboInvoiceImporter(models.AbstractModel):
         self,
         line: Dict,
         product_map: Dict,
+        product_income_map: Dict,
         tax_map: Dict,
         tax_rate_map: Dict,
         invoice: Dict,
@@ -274,6 +290,9 @@ class QboInvoiceImporter(models.AbstractModel):
 
         if product_id:
             line_vals["product_id"] = product_id
+            income_account_id = product_income_map.get(product_id)
+            if income_account_id:
+                line_vals["account_id"] = income_account_id
 
         if tax_ids:
             line_vals["tax_ids"] = [(6, 0, tax_ids)]
@@ -289,10 +308,17 @@ class QboInvoiceImporter(models.AbstractModel):
             _logger.info("No new invoices to create")
             return
 
-        moves = ctx.env["account.move"].create(move_vals)
-        _logger.info(f"Created {len(moves)} invoices")
-        moves.action_post()
-        _logger.info(f"Posted {len(moves)} invoices")
+        created = 0
+        posted = 0
+
+        for vals in move_vals:
+            with ctx.skippable(f"invoice QBO#{vals.get('qbo_invoice_id', '?')}"):
+                move = ctx.env["account.move"].create(vals)
+                created += 1
+                move.action_post()
+                posted += 1
+
+        _logger.info(f"Created {created} invoices ({posted} posted)")
 
         # Update last sync timestamp
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))

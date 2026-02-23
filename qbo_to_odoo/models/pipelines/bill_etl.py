@@ -26,6 +26,7 @@ _logger = logging.getLogger(__name__)
         "qbo.item.importer",
         "qbo.tax.importer",
         "qbo.purchase.order.importer",
+        "qbo.partner.account.linker",
     ],
 )
 class QboBillImporter(models.AbstractModel):
@@ -75,6 +76,15 @@ class QboBillImporter(models.AbstractModel):
             "SELECT qbo_id, id FROM account_account WHERE qbo_id IS NOT NULL"
         )
         account_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+
+        products_with_expense = ctx.env["product.product"].search(
+            [("property_account_expense_id", "!=", False)]
+        )
+        product_expense_map = {
+            p.id: p.property_account_expense_id.id
+            for p in products_with_expense
+            if p.property_account_expense_id
+        }
 
         ctx.env.cr.execute(
             "SELECT qbo_tax_id, id FROM account_tax WHERE qbo_tax_id IS NOT NULL AND type_tax_use = 'purchase'"
@@ -153,7 +163,7 @@ class QboBillImporter(models.AbstractModel):
             line_vals = []
             for line in bill.get("Line", []):
                 line_data = self._transform_bill_line(
-                    line, product_map, account_map, tax_map, tax_rate_map, bill, ctx
+                    line, product_map, product_expense_map, account_map, tax_map, tax_rate_map, bill, ctx
                 )
                 if line_data:
                     line_vals.append((0, 0, line_data))
@@ -213,6 +223,7 @@ class QboBillImporter(models.AbstractModel):
         self,
         line: Dict,
         product_map: Dict,
+        product_expense_map: Dict,
         account_map: Dict,
         tax_map: Dict,
         tax_rate_map: Dict,
@@ -266,6 +277,9 @@ class QboBillImporter(models.AbstractModel):
 
             if product_id:
                 line_vals["product_id"] = product_id
+                expense_account_id = product_expense_map.get(product_id)
+                if expense_account_id:
+                    line_vals["account_id"] = expense_account_id
             if tax_ids:
                 line_vals["tax_ids"] = [(6, 0, tax_ids)]
 

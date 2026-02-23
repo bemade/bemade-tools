@@ -4,6 +4,7 @@ from . import account_etl
 from . import bank_journal_etl
 from . import category_etl
 from . import partner_etl
+from . import partner_account_etl
 from . import payment_term_etl
 from . import product_etl
 from . import tax_etl
