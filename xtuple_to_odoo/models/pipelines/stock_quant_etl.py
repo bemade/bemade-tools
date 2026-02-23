@@ -31,6 +31,7 @@ SELECT_ITEMSITE_STOCK = """
     importer_name="xtuple.stock.quant.importer",
     depends_on=[
         "xtuple.product.importer",
+        "xtuple.product.cost.importer",
     ],
 )
 class XtupleStockQuantImporter(models.AbstractModel):
