@@ -16,29 +16,20 @@ See README.md for usage examples and source configuration details.
 """
 
 import logging
-import multiprocessing
-import os
-import time
-import warnings
-from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, field
-
-import psycopg2
-import psycopg2.errors
-import psycopg2.extensions
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from enum import Enum
-
 from typing import Any, Callable, Dict, List, Optional
 
-# DB errors that must propagate for chunk-level retry.
-# Everything else inside a savepoint is safe to skip.
-RETRYABLE_DB_ERRORS = (
+import psycopg2.errors
+import psycopg2.extensions
+
+# DB errors that must propagate out of a per-record savepoint so the
+# whole chunk/request fails and can be retried by the dispatcher.
+_RETRYABLE_DB_ERRORS = (
     psycopg2.errors.SerializationFailure,
     psycopg2.errors.DeadlockDetected,
     psycopg2.extensions.TransactionRollbackError,
-    psycopg2.OperationalError,
-    psycopg2.InternalError,
 )
 
 
@@ -76,40 +67,7 @@ class ChunkableData:
         return self.context.get(key, default)
 
 
-from odoo import api
 from .reporter import ETLReporter, PipelineReport, ReportLogHandler
-
-
-@contextmanager
-def mute_retryable_errors():
-    """Context manager that only mutes logging for retryable DB errors.
-
-    Non-retryable errors (constraint violations, data errors, etc.) will
-    still be logged normally so we can see the actual root cause.
-    """
-    import logging
-
-    class RetryableErrorFilter(logging.Filter):
-        """Filter that suppresses only retryable error messages."""
-
-        def filter(self, record):
-            # Check if this is a retryable error message
-            msg = record.getMessage().lower()
-            retryable_keywords = [
-                "serialization",
-                "deadlock",
-                "could not serialize",
-                "concurrent update",
-            ]
-            return not any(kw in msg for kw in retryable_keywords)
-
-    sql_logger = logging.getLogger("odoo.sql_db")
-    error_filter = RetryableErrorFilter()
-    sql_logger.addFilter(error_filter)
-    try:
-        yield
-    finally:
-       sql_logger.removeFilter(error_filter)
 
 
 _logger = logging.getLogger(__name__)
@@ -198,7 +156,7 @@ class ETLContext:
         try:
             with self.env.cr.savepoint():
                 yield
-        except RETRYABLE_DB_ERRORS:
+        except _RETRYABLE_DB_ERRORS:
             raise
         except Exception as e:
             _logger.warning("Skipping %s: %s", source_ref, e)
@@ -233,15 +191,19 @@ class MultiprocessingConfig:
         return self.enabled and record_count >= self.threshold
 
     def get_workers(self) -> int:
-        """Get the number of worker processes to use.
+        """Get the number of concurrent HTTP workers to dispatch to.
 
         Returns:
-            Number of workers (defaults to cpu_count - 2).
+            Number of workers. Defaults to ``odoo.tools.config['workers'] - 1``
+            (reserve one worker for the orchestrator), falling back to 3.
         """
         if self.max_workers is not None:
             return self.max_workers
-        cpu_count = os.cpu_count()
-        return max(1, cpu_count - 2 if cpu_count else 0)
+        from odoo.tools import config
+        odoo_workers = int(config.get("workers", 0) or 0)
+        if odoo_workers > 1:
+            return odoo_workers - 1
+        return 3
 
 
 @dataclass
@@ -713,132 +675,110 @@ class ETLExecutor:
             bound(self.ctx, transformed_data)
 
     def _execute_parallel(self, extracted_data: Dict[str, Any]) -> None:
-        """Execute transform and load using multiprocessing.
+        """Execute transform and load by dispatching chunks to HTTP workers.
+
+        Chunks are sent as JSON POST requests to ``/etl/process_chunk`` on
+        sibling Odoo workers.  Each worker runs transform+load in its own
+        clean process with its own DB connection — no fork, no pickle.
+
+        Retry logic for transient errors (serialization failures) lives in
+        the :class:`~.dispatch.ChunkDispatcher`; it detects them from the
+        structured error response ``error_type`` field.
 
         Args:
             extracted_data: Dictionary of extraction results.
         """
-        # Create chunks
+        from .dispatch import ChunkDispatcher
+
         chunks = self._create_chunks(extracted_data)
 
         mp_config = self.pipeline.multiprocessing
         workers = min(mp_config.get_workers(), len(chunks))
 
         _logger.info(
-            f"[{self.pipeline.importer_model_name}] Processing {len(chunks)} chunks with {workers} workers."
+            "[%s] Processing %d chunks with %d HTTP workers.",
+            self.pipeline.importer_model_name,
+            len(chunks),
+            workers,
         )
 
-        start_method = multiprocessing.get_start_method()
+        # Derive base URL from Odoo config
+        from odoo.tools import config
+        http_interface = config.get("http_interface", "localhost") or "localhost"
+        http_port = config.get("http_port", 8069)
+        base_url = f"http://{http_interface}:{http_port}"
 
-        # Suppress fork warnings from debugpy and other tools
-        # These warnings occur when forking in a multi-threaded process
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=DeprecationWarning)
-            warnings.filterwarnings("ignore", message=".*multi-threaded.*fork.*")
-            multiprocessing.set_start_method("fork", force=True)
+        # Create a temporary API key for this dispatch run, then clean it up.
+        from datetime import date, timedelta
+        env = self.ctx.env
+        apikeys = env["res.users.apikeys"].sudo()
+        tomorrow = date.today() + timedelta(days=1)
+        api_key = apikeys._generate(
+            scope=None,
+            name=f"ETL dispatch ({self.pipeline.importer_model_name})",
+            expiration_date=tomorrow,
+        )
+        env.cr.commit()
 
+        dispatcher = ChunkDispatcher(
+            base_url=base_url,
+            api_key=api_key,
+        )
+
+        try:
+            results = dispatcher.dispatch_chunks(
+                chunks=chunks,
+                importer_name=self.importer._name,
+                source_config=self.ctx.source_config,
+                max_workers=workers,
+            )
+        finally:
+            dispatcher.close()
+            # Delete the temporary API key
             try:
-                with ProcessPoolExecutor(max_workers=workers) as executor:
-                    futures = [
-                        executor.submit(
-                            self._process_chunk_static,
-                            self.ctx.env.cr.dbname,
-                            self.ctx.env.uid,
-                            dict(self.ctx.env.context),
-                            self.importer._name,
-                            chunk,
-                            self.pipeline.target_model,
-                        )
-                        for chunk in chunks
-                    ]
-
-                    for i, (future, chunk) in enumerate(zip(futures, chunks), 1):
-                        # Retry on serialization failures (concurrent updates in multiprocessing)
-                        max_retries = 5
-                        current_future = future
-
-                        for attempt in range(max_retries):
-                            try:
-                                current_future.result()
-                                _logger.info(
-                                    f"[{self.pipeline.importer_model_name}] Completed chunk {i}/{len(chunks)}"
-                                )
-                                break
-                            except Exception as e:
-                                # Locate a retryable database error anywhere in the exception chain
-                                retryable_exc = self._find_retryable_db_error(e)
-
-                                if not retryable_exc:
-                                    _logger.error(
-                                        "Chunk %s/%s failed with non-retryable error",
-                                        i,
-                                        len(chunks),
-                                        exc_info=True,
-                                    )
-                                    raise
-                                if attempt < max_retries - 1:
-                                    wait_time = 2**attempt  # Exponential backoff
-                                    _logger.warning(
-                                        f"Chunk {i}/{len(chunks)} hit {type(e).__name__}, "
-                                        f"retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})"
-                                    )
-                                    time.sleep(wait_time)
-                                    # Resubmit the chunk
-                                    current_future = executor.submit(
-                                        self._process_chunk_static,
-                                        self.ctx.env.cr.dbname,
-                                        self.ctx.env.uid,
-                                        dict(self.ctx.env.context),
-                                        self.importer._name,
-                                        chunk,
-                                        self.pipeline.target_model,
-                                    )
-                                else:
-                                    # Max retries exceeded
-                                    raise
+                apikeys.sudo().search(
+                    [("name", "=", f"ETL dispatch ({self.pipeline.importer_model_name})")]
+                ).unlink()
+                env.cr.commit()
             except Exception:
-                _logger.error("Multiprocessing execution failed", exc_info=True)
-                raise
-            finally:
-                multiprocessing.set_start_method(start_method, force=True)
+                _logger.warning("Failed to clean up temporary ETL API key", exc_info=True)
 
-    @staticmethod
-    def _iter_exception_chain(exc: BaseException):
-        """Yield an exception and its chained causes/contexts without looping."""
+        # Aggregate results into the reporter
+        reporter = self.ctx._reporter
+        errors = []
+        for i, result in enumerate(results):
+            if result.status == "ok":
+                if reporter and reporter.current:
+                    reporter.current.success(result.success_count)
+                    for w in result.warnings:
+                        reporter.current.warning(
+                            message=w.get("message", ""),
+                            source_ref=w.get("source_ref"),
+                        )
+                    for f in result.failures:
+                        reporter.current.failure(
+                            message=f.get("message", ""),
+                            source_ref=f.get("source_ref"),
+                        )
+            else:
+                msg = (
+                    f"Chunk {i + 1}/{len(results)} failed: "
+                    f"{result.error_type}: {result.error_message}"
+                )
+                if result.traceback:
+                    msg += f"\n{result.traceback}"
+                errors.append(msg)
+                if reporter and reporter.current:
+                    reporter.current.failure(
+                        message=f"{result.error_type}: {result.error_message}",
+                        source_ref=f"chunk_{i + 1}",
+                    )
 
-        visited = set()
-        current: Optional[BaseException] = exc
-        while current and id(current) not in visited:
-            visited.add(id(current))
-            yield current
-            current = current.__cause__ or current.__context__
-
-    def _find_retryable_db_error(self, exc: BaseException):
-        """Return the first retryable psycopg2 error in the exception chain.
-
-        Only truly transient errors are retryable: serialization failures and
-        deadlocks (concurrent update conflicts that resolve on retry).
-
-        NOT retryable: IntegrityError (constraint violations), DataError,
-        ProgrammingError, InFailedSqlTransaction (cascade symptom of a real
-        error), or the broad DatabaseError/OperationalError base classes.
-        """
-
-        retryable = (
-            psycopg2.errors.SerializationFailure,
-            psycopg2.errors.DeadlockDetected,
-            psycopg2.extensions.TransactionRollbackError,
-        )
-        for chained_exc in self._iter_exception_chain(exc):
-            if isinstance(chained_exc, retryable):
-                return chained_exc
-        return None
-
-    def _summarize_exception_chain(self, exc: BaseException) -> str:
-        """Return a short string describing the exception chain."""
-
-        parts = [type(chained).__name__ for chained in self._iter_exception_chain(exc)]
-        return " -> ".join(parts)
+        if errors:
+            raise RuntimeError(
+                f"{len(errors)} chunk(s) failed during parallel execution:\n"
+                + "\n---\n".join(errors)
+            )
 
     def _create_chunks(self, extracted_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Split extracted data into chunks for parallel processing.
@@ -919,90 +859,6 @@ class ETLExecutor:
                 return chunks
 
         return [extracted_data]
-
-    @staticmethod
-    def _process_chunk_static(
-        dbname: str,
-        uid: int,
-        context: dict,
-        importer_name: str,
-        chunk: Any,
-        target_model: str,
-    ) -> None:
-        """Process a single chunk in a subprocess (static method for pickling).
-
-        Args:
-            dbname: Odoo database name.
-            uid: User ID.
-            context: Odoo context dict.
-            importer_name: Name of the importer model.
-            chunk: Data chunk to process.
-            target_model: Target Odoo model name.
-        """
-        from odoo.modules.registry import Registry
-
-        with Registry(dbname).cursor() as cr:
-            env = api.Environment(cr, uid, context)
-            importer = env[importer_name]
-            pipeline = importer._etl_pipeline  # type: ignore[attr-defined]
-
-            # Capture the first SQL error in this worker.  Inside a single
-            # ORM create() call the first psycopg2 error aborts the
-            # transaction and every subsequent statement gets
-            # "current transaction is aborted".  By the time the Python
-            # exception escapes, only that cascade error is visible.
-            #
-            # We patch Odoo's Cursor.execute() to grab the original
-            # root-cause query and error before the cascade buries it.
-            # (psycopg2's C cursor is read-only, so we patch one level up.)
-            first_sql_error: List[str] = []
-            _orig_execute = cr.execute
-
-            def _capturing_execute(query, params=None, log_exceptions=True):
-                try:
-                    return _orig_execute(query, params, log_exceptions=log_exceptions)
-                except Exception as e:
-                    if not first_sql_error and not isinstance(
-                        e, psycopg2.errors.InFailedSqlTransaction
-                    ):
-                        sql_text = getattr(cr._obj, "query", query) or query
-                        if isinstance(sql_text, bytes):
-                            sql_text = sql_text.decode("utf-8", errors="replace")
-                        if len(sql_text) > 1000:
-                            sql_text = sql_text[:1000] + "... (truncated)"
-                        first_sql_error.append(f"{sql_text}\n{type(e).__name__}: {e}")
-                    raise
-
-            cr.execute = _capturing_execute
-
-            ctx = ETLContext(cr=None, env=env)
-
-            try:
-                # Transform
-                extracted_dict = chunk
-                transformed_data = {}
-                for method in pipeline.transform_methods:
-                    bound = getattr(importer, method.func.__name__)
-                    result = bound(ctx, extracted_dict)
-                    transformed_data[method.func.__name__] = result
-
-                # Load
-                for method in pipeline.load_methods:
-                    bound = getattr(importer, method.func.__name__)
-                    bound(ctx, transformed_data)
-
-                cr.commit()
-            except Exception:
-                root_cause = first_sql_error[0] if first_sql_error else "(not captured)"
-                _logger.error(
-                    "[%s] Worker process failed (pid=%s). "
-                    "Root-cause SQL error:\n%s",
-                    importer_name,
-                    os.getpid(),
-                    root_cause,
-                    exc_info=True,
-                )
-                raise
 
 
 # =============================================================================
