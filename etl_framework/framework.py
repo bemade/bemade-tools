@@ -768,20 +768,13 @@ class ETLExecutor:
                                 # Locate a retryable database error anywhere in the exception chain
                                 retryable_exc = self._find_retryable_db_error(e)
 
-                                _logger.warning(
-                                    "Chunk %s caught exception=%s, retryable=%s, chain=%s",
-                                    i,
-                                    type(e).__name__,
-                                    (
-                                        type(retryable_exc).__name__
-                                        if retryable_exc
-                                        else "None"
-                                    ),
-                                    self._summarize_exception_chain(e),
-                                )
-
                                 if not retryable_exc:
-                                    # Not a retryable error, crash immediately
+                                    _logger.error(
+                                        "Chunk %s/%s failed with non-retryable error",
+                                        i,
+                                        len(chunks),
+                                        exc_info=True,
+                                    )
                                     raise
                                 if attempt < max_retries - 1:
                                     wait_time = 2**attempt  # Exponential backoff
@@ -821,17 +814,20 @@ class ETLExecutor:
             current = current.__cause__ or current.__context__
 
     def _find_retryable_db_error(self, exc: BaseException):
-        """Return the first retryable psycopg2 error in the exception chain."""
+        """Return the first retryable psycopg2 error in the exception chain.
+
+        Only truly transient errors are retryable: serialization failures and
+        deadlocks (concurrent update conflicts that resolve on retry).
+
+        NOT retryable: IntegrityError (constraint violations), DataError,
+        ProgrammingError, InFailedSqlTransaction (cascade symptom of a real
+        error), or the broad DatabaseError/OperationalError base classes.
+        """
 
         retryable = (
             psycopg2.errors.SerializationFailure,
             psycopg2.errors.DeadlockDetected,
-            psycopg2.errors.InFailedSqlTransaction,
-            psycopg2.errors.ActiveSqlTransaction,
             psycopg2.extensions.TransactionRollbackError,
-            psycopg2.OperationalError,
-            psycopg2.InternalError,
-            psycopg2.DatabaseError,
         )
         for chained_exc in self._iter_exception_chain(exc):
             if isinstance(chained_exc, retryable):
@@ -944,29 +940,69 @@ class ETLExecutor:
             target_model: Target Odoo model name.
         """
         from odoo.modules.registry import Registry
-        from odoo.tools import mute_logger
 
         with Registry(dbname).cursor() as cr:
             env = api.Environment(cr, uid, context)
             importer = env[importer_name]
             pipeline = importer._etl_pipeline  # type: ignore[attr-defined]
 
+            # Capture the first SQL error in this worker.  Inside a single
+            # ORM create() call the first psycopg2 error aborts the
+            # transaction and every subsequent statement gets
+            # "current transaction is aborted".  By the time the Python
+            # exception escapes, only that cascade error is visible.
+            #
+            # We patch Odoo's Cursor.execute() to grab the original
+            # root-cause query and error before the cascade buries it.
+            # (psycopg2's C cursor is read-only, so we patch one level up.)
+            first_sql_error: List[str] = []
+            _orig_execute = cr.execute
+
+            def _capturing_execute(query, params=None, log_exceptions=True):
+                try:
+                    return _orig_execute(query, params, log_exceptions=log_exceptions)
+                except Exception as e:
+                    if not first_sql_error and not isinstance(
+                        e, psycopg2.errors.InFailedSqlTransaction
+                    ):
+                        sql_text = getattr(cr._obj, "query", query) or query
+                        if isinstance(sql_text, bytes):
+                            sql_text = sql_text.decode("utf-8", errors="replace")
+                        if len(sql_text) > 1000:
+                            sql_text = sql_text[:1000] + "... (truncated)"
+                        first_sql_error.append(f"{sql_text}\n{type(e).__name__}: {e}")
+                    raise
+
+            cr.execute = _capturing_execute
+
             ctx = ETLContext(cr=None, env=env)
 
-            # Transform
-            extracted_dict = chunk
-            transformed_data = {}
-            for method in pipeline.transform_methods:
-                bound = getattr(importer, method.func.__name__)
-                result = bound(ctx, extracted_dict)
-                transformed_data[method.func.__name__] = result
+            try:
+                # Transform
+                extracted_dict = chunk
+                transformed_data = {}
+                for method in pipeline.transform_methods:
+                    bound = getattr(importer, method.func.__name__)
+                    result = bound(ctx, extracted_dict)
+                    transformed_data[method.func.__name__] = result
 
-            # Load
-            for method in pipeline.load_methods:
-                bound = getattr(importer, method.func.__name__)
-                bound(ctx, transformed_data)
+                # Load
+                for method in pipeline.load_methods:
+                    bound = getattr(importer, method.func.__name__)
+                    bound(ctx, transformed_data)
 
-            cr.commit()
+                cr.commit()
+            except Exception:
+                root_cause = first_sql_error[0] if first_sql_error else "(not captured)"
+                _logger.error(
+                    "[%s] Worker process failed (pid=%s). "
+                    "Root-cause SQL error:\n%s",
+                    importer_name,
+                    os.getpid(),
+                    root_cause,
+                    exc_info=True,
+                )
+                raise
 
 
 # =============================================================================

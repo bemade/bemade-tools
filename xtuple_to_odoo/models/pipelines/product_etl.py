@@ -551,6 +551,104 @@ class XtupleProductSupplierInfoImporter(models.AbstractModel):
 
 
 # =============================================================================
+# Product Cost Importer Pipeline
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="product.template",
+    importer_name="xtuple.product.cost.importer",
+    sap_source="itemcost",
+    depends_on=["xtuple.product.importer"],
+)
+class XtupleProductCostImporter(models.AbstractModel):
+    """ETL Pipeline for importing standard costs from xTuple itemcost table.
+
+    Reads the rolled-up standard cost (SUM of all cost elements) per item and
+    writes it to standard_price on the matching product.template. Must run after
+    product import and before stock quant import so that inventory adjustment SVLs
+    are created with the correct per-unit value.
+    """
+
+    _name = "xtuple.product.cost.importer"
+    _description = "xTuple Product Cost Importer"
+
+    @ETL.extract("itemcost")
+    def extract_costs(self, ctx: ETLContext) -> Dict:
+        """Extract rolled-up standard costs per item from xTuple itemcost table."""
+        ctx.cr.execute(
+            """
+            SELECT itemcost_item_id, SUM(itemcost_stdcost) AS total_stdcost
+            FROM itemcost
+            GROUP BY itemcost_item_id
+            HAVING SUM(itemcost_stdcost) > 0
+            """
+        )
+        cost_rows = ctx.cr.dictfetchall()
+        cost_by_item_id = {
+            row["itemcost_item_id"]: row["total_stdcost"] for row in cost_rows
+        }
+        _logger.info(
+            f"Extracted standard costs for {len(cost_by_item_id)} items from xTuple"
+        )
+
+        ctx.env.cr.execute(
+            """
+            SELECT pp.xtuple_item_id, pt.id AS product_tmpl_id
+            FROM product_product pp
+            JOIN product_template pt ON pp.product_tmpl_id = pt.id
+            WHERE pp.xtuple_item_id IS NOT NULL
+            """
+        )
+        tmpl_by_item_id = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+
+        return {
+            "cost_by_item_id": cost_by_item_id,
+            "tmpl_by_item_id": tmpl_by_item_id,
+        }
+
+    @ETL.transform()
+    def transform_costs(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Map xTuple item costs to Odoo product template IDs."""
+        data = extracted.get("extract_costs", {})
+        cost_by_item_id = data.get("cost_by_item_id", {})
+        tmpl_by_item_id = data.get("tmpl_by_item_id", {})
+
+        cost_vals = []
+        skipped = 0
+        for item_id, cost in cost_by_item_id.items():
+            tmpl_id = tmpl_by_item_id.get(item_id)
+            if not tmpl_id:
+                skipped += 1
+                continue
+            cost_vals.append({"product_tmpl_id": tmpl_id, "standard_price": cost})
+
+        if skipped:
+            _logger.warning(
+                f"Skipped {skipped} itemcost records - no matching product in Odoo"
+            )
+        _logger.info(f"Transformed standard costs for {len(cost_vals)} products")
+        return cost_vals
+
+    @ETL.load()
+    def load_costs(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Write standard_price to product.template records."""
+        cost_vals = transformed.get("transform_costs", [])
+        if not cost_vals:
+            _logger.info("No product costs to update")
+            return
+
+        updated = 0
+        for vals in cost_vals:
+            ctx.env["product.template"].browse(vals["product_tmpl_id"]).write(
+                {"standard_price": vals["standard_price"]}
+            )
+            updated += 1
+
+        _logger.info(f"Updated standard_price for {updated} product templates")
+
+
+# =============================================================================
 # Product Linker Pipeline (for deduplication)
 # =============================================================================
 
