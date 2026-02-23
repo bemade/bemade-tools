@@ -637,17 +637,30 @@ class ETLExecutor:
     def _execute_extract(self) -> Dict[str, Any]:
         """Execute all extraction methods.
 
+        Methods are discovered by scanning the resolved Odoo model class at
+        runtime (via ``type(self.importer)``) rather than using the list built
+        at decoration time.  This means extract methods added to a child class
+        via Odoo's ``_inherit`` mechanism are included automatically, without
+        requiring the child to re-apply the ``@ETL.pipeline()`` decorator.
+
         Returns:
             Dictionary mapping method names to extracted data.
         """
         results = {}
-        for method in self.pipeline.extract_methods:
+        importer_class = type(self.importer)
+        for attr_name in dir(importer_class):
+            attr = getattr(importer_class, attr_name, None)
+            if attr is None:
+                continue
+            etl_method = getattr(attr, "_etl_method", None)
+            if etl_method is None or etl_method.phase != ETLPhase.EXTRACT:
+                continue
             _logger.info(
-                f"[{self.pipeline.importer_model_name}] Extracting from {method.source_table}"
+                f"[{self.pipeline.importer_model_name}] Extracting from {etl_method.source_table or attr_name}"
             )
-            bound = getattr(self.importer, method.func.__name__)
+            bound = getattr(self.importer, attr_name)
             result = bound(self.ctx)
-            results[method.func.__name__] = result
+            results[attr_name] = result
         return results
 
     def _get_record_count(self, extracted_data: Dict[str, Any]) -> int:
