@@ -184,16 +184,25 @@ class QboAccountImporter(models.AbstractModel):
             # Determine if reconcilable
             reconcile = odoo_type in ("asset_receivable", "liability_payable")
 
-            account_vals.append(
-                {
-                    "name": account.get("Name", ""),
-                    "code": code,
-                    "account_type": odoo_type,
-                    "reconcile": reconcile,
-                    "qbo_id": int(account.get("Id")),
-                    "company_ids": [(4, company.id)],
-                }
-            )
+            vals = {
+                "name": account.get("Name", ""),
+                "code": code,
+                "account_type": odoo_type,
+                "reconcile": reconcile,
+                "qbo_id": int(account.get("Id")),
+                "company_ids": [(4, company.id)],
+            }
+
+            # Preserve currency from QBO (e.g. multi-currency AR/AP accounts)
+            currency_ref = account.get("CurrencyRef", {}).get("value")
+            if currency_ref:
+                currency = ctx.env["res.currency"].search(
+                    [("name", "=", currency_ref)], limit=1
+                )
+                if currency:
+                    vals["currency_id"] = currency.id
+
+            account_vals.append(vals)
 
         _logger.info(f"Transformed {len(account_vals)} accounts, skipped {skipped}")
         return account_vals
