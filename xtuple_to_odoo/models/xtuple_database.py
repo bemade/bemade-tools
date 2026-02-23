@@ -255,6 +255,7 @@ class XtupleDatabase(models.Model):
             [
                 "xtuple.product.category.importer",
                 "xtuple.product.importer",
+                "xtuple.product.cost.importer",
                 "xtuple.product.supplierinfo.importer",
             ]
         )
