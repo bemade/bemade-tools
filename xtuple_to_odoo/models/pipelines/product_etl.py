@@ -40,7 +40,24 @@ PRODUCT_SELECT = """
     priceuom.uom_name as price_uom_name,
     prodcat_code,
     prodcat_descrip,
-    classcode_code
+    classcode_code,
+    COALESCE(itemsite_tracking.item_controlmethod, 'N') as item_controlmethod
+"""
+
+# Subquery to get the most restrictive lot tracking method across all warehouses.
+# Priority: S (serial) > R/L (lot) > N (none)
+ITEMSITE_TRACKING_JOIN = """
+    LEFT JOIN (
+        SELECT
+            itemsite_item_id,
+            CASE
+                WHEN bool_or(itemsite_controlmethod = 'S') THEN 'S'
+                WHEN bool_or(itemsite_controlmethod IN ('R', 'L')) THEN 'R'
+                ELSE 'N'
+            END AS item_controlmethod
+        FROM itemsite
+        GROUP BY itemsite_item_id
+    ) itemsite_tracking ON (item_id = itemsite_tracking.itemsite_item_id)
 """
 
 PRODUCT_CATEGORY_SELECT = """
@@ -224,6 +241,7 @@ class XtupleProductImporter(models.AbstractModel):
         LEFT JOIN uom priceuom ON (item_price_uom_id = priceuom.uom_id)
         LEFT JOIN prodcat ON (item_prodcat_id = prodcat_id)
         LEFT JOIN classcode ON (item_classcode_id = classcode_id)
+        {ITEMSITE_TRACKING_JOIN}
         """
 
         if existing_item_ids:
@@ -271,6 +289,7 @@ class XtupleProductImporter(models.AbstractModel):
         LEFT JOIN uom priceuom ON (item_price_uom_id = priceuom.uom_id)
         LEFT JOIN prodcat ON (item_prodcat_id = prodcat_id)
         LEFT JOIN classcode ON (item_classcode_id = classcode_id)
+        {ITEMSITE_TRACKING_JOIN}
         """
 
         if existing_item_ids:
@@ -298,7 +317,11 @@ class XtupleProductImporter(models.AbstractModel):
         item_type = product.get("item_type", "")
         product_type = "consu"
         is_storable = False
-        tracking = "none"
+        tracking = {
+            "S": "serial",
+            "R": "lot",
+            "L": "lot",
+        }.get(product.get("item_controlmethod", "N"), "none")
 
         if item_type == "P":  # Purchased
             product_type = "consu"
