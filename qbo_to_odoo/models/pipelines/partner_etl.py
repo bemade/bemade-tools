@@ -19,7 +19,7 @@ _logger = logging.getLogger(__name__)
     target_model="res.partner",
     importer_name="qbo.customer.importer",
     sap_source="Customer",
-    depends_on=[],
+    depends_on=["qbo.term.importer"],
 )
 class QboCustomerImporter(models.AbstractModel):
     """ETL Pipeline for importing QBO Customers."""
@@ -75,6 +75,13 @@ class QboCustomerImporter(models.AbstractModel):
         """Transform QBO customers into Odoo partner values."""
         customers = extracted.get("extract_customers", [])
 
+        # Build payment term lookup
+        ctx.env.cr.execute(
+            "SELECT qbo_term_id, id FROM account_payment_term "
+            "WHERE qbo_term_id IS NOT NULL"
+        )
+        term_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
+
         partner_vals = []
 
         for customer in customers:
@@ -127,6 +134,24 @@ class QboCustomerImporter(models.AbstractModel):
                 "qbo_customer_id": int(customer.get("Id")),
                 "ref": customer.get("Id"),
             }
+
+            # Payment terms
+            sales_term_ref = customer.get("SalesTermRef", {})
+            if sales_term_ref:
+                term_id = term_map.get(str(sales_term_ref.get("value")))
+                if term_id:
+                    vals["property_payment_term_id"] = term_id
+
+            # Currency
+            currency_ref = customer.get("CurrencyRef", {})
+            if currency_ref:
+                currency_code = currency_ref.get("value")
+                if currency_code:
+                    currency = ctx.env["res.currency"].search(
+                        [("name", "=", currency_code)], limit=1
+                    )
+                    if currency:
+                        vals["property_purchase_currency_id"] = currency.id
 
             partner_vals.append(vals)
 
@@ -185,7 +210,7 @@ class QboCustomerImporter(models.AbstractModel):
     target_model="res.partner",
     importer_name="qbo.vendor.importer",
     sap_source="Vendor",
-    depends_on=[],
+    depends_on=["qbo.term.importer"],
 )
 class QboVendorImporter(models.AbstractModel):
     """ETL Pipeline for importing QBO Vendors."""
@@ -241,6 +266,13 @@ class QboVendorImporter(models.AbstractModel):
         """Transform QBO vendors into Odoo partner values."""
         vendors = extracted.get("extract_vendors", [])
 
+        # Build payment term lookup
+        ctx.env.cr.execute(
+            "SELECT qbo_term_id, id FROM account_payment_term "
+            "WHERE qbo_term_id IS NOT NULL"
+        )
+        term_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
+
         partner_vals = []
 
         for vendor in vendors:
@@ -291,6 +323,24 @@ class QboVendorImporter(models.AbstractModel):
                 "qbo_vendor_id": int(vendor.get("Id")),
                 "ref": vendor.get("Id"),
             }
+
+            # Payment terms
+            term_ref = vendor.get("TermRef", {})
+            if term_ref:
+                term_id = term_map.get(str(term_ref.get("value")))
+                if term_id:
+                    vals["property_supplier_payment_term_id"] = term_id
+
+            # Currency
+            currency_ref = vendor.get("CurrencyRef", {})
+            if currency_ref:
+                currency_code = currency_ref.get("value")
+                if currency_code:
+                    currency = ctx.env["res.currency"].search(
+                        [("name", "=", currency_code)], limit=1
+                    )
+                    if currency:
+                        vals["property_purchase_currency_id"] = currency.id
 
             partner_vals.append(vals)
 
