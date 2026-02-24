@@ -636,7 +636,9 @@ class ETLExecutor:
         """
         counts = []
         for data in extracted_data.values():
-            if isinstance(data, (list, tuple)):
+            if isinstance(data, ChunkableData):
+                counts.append(len(data.records))
+            elif isinstance(data, (list, tuple)):
                 # Handle (records, chunks) tuple from extraction
                 if len(data) == 2 and isinstance(data[0], list):
                     counts.append(len(data[0]))
