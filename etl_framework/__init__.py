@@ -14,6 +14,7 @@ from .framework import (
     ChunkableData,
 )
 from .reporter import ETLReporter, PipelineReport
+from .utils import post_lock
 
 __all__ = [
     "ETL",
@@ -27,4 +28,5 @@ __all__ = [
     "PipelineOrchestrator",
     "ChunkableData",
     "PipelineReport",
+    "post_lock",
 ]
