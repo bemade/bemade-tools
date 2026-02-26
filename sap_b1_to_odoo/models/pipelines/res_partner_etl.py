@@ -155,6 +155,33 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         # Get company ID
         company_id = ctx.env.company.id
 
+        # Build account lookup: SAP acctcode → OACT formatcode → Odoo account ID
+        # SAP stores internal _SYS codes on OCRD.debpayacct; join with OACT to
+        # get the human-readable formatcode that matches Odoo's sap_acct_code.
+        accounts_dict = {}  # SAP acctcode → Odoo account.account ID
+        try:
+            ctx.cr.execute("SELECT acctcode, formatcode FROM oact")
+            sap_acct_rows = ctx.cr.fetchall()
+            sap_to_formatcode = {row[0]: row[1] for row in sap_acct_rows if row[1]}
+            if sap_to_formatcode:
+                odoo_accounts = ctx.env["account.account"].search(
+                    [("sap_acct_code", "!=", False)]
+                )
+                formatcode_to_id = {a.sap_acct_code: a.id for a in odoo_accounts}
+                for acctcode, formatcode in sap_to_formatcode.items():
+                    odoo_id = formatcode_to_id.get(formatcode)
+                    if odoo_id:
+                        accounts_dict[acctcode] = odoo_id
+                _logger.info(
+                    f"Built account lookup: {len(accounts_dict)} SAP acctcodes → Odoo accounts."
+                )
+        except Exception:
+            _logger.warning(
+                "Could not build account lookup from OACT. "
+                "Partner default accounts will not be set.",
+                exc_info=True,
+            )
+
         ResPartnerCompanyImporter._lookup_cache = {
             "countries_dict": countries_dict,
             "states_dict": states_dict,
@@ -163,6 +190,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             "currencies_dict": currencies_dict,
             "company_currency_id": company_currency_id,
             "company_id": company_id,
+            "accounts_dict": accounts_dict,
         }
         _logger.info("Lookup dictionaries ready.")
 
@@ -235,31 +263,44 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             email = fix_quotes(sap_partner["e_mail"])
             email = email_normalize(email)
 
-            partner_vals.append(
-                {
-                    "sap_card_code": sap_partner["cardcode"],
-                    "sap_atcentry": sap_partner["atcentry"],
-                    "name": name,
-                    "street": street,
-                    "street2": street2,
-                    "city": sap_partner["city"] or "",
-                    "country_id": country_id or False,
-                    "state_id": state_id or False,
-                    "zip": sap_partner["zipcode"],
-                    "sap_parent_card": sap_partner["fathercard"] or False,
-                    "sap_partner_type": sap_partner["cardtype"],
-                    "phone": sap_partner["phone1"] or sap_partner["phone2"],
-                    "email": email,
-                    "is_company": True,
-                    "company_id": company_id,
-                    "comment": sap_partner["notes"],
-                    "user_id": user_id,
-                    "property_purchase_currency_id": currency_id,
-                    "property_payment_term_id": property_payment_term_id,
-                    "property_supplier_payment_term_id": property_supplier_payment_term_id,
-                    "picking_policy": picking_policy,
-                }
-            )
+            # Resolve default payable/receivable account from SAP debpayacct
+            accounts_dict = cache.get("accounts_dict", {})
+            debpayacct = sap_partner.get("debpayacct") or ""
+            account_id = accounts_dict.get(debpayacct)
+            cardtype = sap_partner["cardtype"]
+
+            vals = {
+                "sap_card_code": sap_partner["cardcode"],
+                "sap_atcentry": sap_partner["atcentry"],
+                "name": name,
+                "street": street,
+                "street2": street2,
+                "city": sap_partner["city"] or "",
+                "country_id": country_id or False,
+                "state_id": state_id or False,
+                "zip": sap_partner["zipcode"],
+                "sap_parent_card": sap_partner["fathercard"] or False,
+                "sap_partner_type": cardtype,
+                "phone": sap_partner["phone1"] or sap_partner["phone2"],
+                "email": email,
+                "is_company": True,
+                "company_id": company_id,
+                "comment": sap_partner["notes"],
+                "user_id": user_id,
+                "property_purchase_currency_id": currency_id,
+                "property_payment_term_id": property_payment_term_id,
+                "property_supplier_payment_term_id": property_supplier_payment_term_id,
+                "picking_policy": picking_policy,
+            }
+
+            # Set the appropriate property account based on partner type
+            if account_id:
+                if cardtype in ("C", "L"):
+                    vals["property_account_receivable_id"] = account_id
+                elif cardtype == "S":
+                    vals["property_account_payable_id"] = account_id
+
+            partner_vals.append(vals)
 
         _logger.info(f"Transformed {len(partner_vals)} company records.")
         return partner_vals
