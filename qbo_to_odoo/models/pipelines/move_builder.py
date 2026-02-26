@@ -278,13 +278,15 @@ class QBOMoveBuilder:
         return jid
 
     def get_journal_id_for_account(
-        self, account_id: int, fallback_type: str = "general"
+        self, account_id: int, fallback_type: Optional[str] = "general"
     ) -> Optional[int]:
         """Return the journal whose default_account matches, or a fallback."""
         if self._account_journal_map:
             jid = self._account_journal_map.get(account_id)
             if jid:
                 return jid
+        if fallback_type is None:
+            return None
         return self._journal_ids.get(fallback_type)
 
     # ------------------------------------------------------------------
