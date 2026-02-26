@@ -76,16 +76,16 @@ class AccountMoveCommon(models.AbstractModel):
             vals["name"] = row["dscription"] or ""
             vals["product_uom_id"] = lookups["unit_uom_id"]
 
-        # Map SAP account code to Odoo account (for vendor bills)
+        # Map SAP account code to Odoo account
         # Use acct_formatcode (human-readable) instead of acctcode (_SYS codes)
         acct_formatcode = row.get("acct_formatcode")
-        if acct_formatcode and "pch" in sap_table.lower():  # Only for vendor bills
+        if acct_formatcode:
             accounts_dict = lookups.get("accounts", {})
             account_info = accounts_dict.get(acct_formatcode)
             if account_info:
                 account_id, account_type = account_info
-                # Skip receivable/payable accounts on bill lines (Odoo validation will fail)
-                # These are typically vendor credits or special transactions
+                # Skip receivable/payable accounts on move lines
+                # (Odoo validation will fail — these are for payment terms)
                 if account_type not in [
                     "asset_receivable",
                     "liability_payable",
@@ -93,11 +93,11 @@ class AccountMoveCommon(models.AbstractModel):
                     vals["account_id"] = account_id
                 else:
                     _logger.debug(
-                        f"Skipping {account_type} account {acct_formatcode} on bill line"
+                        f"Skipping {account_type} account {acct_formatcode} on {sap_table} line"
                     )
             else:
                 _logger.warning(
-                    f"Could not find account for SAP code {acct_formatcode} on bill line"
+                    f"Could not find account for SAP code {acct_formatcode} on {sap_table} line"
                 )
 
         # Map SAP tax code (vatgroup) to Odoo tax
