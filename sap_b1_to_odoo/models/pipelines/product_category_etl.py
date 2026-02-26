@@ -109,7 +109,6 @@ class ProductCategoryImporter(models.AbstractModel):
             vals = {
                 "sap_itms_grp_cod": sap_cat["itmsgrpcod"],
                 "name": fix_quotes(sap_cat["itmsgrpnam"]),
-                "property_cost_method": "fifo",
                 "property_valuation": "real_time",
             }
 
