@@ -11,6 +11,8 @@ from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext
 
+from .utils import get_api_client
+
 _logger = logging.getLogger(__name__)
 
 # QBO Account Type to Odoo account_type mapping
@@ -51,9 +53,7 @@ class QboAccountImporter(models.AbstractModel):
 
         Uses the API client from source_config instead of a database cursor.
         """
-        api_client = ctx.get_config("api_client")
-        if not api_client:
-            raise ValueError("API client not found in ETL context")
+        api_client = get_api_client(ctx)
 
         # Get existing QBO IDs to avoid re-importing
         ctx.env.cr.execute(
@@ -222,10 +222,6 @@ class QboAccountImporter(models.AbstractModel):
         # Always set account defaults (fixes company fields even on re-runs)
         self._set_account_defaults(ctx)
 
-        # Update last sync timestamp
-        connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
-        if connection:
-            connection.last_account_sync = ctx.env.cr.now()
 
     def _set_account_defaults(self, ctx: ETLContext) -> None:
         """Set proper account defaults based on imported QBO accounts.
@@ -236,7 +232,7 @@ class QboAccountImporter(models.AbstractModel):
         """
         company = ctx.env.company
         IrDefault = ctx.env["ir.default"].sudo()
-        api_client = ctx.get_config("api_client")
+        api_client = get_api_client(ctx)
 
         # Find common account types from QBO accounts
         qbo_accounts = ctx.env["account.account"].search(
@@ -301,6 +297,9 @@ class QboAccountImporter(models.AbstractModel):
                 subtype="SalesOfProductIncome",
                 fields=["income_account_id"],
                 label="product income",
+                ir_default_model="product.category",
+                ir_default_field="property_account_income_categ_id",
+                journal_type="sale",
             )
             self._set_account_from_qbo_subtype(
                 ctx,
@@ -310,6 +309,9 @@ class QboAccountImporter(models.AbstractModel):
                 fields=["expense_account_id"],
                 label="product expense",
                 account_type="Cost of Goods Sold",
+                ir_default_model="product.category",
+                ir_default_field="property_account_expense_categ_id",
+                journal_type="purchase",
             )
             self._set_account_from_qbo_subtype(
                 ctx,
@@ -323,9 +325,7 @@ class QboAccountImporter(models.AbstractModel):
                 ir_default_field="property_stock_valuation_account_id",
             )
 
-        # --- Odoo account type-based defaults for journals ---
-
-        # Default bank account (for bank journals)
+        # --- Odoo account type-based defaults for bank journals ---
         bank_accounts = qbo_accounts.filtered(
             lambda a: a.account_type == "asset_cash"
         ).sorted("code")
@@ -334,52 +334,6 @@ class QboAccountImporter(models.AbstractModel):
             IrDefault.set("account.journal", "default_account_id", bank_account.id)
             _logger.info(
                 f"Set default bank account: {bank_account.code} - {bank_account.name}"
-            )
-
-        # Default income account (for sale journals + product categories)
-        income_accounts = qbo_accounts.filtered(
-            lambda a: a.account_type == "income"
-        ).sorted("code")
-        if income_accounts:
-            income_account = income_accounts[0]
-            IrDefault.set(
-                "product.category",
-                "property_account_income_categ_id",
-                income_account.id,
-            )
-            sale_journals = ctx.env["account.journal"].search(
-                [("type", "=", "sale"), ("company_id", "=", company.id)]
-            )
-            if sale_journals:
-                sale_journals.write({"default_account_id": income_account.id})
-                _logger.info(
-                    f"Updated {len(sale_journals)} sale journals with default income account: {income_account.code}"
-                )
-            _logger.info(
-                f"Set default income account: {income_account.code} - {income_account.name}"
-            )
-
-        # Default expense account (for purchase journals + product categories)
-        expense_accounts = qbo_accounts.filtered(
-            lambda a: a.account_type in ["expense", "expense_direct_cost"]
-        ).sorted("code")
-        if expense_accounts:
-            expense_account = expense_accounts[0]
-            IrDefault.set(
-                "product.category",
-                "property_account_expense_categ_id",
-                expense_account.id,
-            )
-            purchase_journals = ctx.env["account.journal"].search(
-                [("type", "=", "purchase"), ("company_id", "=", company.id)]
-            )
-            if purchase_journals:
-                purchase_journals.write({"default_account_id": expense_account.id})
-                _logger.info(
-                    f"Updated {len(purchase_journals)} purchase journals with default expense account: {expense_account.code}"
-                )
-            _logger.info(
-                f"Set default expense account: {expense_account.code} - {expense_account.name}"
             )
 
         # Trigger auto-detection of AR/AP accounts (this already exists in qbo_connection)
@@ -399,12 +353,13 @@ class QboAccountImporter(models.AbstractModel):
         account_type: Optional[str] = None,
         ir_default_model: Optional[str] = None,
         ir_default_field: Optional[str] = None,
+        journal_type: Optional[str] = None,
     ) -> None:
         """Find a QBO account by AccountSubType/AccountType and set company fields.
 
         Queries the QBO API for accounts matching the given filters,
         finds the corresponding Odoo account (lowest code), and sets the
-        specified company fields or ir.default.
+        specified company fields, ir.default, and/or journal defaults.
 
         Args:
             ctx: ETL context.
@@ -415,8 +370,10 @@ class QboAccountImporter(models.AbstractModel):
             label: Human-readable label for logging.
             subtype: Optional QBO AccountSubType filter.
             account_type: Optional QBO AccountType filter.
-            ir_default_model: If set, use ir.default instead of company fields.
+            ir_default_model: If set, use ir.default for this model/field.
             ir_default_field: Field name for ir.default.
+            journal_type: If set (e.g. "sale", "purchase"), update the
+                default_account_id on matching journals.
         """
         conditions = ["Active = true"]
         if subtype:
@@ -449,16 +406,32 @@ class QboAccountImporter(models.AbstractModel):
 
         account = odoo_matches[0]
 
+        # Set company-level fields
+        for field_name in fields:
+            setattr(company, field_name, account.id)
+        if fields:
+            _logger.info(
+                f"Set {label} account(s) to: {account.code} - {account.name}"
+            )
+
+        # Set ir.default for product categories (or other models)
         if ir_default_model and ir_default_field:
             ctx.env["ir.default"].sudo().set(
                 ir_default_model, ir_default_field, account.id
             )
             _logger.info(
-                f"Set {label} account (ir.default): " f"{account.code} - {account.name}"
+                f"Set {label} default ({ir_default_model}.{ir_default_field}): "
+                f"{account.code} - {account.name}"
             )
-        else:
-            for field_name in fields:
-                setattr(company, field_name, account.id)
-            _logger.info(
-                f"Set {label} account(s) to: " f"{account.code} - {account.name}"
+
+        # Set default account on journals of the given type
+        if journal_type:
+            journals = ctx.env["account.journal"].search(
+                [("type", "=", journal_type), ("company_id", "=", company.id)]
             )
+            if journals:
+                journals.write({"default_account_id": account.id})
+                _logger.info(
+                    f"Updated {len(journals)} {journal_type} journals with "
+                    f"default account: {account.code} - {account.name}"
+                )

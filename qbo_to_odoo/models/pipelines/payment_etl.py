@@ -1,9 +1,8 @@
 """QuickBooks Online Payment ETL Pipeline
 
 This module handles the migration of Payments and BillPayments from QBO to Odoo
-using the ETL framework. Payments are always created as journal entries
-(debit bank / credit receivable, or credit bank / debit payable) regardless
-of whether a matching invoice/bill exists in Odoo. Reconciliation with the
+using the ETL framework. Payments are created as account.payment objects, which
+automatically generate journal entries when posted. Reconciliation with the
 original invoice/bill is attempted as a second pass.
 """
 
@@ -12,15 +11,18 @@ from typing import Dict, List, Optional
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData, post_lock
 
+from .exchange_rate_helper import ExchangeRateEnsurer
+from .extractor import QBOExtractor
+from .move_builder import QBOMoveBuilder
 from .utils import get_api_client
 
 _logger = logging.getLogger(__name__)
 
 
 @ETL.pipeline(
-    target_model="account.move",
+    target_model="account.payment",
     importer_name="qbo.payment.importer",
     sap_source="Payment",
     depends_on=[
@@ -30,32 +32,32 @@ _logger = logging.getLogger(__name__)
         "qbo.customer.importer",
         "qbo.vendor.importer",
     ],
+    chunk_size=50,
+    multiprocessing_threshold=50,
 )
 class QboPaymentImporter(models.AbstractModel):
-    """ETL Pipeline for importing QBO Payments as journal entries."""
+    """ETL Pipeline for importing QBO Payments as account.payment objects."""
 
     _name = "qbo.payment.importer"
     _description = "QBO Payment Importer"
 
     @ETL.extract("Payment")
-    def extract_payments(self, ctx: ETLContext) -> List[Dict]:
-        """Extract payments from QBO API."""
+    def extract_payments(self, ctx: ETLContext) -> ChunkableData:
+        """Extract payments from QBO API and preload all required data."""
         api_client = get_api_client(ctx)
+        extractor = QBOExtractor(ctx)
 
-        # Get existing QBO payment IDs from account.move
-        ctx.env.cr.execute(
-            "SELECT qbo_payment_id FROM account_move WHERE qbo_payment_id IS NOT NULL"
+        # Get existing QBO payment IDs from account.payment
+        existing_payment_ids = extractor.existing_qbo_ids(
+            "account_payment", "qbo_payment_id"
         )
-        existing_payment_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
-
-        ctx.env.cr.execute(
-            "SELECT qbo_bill_payment_id FROM account_move WHERE qbo_bill_payment_id IS NOT NULL"
+        existing_bill_payment_ids = extractor.existing_qbo_ids(
+            "account_payment", "qbo_bill_payment_id"
         )
-        existing_bill_payment_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
 
         _logger.info(
-            f"Found {len(existing_payment_ids)} existing customer payment JEs, "
-            f"{len(existing_bill_payment_ids)} existing bill payment JEs in Odoo"
+            f"Found {len(existing_payment_ids)} existing customer payments, "
+            f"{len(existing_bill_payment_ids)} existing bill payments in Odoo"
         )
 
         # Fetch customer payments from QBO
@@ -79,73 +81,89 @@ class QboPaymentImporter(models.AbstractModel):
             f"{len(bill_payments)} bill payments, {len(new_bill_payments)} new"
         )
 
+        # Ensure exchange rates exist for all foreign-currency payments
+        all_raw_records = [p["data"] for p in new_payments + new_bill_payments]
+        ExchangeRateEnsurer(ctx.env).ensure_rates(all_raw_records)
+
+        # Preload maps for transform
+        extractor.preload("account", "customer", "vendor", "currency")
+        extractor.preload_account_journal_map()
+        extractor.preload_journals("general")
+        extractor.preload_undeposited_funds()
+
+        # Journal -> default bank account for direct-to-bank outstanding account
+        ctx.env.cr.execute(
+            "SELECT id, default_account_id FROM account_journal "
+            "WHERE default_account_id IS NOT NULL AND company_id = %s",
+            [extractor._company_id],
+        )
+        extractor.extra["journal_bank_account_map"] = {
+            row[0]: row[1] for row in ctx.env.cr.fetchall()
+        }
+
+        # Pipeline-specific: invoice/bill/credit memo maps for reconciliation
+        extractor.extra["invoice_map"] = extractor.qbo_id_map(
+            "account_move", "qbo_invoice_id", where="state = 'posted'"
+        )
+        extractor.extra["bill_map"] = extractor.qbo_id_map(
+            "account_move", "qbo_bill_id", where="state = 'posted'"
+        )
+        extractor.extra["credit_memo_map"] = extractor.qbo_id_map(
+            "account_move", "qbo_credit_memo_id", where="state = 'posted'"
+        )
+
+        # Pre-fetch receivable/payable accounts for destination_account_id
+        extractor.extra["invoice_receivable_map"] = extractor.invoice_receivable_map()
+        extractor.extra["bill_payable_map"] = extractor.bill_payable_map()
+        extractor.extra["partner_receivable_map"] = extractor.partner_receivable_map()
+        extractor.extra["partner_payable_map"] = extractor.partner_payable_map()
+
         all_payments = new_payments + new_bill_payments
-        return all_payments
+
+        return ChunkableData(
+            records=all_payments,
+            context={"extractor": extractor.export()},
+        )
 
     @ETL.transform()
     def transform_payments(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
-        """Transform QBO payments into journal entry values.
+        """Transform QBO payments into account.payment values."""
+        data = extracted.get("extract_payments")
+        if not data:
+            return []
+        all_payments = data.records if hasattr(data, "records") else data
+        context = data.context if hasattr(data, "context") else {}
 
-        Every payment produces a JE regardless of whether a linked
-        invoice/bill exists. Linked move IDs are stored for reconciliation.
-        """
-        all_payments = extracted.get("extract_payments", [])
+        builder = QBOMoveBuilder(context["extractor"])
+        invoice_map = builder.get_extra("invoice_map") or {}
+        bill_map = builder.get_extra("bill_map") or {}
+        credit_memo_map = builder.get_extra("credit_memo_map") or {}
+        journal_bank_account_map = builder.get_extra("journal_bank_account_map") or {}
 
-        # Build lookups
-        ctx.env.cr.execute(
-            "SELECT qbo_id, id FROM account_account WHERE qbo_id IS NOT NULL"
-        )
-        account_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
-
-        ctx.env.cr.execute(
-            "SELECT qbo_customer_id, id FROM res_partner "
-            "WHERE qbo_customer_id IS NOT NULL"
-        )
-        customer_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
-
-        ctx.env.cr.execute(
-            "SELECT qbo_vendor_id, id FROM res_partner "
-            "WHERE qbo_vendor_id IS NOT NULL"
-        )
-        vendor_map = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
-
-        ctx.env.cr.execute(
-            "SELECT qbo_invoice_id, id FROM account_move "
-            "WHERE qbo_invoice_id IS NOT NULL AND state = 'posted'"
-        )
-        invoice_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
-
-        ctx.env.cr.execute(
-            "SELECT qbo_bill_id, id FROM account_move "
-            "WHERE qbo_bill_id IS NOT NULL AND state = 'posted'"
-        )
-        bill_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
-
-        company = ctx.env.company
         payment_data = []
+        credit_applications = []
         skipped = 0
 
         for pmt in all_payments:
             pmt_type = pmt["type"]
-            data = pmt["data"]
+            pmt_data = pmt["data"]
 
+            # Zero-amount customer payments are credit memo applications:
+            # the Lines link CreditMemos to Invoices without any cash movement.
             if pmt_type == "customer":
+                total_amt = float(pmt_data.get("TotalAmt", 0) or 0)
+                if total_amt <= 0:
+                    apps = self._transform_credit_application(
+                        pmt_data, invoice_map, credit_memo_map,
+                    )
+                    credit_applications.extend(apps)
+                    continue
                 result = self._transform_customer_payment(
-                    data,
-                    customer_map,
-                    invoice_map,
-                    account_map,
-                    company,
-                    ctx,
+                    pmt_data, builder, invoice_map, journal_bank_account_map,
                 )
             else:
                 result = self._transform_bill_payment(
-                    data,
-                    vendor_map,
-                    bill_map,
-                    account_map,
-                    company,
-                    ctx,
+                    pmt_data, builder, bill_map, journal_bank_account_map,
                 )
 
             if result:
@@ -153,26 +171,30 @@ class QboPaymentImporter(models.AbstractModel):
             else:
                 skipped += 1
 
-        _logger.info(f"Transformed {len(payment_data)} payments, skipped {skipped}")
-        return payment_data
+        with_links = sum(1 for p in payment_data if p.get("linked_moves"))
+        _logger.info(
+            f"Transformed {len(payment_data)} payments, skipped {skipped}, "
+            f"{with_links} linked to invoices/bills; "
+            f"{len(credit_applications)} credit memo applications"
+        )
+        return {
+            "payments": payment_data,
+            "credit_applications": credit_applications,
+        }
 
     def _transform_customer_payment(
         self,
         payment: Dict,
-        customer_map: Dict,
+        builder: QBOMoveBuilder,
         invoice_map: Dict,
-        account_map: Dict,
-        company,
-        ctx: ETLContext,
+        journal_bank_account_map: Dict,
     ) -> Optional[Dict]:
-        """Transform a customer payment into a single journal entry."""
-        customer_ref = payment.get("CustomerRef", {})
-        qbo_customer_id = int(customer_ref.get("value", 0))
-        partner_id = customer_map.get(qbo_customer_id)
-
+        """Transform a customer payment into account.payment vals."""
+        partner_id = builder.resolve_partner(payment, "customer")
         if not partner_id:
             _logger.warning(
-                f"Customer not found for QBO ID {qbo_customer_id} "
+                f"Customer not found for QBO ID "
+                f"{payment.get('CustomerRef', {}).get('value')} "
                 f"in payment {payment.get('Id')}"
             )
             return None
@@ -188,39 +210,32 @@ class QboPaymentImporter(models.AbstractModel):
         qbo_payment_id = int(payment.get("Id", 0))
         payment_ref = payment.get("PaymentRefNum", "") or f"QBO-{qbo_payment_id}"
 
-        # Get bank account
-        result = self._get_bank_account_from_payment(payment, account_map, ctx)
+        # Get bank journal
+        result = self._get_bank_journal(payment, builder)
         if not result:
             _logger.warning(
-                f"No valid bank account found for payment {qbo_payment_id}, skipping"
+                f"No valid bank journal found for payment {qbo_payment_id}, skipping"
             )
             return None
-        bank_account_id, journal_id = result
+        journal_id = result
 
         # Get receivable account: prefer linked invoice, fall back to partner default
         recv_account_id = None
-        linked_move_ids = []
+        linked_moves = []  # (odoo_move_id, qbo_line_amount)
+        invoice_recv_map = builder.get_extra("invoice_receivable_map") or {}
+        partner_recv_map = builder.get_extra("partner_receivable_map") or {}
 
         for line in payment.get("Line", []):
+            line_amount = float(line.get("Amount", 0) or 0)
             for linked in line.get("LinkedTxn", []):
                 txn_id = str(linked.get("TxnId", ""))
-                txn_type = linked.get("TxnType", "")
-                if txn_type == "Invoice" and txn_id in invoice_map:
-                    linked_move_ids.append(invoice_map[txn_id])
-
-        if linked_move_ids:
-            # Use the receivable account from the first linked invoice
-            move = ctx.env["account.move"].browse(linked_move_ids[0])
-            recv_line = move.line_ids.filtered(
-                lambda l: l.account_id.account_type == "asset_receivable"
-            )
-            if recv_line:
-                recv_account_id = recv_line[0].account_id.id
+                if linked.get("TxnType") == "Invoice" and txn_id in invoice_map:
+                    linked_moves.append((invoice_map[txn_id], line_amount))
+                    if not recv_account_id:
+                        recv_account_id = invoice_recv_map.get(txn_id)
 
         if not recv_account_id:
-            # Fall back to partner's default receivable
-            partner = ctx.env["res.partner"].browse(partner_id)
-            recv_account_id = partner.property_account_receivable_id.id
+            recv_account_id = partner_recv_map.get(partner_id)
 
         if not recv_account_id:
             _logger.warning(
@@ -228,70 +243,88 @@ class QboPaymentImporter(models.AbstractModel):
             )
             return None
 
-        # Handle currency
-        currency_code = payment.get("CurrencyRef", {}).get("value", "CAD")
-        exchange_rate = float(payment.get("ExchangeRate", 1.0) or 1.0)
-        currency = ctx.env["res.currency"].search(
-            [("name", "=", currency_code)], limit=1
-        )
-        if not currency:
-            currency = company.currency_id
-        is_foreign = currency.id != company.currency_id.id
+        # Resolve currency
+        currency_id, is_foreign, _exchange_rate = builder.resolve_currency(payment)
 
-        if is_foreign and exchange_rate:
-            amount_company = round(total_amt * exchange_rate, 2)
-        else:
-            amount_company = total_amt
+        # Use journal's bank account as outstanding account (direct-to-bank,
+        # no transit account) so the JE is: DR Bank / CR Receivable.
+        outstanding_account_id = journal_bank_account_map.get(journal_id)
 
-        # Customer payment: debit bank, credit receivable
-        recv_line = {
-            "account_id": recv_account_id,
+        payment_vals = {
+            "date": txn_date,
+            "journal_id": journal_id,
+            "payment_type": "inbound",
+            "partner_type": "customer",
             "partner_id": partner_id,
-            "debit": 0,
-            "credit": amount_company,
-            "name": payment_ref,
+            "amount": total_amt,
+            "memo": payment_ref,
+            "payment_reference": payment_ref,
+            "qbo_payment_id": qbo_payment_id,
+            "destination_account_id": recv_account_id,
+            "outstanding_account_id": outstanding_account_id,
         }
-        bank_line = {
-            "account_id": bank_account_id,
-            "partner_id": partner_id,
-            "debit": amount_company,
-            "credit": 0,
-            "name": payment_ref,
-        }
-
         if is_foreign:
-            recv_line["currency_id"] = currency.id
-            recv_line["amount_currency"] = -total_amt
-            bank_line["currency_id"] = currency.id
-            bank_line["amount_currency"] = total_amt
+            payment_vals["currency_id"] = currency_id
 
         return {
-            "je_vals": {
-                "move_type": "entry",
-                "journal_id": journal_id,
-                "date": txn_date,
-                "ref": payment_ref,
-                "partner_id": partner_id,
-                "qbo_payment_id": qbo_payment_id,
-                "qbo_bill_payment_id": None,
-                "currency_id": currency.id,
-                "line_ids": [(0, 0, recv_line), (0, 0, bank_line)],
-            },
-            "linked_move_ids": linked_move_ids,
+            "payment_vals": payment_vals,
+            "linked_moves": linked_moves,
             "is_customer": True,
         }
 
-    def _get_bank_account_from_payment(
-        self, payment: Dict, account_map: Dict, ctx: ETLContext
-    ) -> Optional[tuple[int, int]]:
-        """Extract account and journal IDs from QBO payment data.
+    @staticmethod
+    def _transform_credit_application(
+        payment: Dict,
+        invoice_map: Dict,
+        credit_memo_map: Dict,
+    ) -> List[Dict]:
+        """Transform a zero-amount payment (credit memo application).
 
-        QBO customer Payment uses 'DepositToAccountRef' at the top level.
-        QBO BillPayment uses 'CheckPayment.BankAccountRef' for cheque
-        payments or 'CreditCardPayment.CCAccountRef' for credit card
-        payments. When none of these are present, the payment goes to
-        Undeposited Funds.
+        In QBO, applying credit memos to invoices creates a Payment with
+        TotalAmt=0.  The Lines link CreditMemos (credit side) to Invoices
+        (debit side).  In Odoo we don't create an account.payment; we just
+        reconcile the credit note's AR line against the invoice's AR line.
+
+        Returns a list of dicts with ``invoice_move_id`` and
+        ``credit_memo_move_id`` for each pair to reconcile.
         """
+        qbo_id = payment.get("Id")
+        pairs = []
+        invoice_ids = []
+        credit_memo_ids = []
+
+        for line in payment.get("Line", []):
+            for linked in line.get("LinkedTxn", []):
+                txn_id = str(linked.get("TxnId", ""))
+                txn_type = linked.get("TxnType")
+                if txn_type == "Invoice" and txn_id in invoice_map:
+                    invoice_ids.append(invoice_map[txn_id])
+                elif txn_type == "CreditMemo" and txn_id in credit_memo_map:
+                    credit_memo_ids.append(credit_memo_map[txn_id])
+
+        if not invoice_ids or not credit_memo_ids:
+            if invoice_ids or credit_memo_ids:
+                _logger.debug(
+                    f"Credit application QBO#{qbo_id}: only partial links "
+                    f"(invoices={len(invoice_ids)}, memos={len(credit_memo_ids)})"
+                )
+            return []
+
+        # Each invoice gets paired with all credit memos in this application.
+        for inv_id in invoice_ids:
+            for cm_id in credit_memo_ids:
+                pairs.append({
+                    "invoice_move_id": inv_id,
+                    "credit_memo_move_id": cm_id,
+                    "qbo_payment_id": qbo_id,
+                })
+
+        return pairs
+
+    def _get_bank_journal(
+        self, payment: Dict, builder: QBOMoveBuilder
+    ) -> Optional[int]:
+        """Resolve the bank/cash journal ID from QBO payment data."""
         # Try DepositToAccountRef (customer payments)
         account_ref = payment.get("DepositToAccountRef", {})
 
@@ -308,29 +341,20 @@ class QboPaymentImporter(models.AbstractModel):
                 account_ref = cc_payment.get("CCAccountRef", {})
 
         if not account_ref or not account_ref.get("value"):
-            # No account ref found — fall back to Undeposited Funds
-            undeposited = ctx.env["account.account"].search(
-                [
-                    ("name", "ilike", "Undeposited Funds"),
-                    ("company_ids", "in", [ctx.env.company.id]),
-                ],
-                limit=1,
-            )
-            if undeposited:
-                _logger.debug(
-                    f"Payment {payment.get('Id')} has no account ref, "
-                    f"using Undeposited Funds ({undeposited.code})"
-                )
-                account_id = undeposited.id
-            else:
+            # Fall back to Undeposited Funds account → its journal
+            account_id = builder.undeposited_funds_id
+            if not account_id:
                 _logger.warning(
                     f"No account reference found in payment {payment.get('Id')} "
                     f"and no 'Undeposited Funds' account in Odoo"
                 )
                 return None
         else:
-            qbo_account_id = str(account_ref.get("value", 0))
-            account_id = account_map.get(qbo_account_id)
+            qbo_account_id = account_ref.get("value")
+            try:
+                account_id = builder.account_map.get(int(qbo_account_id))
+            except (ValueError, TypeError):
+                account_id = None
             if not account_id:
                 _logger.warning(
                     f"Account with QBO ID {qbo_account_id} not found in Odoo "
@@ -338,49 +362,26 @@ class QboPaymentImporter(models.AbstractModel):
                 )
                 return None
 
-        company = ctx.env.company
-
-        # Prefer the journal whose default_account_id matches the resolved account
-        # (covers bank and cash journals created from QBO bank accounts).
-        journal = ctx.env["account.journal"].search(
-            [
-                ("default_account_id", "=", account_id),
-                ("company_id", "=", company.id),
-            ],
-            limit=1,
-        )
-
-        if not journal:
-            # Fall back to the general journal for accounts not linked to any
-            # journal (e.g. Undeposited Funds).
-            journal = ctx.env["account.journal"].search(
-                [("type", "=", "general"), ("company_id", "=", company.id)],
-                limit=1,
-            )
-
-        if not journal:
+        journal_id = builder.get_journal_id_for_account(account_id)
+        if not journal_id:
             _logger.warning(f"No journal found for payment {payment.get('Id')}")
             return None
 
-        return account_id, journal.id
+        return journal_id
 
     def _transform_bill_payment(
         self,
         bp: Dict,
-        vendor_map: Dict,
+        builder: QBOMoveBuilder,
         bill_map: Dict,
-        account_map: Dict,
-        company,
-        ctx: ETLContext,
+        journal_bank_account_map: Dict,
     ) -> Optional[Dict]:
-        """Transform a bill payment into a single journal entry."""
-        vendor_ref = bp.get("VendorRef", {})
-        qbo_vendor_id = int(vendor_ref.get("value", 0))
-        partner_id = vendor_map.get(qbo_vendor_id)
-
+        """Transform a bill payment into account.payment vals."""
+        partner_id = builder.resolve_partner(bp, "vendor")
         if not partner_id:
             _logger.warning(
-                f"Vendor not found for QBO ID {qbo_vendor_id} "
+                f"Vendor not found for QBO ID "
+                f"{bp.get('VendorRef', {}).get('value')} "
                 f"in bill payment {bp.get('Id')}"
             )
             return None
@@ -396,36 +397,31 @@ class QboPaymentImporter(models.AbstractModel):
         qbo_bill_payment_id = int(bp.get("Id", 0))
         payment_ref = bp.get("DocNumber", "") or f"QBO-BP-{qbo_bill_payment_id}"
 
-        result = self._get_bank_account_from_payment(bp, account_map, ctx)
+        result = self._get_bank_journal(bp, builder)
         if not result:
             _logger.warning(
-                f"No valid bank account for bill payment {qbo_bill_payment_id}, skipping"
+                f"No valid bank journal for bill payment {qbo_bill_payment_id}, skipping"
             )
             return None
-        bank_account_id, journal_id = result
+        journal_id = result
 
         # Get payable account: prefer linked bill, fall back to partner default
         payable_account_id = None
-        linked_move_ids = []
+        linked_moves = []  # (odoo_move_id, qbo_line_amount)
+        bill_payable_map = builder.get_extra("bill_payable_map") or {}
+        partner_payable_map = builder.get_extra("partner_payable_map") or {}
 
         for line in bp.get("Line", []):
+            line_amount = float(line.get("Amount", 0) or 0)
             for linked in line.get("LinkedTxn", []):
                 txn_id = str(linked.get("TxnId", ""))
-                txn_type = linked.get("TxnType", "")
-                if txn_type == "Bill" and txn_id in bill_map:
-                    linked_move_ids.append(bill_map[txn_id])
-
-        if linked_move_ids:
-            move = ctx.env["account.move"].browse(linked_move_ids[0])
-            pay_line = move.line_ids.filtered(
-                lambda l: l.account_id.account_type == "liability_payable"
-            )
-            if pay_line:
-                payable_account_id = pay_line[0].account_id.id
+                if linked.get("TxnType") == "Bill" and txn_id in bill_map:
+                    linked_moves.append((bill_map[txn_id], line_amount))
+                    if not payable_account_id:
+                        payable_account_id = bill_payable_map.get(txn_id)
 
         if not payable_account_id:
-            partner = ctx.env["res.partner"].browse(partner_id)
-            payable_account_id = partner.property_account_payable_id.id
+            payable_account_id = partner_payable_map.get(partner_id)
 
         if not payable_account_id:
             _logger.warning(
@@ -433,124 +429,256 @@ class QboPaymentImporter(models.AbstractModel):
             )
             return None
 
-        # Handle currency
-        currency_code = bp.get("CurrencyRef", {}).get("value", "CAD")
-        exchange_rate = float(bp.get("ExchangeRate", 1.0) or 1.0)
-        currency = ctx.env["res.currency"].search(
-            [("name", "=", currency_code)], limit=1
-        )
-        if not currency:
-            currency = company.currency_id
-        is_foreign = currency.id != company.currency_id.id
+        # Resolve currency
+        currency_id, is_foreign, _exchange_rate = builder.resolve_currency(bp)
 
-        if is_foreign and exchange_rate:
-            amount_company = round(total_amt * exchange_rate, 2)
-        else:
-            amount_company = total_amt
+        outstanding_account_id = journal_bank_account_map.get(journal_id)
 
-        # Vendor payment: debit payable, credit bank
-        payable_line = {
-            "account_id": payable_account_id,
+        payment_vals = {
+            "date": txn_date,
+            "journal_id": journal_id,
+            "payment_type": "outbound",
+            "partner_type": "supplier",
             "partner_id": partner_id,
-            "debit": amount_company,
-            "credit": 0,
-            "name": payment_ref,
+            "amount": total_amt,
+            "memo": payment_ref,
+            "payment_reference": payment_ref,
+            "qbo_bill_payment_id": qbo_bill_payment_id,
+            "destination_account_id": payable_account_id,
+            "outstanding_account_id": outstanding_account_id,
         }
-        bank_line = {
-            "account_id": bank_account_id,
-            "partner_id": partner_id,
-            "debit": 0,
-            "credit": amount_company,
-            "name": payment_ref,
-        }
-
         if is_foreign:
-            payable_line["currency_id"] = currency.id
-            payable_line["amount_currency"] = total_amt
-            bank_line["currency_id"] = currency.id
-            bank_line["amount_currency"] = -total_amt
+            payment_vals["currency_id"] = currency_id
 
         return {
-            "je_vals": {
-                "move_type": "entry",
-                "journal_id": journal_id,
-                "date": txn_date,
-                "ref": payment_ref,
-                "partner_id": partner_id,
-                "qbo_payment_id": None,
-                "qbo_bill_payment_id": qbo_bill_payment_id,
-                "currency_id": currency.id,
-                "line_ids": [(0, 0, payable_line), (0, 0, bank_line)],
-            },
-            "linked_move_ids": linked_move_ids,
+            "payment_vals": payment_vals,
+            "linked_moves": linked_moves,
             "is_customer": False,
         }
 
     @ETL.load()
     def load_payments(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Create payment JEs and attempt reconciliation with invoices/bills."""
-        payment_data = transformed.get("transform_payments", [])
+        """Create account.payment records and attempt reconciliation."""
+        transform_result = transformed.get("transform_payments", {})
+        # Backwards compat: if transform returned a plain list (old code path)
+        if isinstance(transform_result, list):
+            payment_data = transform_result
+            credit_applications = []
+        else:
+            payment_data = transform_result.get("payments", [])
+            credit_applications = transform_result.get("credit_applications", [])
 
-        if not payment_data:
+        if not payment_data and not credit_applications:
             _logger.info("No payments to process")
             return
 
         ctx.env.invalidate_all()
 
-        # Phase 1: Create and post all payment JEs
-        created = 0
-        posted = 0
-        reconciliation_queue = []  # (payment_move, linked_move_ids, is_customer)
-
+        # Phase 1: Create all payments (no lock needed)
+        # outstanding_account_id is set to the journal's bank account in the
+        # transform (direct-to-bank), so the JE goes straight to the bank
+        # account without a transit/outstanding account.
+        payments = []  # (payment_record, linked_moves, is_customer)
         for pmt in payment_data:
-            je_vals = pmt["je_vals"]
+            pmt_vals = pmt["payment_vals"]
             qbo_id = (
-                je_vals.get("qbo_payment_id")
-                or je_vals.get("qbo_bill_payment_id")
+                pmt_vals.get("qbo_payment_id")
+                or pmt_vals.get("qbo_bill_payment_id")
                 or "?"
             )
-            with ctx.skippable(f"payment QBO#{qbo_id}"):
-                move = ctx.env["account.move"].create(je_vals)
-                created += 1
-                move.action_post()
-                posted += 1
-                if pmt["linked_move_ids"]:
-                    reconciliation_queue.append(
-                        (move, pmt["linked_move_ids"], pmt["is_customer"])
-                    )
+            with ctx.skippable(f"create payment QBO#{qbo_id}"):
+                outstanding_id = pmt_vals.pop("outstanding_account_id", None)
+                payment = ctx.env["account.payment"].create(pmt_vals)
+                if outstanding_id:
+                    payment.outstanding_account_id = outstanding_id
+                payments.append(
+                    (payment, pmt["linked_moves"], pmt["is_customer"])
+                )
 
-        _logger.info(f"Created {created} payment JEs ({posted} posted)")
+        _logger.info(f"Created {len(payments)} payments")
 
-        # Phase 2: Attempt reconciliation
-        reconciled = 0
-        for payment_move, linked_move_ids, is_customer in reconciliation_queue:
+        # Phase 2: Post payments, grouped by journal to minimize lock acquisitions
+        by_journal = {}
+        for payment, linked_moves, is_customer in payments:
+            jid = payment.journal_id.id
+            by_journal.setdefault(jid, []).append(
+                (payment, linked_moves, is_customer)
+            )
+
+        posted = 0
+        reconciliation_queue = []
+        for journal_id, group in sorted(by_journal.items()):
+            with post_lock(ctx.env.cr, journal_id):
+                for payment, linked_moves, is_customer in group:
+                    qbo_id = payment.qbo_payment_id or payment.qbo_bill_payment_id or "?"
+                    with ctx.skippable(f"post payment QBO#{qbo_id}"):
+                        payment.action_post()
+                        posted += 1
+                        if linked_moves:
+                            reconciliation_queue.append(
+                                (payment, linked_moves, is_customer)
+                            )
+
+        _logger.info(f"Posted {posted} payments")
+
+        # Phase 3: Reconcile, grouped by account to minimize lock acquisitions.
+        # linked_moves is a list of (odoo_move_id, qbo_line_amount) tuples.
+        # The QBO line amount tells us exactly how much to apply to each invoice/bill.
+        # When both the payment's remaining balance and the invoice's open balance
+        # exceed the QBO amount, we create account.partial.reconcile directly to
+        # avoid greedily over-applying to the first invoice and leaving later ones
+        # with no credit.
+        with_links = sum(1 for _, lm, _ in reconciliation_queue if lm)
+        _logger.info(
+            f"Reconciliation queue: {len(reconciliation_queue)} payments, "
+            f"{with_links} with linked invoices/bills"
+        )
+
+        by_account = {}  # account_id -> [(payment, payment_line, linked_moves)]
+        no_move = 0
+        no_line = 0
+        for payment, linked_moves, is_customer in reconciliation_queue:
+            if not payment.move_id:
+                no_move += 1
+                _logger.warning(
+                    f"Payment {payment.name} has no move_id after posting"
+                )
+                continue
             account_type = "asset_receivable" if is_customer else "liability_payable"
-            payment_line = payment_move.line_ids.filtered(
+            payment_line = payment.move_id.line_ids.filtered(
                 lambda l, at=account_type: l.account_id.account_type == at
             )
             if not payment_line:
+                no_line += 1
+                line_types = [
+                    (l.account_id.name, l.account_id.account_type)
+                    for l in payment.move_id.line_ids
+                ]
+                _logger.warning(
+                    f"Payment {payment.name}: no {account_type} line found. "
+                    f"Move lines: {line_types}"
+                )
                 continue
-
-            # Reconciliation requires lines on the same account_id.
             pay_account_id = payment_line[0].account_id.id
+            by_account.setdefault(pay_account_id, []).append(
+                (payment, payment_line, linked_moves)
+            )
 
-            for linked_id in linked_move_ids:
-                with ctx.skippable(
-                    f"reconcile {payment_move.name} <-> move#{linked_id}"
-                ):
-                    # Re-filter each iteration; prior reconcile may have
-                    # consumed the payment line already.
-                    pay_lines_open = payment_line.filtered(lambda l: not l.reconciled)
-                    if not pay_lines_open:
-                        break
-                    original_move = ctx.env["account.move"].browse(linked_id)
-                    line_to_reconcile = original_move.line_ids.filtered(
-                        lambda l, aid=pay_account_id: (
-                            l.account_id.id == aid and not l.reconciled
-                        )
-                    )
-                    if line_to_reconcile:
-                        (line_to_reconcile + pay_lines_open).reconcile()
-                        reconciled += 1
+        if no_move or no_line:
+            _logger.warning(
+                f"Reconciliation prep: {no_move} without move_id, "
+                f"{no_line} without matching line"
+            )
+
+        reconciled = 0
+        for account_id, group in sorted(by_account.items()):
+            with post_lock(ctx.env.cr, account_id):
+                for payment, payment_line, linked_moves in group:
+                    for linked_id, qbo_amount in linked_moves:
+                        with ctx.skippable(
+                            f"reconcile {payment.name} <-> move#{linked_id}"
+                        ):
+                            pay_line_open = payment_line.filtered(
+                                lambda l: not l.reconciled
+                            )
+                            if not pay_line_open:
+                                break
+                            original_move = ctx.env["account.move"].browse(linked_id)
+                            inv_line = original_move.line_ids.filtered(
+                                lambda l, aid=account_id: (
+                                    l.account_id.id == aid and not l.reconciled
+                                )
+                            )
+                            if not inv_line:
+                                _logger.debug(
+                                    f"No unreconciled {account_id} line on "
+                                    f"move#{linked_id} for {payment.name}"
+                                )
+                                continue
+                            pay_line = pay_line_open[0]
+                            inv_line = inv_line[0]
+                            # Residual amounts in the payment's currency
+                            # (amount_residual_currency for multi-currency,
+                            # amount_residual for same-currency)
+                            pay_curr = pay_line.currency_id
+                            inv_curr = inv_line.currency_id
+                            pay_open = abs(
+                                pay_line.amount_residual_currency
+                                if pay_curr and pay_curr != pay_line.company_currency_id
+                                else pay_line.amount_residual
+                            )
+                            inv_open = abs(
+                                inv_line.amount_residual_currency
+                                if inv_curr and inv_curr != inv_line.company_currency_id
+                                else inv_line.amount_residual
+                            )
+                            # If both sides have more open than the QBO amount,
+                            # we must limit to avoid over-applying.
+                            tol = 0.01
+                            if pay_open > qbo_amount + tol and inv_open > qbo_amount + tol:
+                                # Compute the CAD equivalent using the payment line's rate
+                                pay_cad = abs(pay_line.amount_residual)
+                                pay_foreign = abs(pay_line.amount_residual_currency) if pay_curr else pay_cad
+                                rate = pay_cad / pay_foreign if pay_foreign else 1.0
+                                cad_amount = qbo_amount * rate
+                                ctx.env["account.partial.reconcile"].create({
+                                    "debit_move_id": inv_line.id,
+                                    "credit_move_id": pay_line.id,
+                                    "amount": cad_amount,
+                                    "debit_amount_currency": qbo_amount,
+                                    "credit_amount_currency": qbo_amount,
+                                    "company_id": inv_line.company_id.id,
+                                })
+                                # Force recompute of residuals so the next
+                                # iteration sees the updated open balances.
+                                (inv_line + pay_line).invalidate_recordset(
+                                    ["amount_residual", "amount_residual_currency", "reconciled"]
+                                )
+                            else:
+                                (inv_line + pay_line).reconcile()
+                            reconciled += 1
 
         _logger.info(f"Reconciled {reconciled} payment/invoice pairs")
+
+        # Phase 4: Apply credit memos to invoices.
+        # These come from QBO Payments with TotalAmt=0 where CreditMemos are
+        # linked to Invoices.  We reconcile the credit note's AR credit line
+        # against the invoice's AR debit line.
+        if not credit_applications:
+            return
+
+        _logger.info(
+            f"Processing {len(credit_applications)} credit memo applications"
+        )
+        applied = 0
+        for app in credit_applications:
+            qbo_id = app["qbo_payment_id"]
+            inv_id = app["invoice_move_id"]
+            cm_id = app["credit_memo_move_id"]
+            with ctx.skippable(
+                f"credit apply QBO#{qbo_id}: inv#{inv_id} <-> cm#{cm_id}"
+            ):
+                invoice = ctx.env["account.move"].browse(inv_id)
+                credit_memo = ctx.env["account.move"].browse(cm_id)
+                inv_ar = invoice.line_ids.filtered(
+                    lambda l: (
+                        l.account_id.account_type == "asset_receivable"
+                        and not l.reconciled
+                    )
+                )
+                cm_ar = credit_memo.line_ids.filtered(
+                    lambda l: (
+                        l.account_id.account_type == "asset_receivable"
+                        and not l.reconciled
+                    )
+                )
+                if not inv_ar or not cm_ar:
+                    _logger.debug(
+                        f"Credit apply QBO#{qbo_id}: no unreconciled AR lines "
+                        f"(inv={len(inv_ar)}, cm={len(cm_ar)})"
+                    )
+                    continue
+                (inv_ar + cm_ar).reconcile()
+                applied += 1
+
+        _logger.info(f"Applied {applied} credit memo applications")

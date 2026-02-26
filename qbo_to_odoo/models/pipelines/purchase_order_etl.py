@@ -21,7 +21,7 @@ _logger = logging.getLogger(__name__)
     target_model="purchase.order",
     importer_name="qbo.purchase.order.importer",
     sap_source="PurchaseOrder",
-    depends_on=["qbo.vendor.importer", "qbo.item.importer", "qbo.tax.importer"],
+    depends_on=["qbo.vendor.importer", "qbo.item.importer", "qbo.tax.importer", "qbo.category.account.fixer"],
 )
 class QboPurchaseOrderImporter(models.AbstractModel):
     """ETL Pipeline for importing QBO PurchaseOrders as purchase.order."""

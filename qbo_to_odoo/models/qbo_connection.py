@@ -452,8 +452,6 @@ class QboConnection(models.Model):
         return {
             "source_id": self.id,
             "source_model": "qbo.connection",
-            "api_client": self.get_api_client(),
-            "connection": self,  # Pass connection for AR/AP account access
         }
 
     @api.model
@@ -539,6 +537,16 @@ class QboConnection(models.Model):
     # ETL Pipeline Execution Helpers
     ##################################################################
 
+    _PIPELINE_SYNC_FIELDS = {
+        "qbo.account.importer": "last_account_sync",
+        "qbo.customer.importer": "last_customer_sync",
+        "qbo.vendor.importer": "last_vendor_sync",
+        "qbo.item.importer": "last_product_sync",
+        "qbo.invoice.importer": "last_invoice_sync",
+        "qbo.bill.importer": "last_bill_sync",
+        "qbo.journal.entry.importer": "last_journal_entry_sync",
+    }
+
     def _execute_pipeline(self, pipeline_name: str) -> dict:
         """Execute a single ETL pipeline by name."""
         self.ensure_one()
@@ -556,6 +564,12 @@ class QboConnection(models.Model):
         )
         executor = ETLExecutor(pipeline, ctx, importer)
         executor.execute()
+
+        # Update sync timestamp once (on orchestrator only, not per chunk)
+        sync_field = self._PIPELINE_SYNC_FIELDS.get(pipeline_name)
+        if sync_field:
+            self[sync_field] = fields.Datetime.now()
+
         self.env.cr.commit()
 
         return self._success_notification()

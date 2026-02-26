@@ -21,7 +21,7 @@ _logger = logging.getLogger(__name__)
     target_model="sale.order",
     importer_name="qbo.estimate.importer",
     sap_source="Estimate",
-    depends_on=["qbo.customer.importer", "qbo.item.importer", "qbo.tax.importer"],
+    depends_on=["qbo.customer.importer", "qbo.item.importer", "qbo.tax.importer", "qbo.category.account.fixer"],
 )
 class QboEstimateImporter(models.AbstractModel):
     """ETL Pipeline for importing QBO Estimates as sale.order."""
