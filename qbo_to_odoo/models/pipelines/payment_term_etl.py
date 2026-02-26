@@ -11,6 +11,8 @@ from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext
 
+from .utils import get_api_client
+
 _logger = logging.getLogger(__name__)
 
 
@@ -29,9 +31,7 @@ class QboTermImporter(models.AbstractModel):
     @ETL.extract("Term")
     def extract_terms(self, ctx: ETLContext) -> List[Dict]:
         """Extract terms from QBO API."""
-        api_client = ctx.get_config("api_client")
-        if not api_client:
-            raise ValueError("API client not found in ETL context")
+        api_client = get_api_client(ctx)
 
         # Get existing QBO term IDs
         ctx.env.cr.execute(

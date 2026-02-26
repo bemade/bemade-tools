@@ -11,6 +11,8 @@ from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext
 
+from .utils import get_api_client
+
 _logger = logging.getLogger(__name__)
 
 
@@ -28,13 +30,13 @@ class QboTaxImporter(models.AbstractModel):
 
     # Class-level cache for tax rates lookup (needed in transform)
     _tax_rates_cache: Dict = {}
+    # Class-level cache for all tax codes (needed to link group children in load)
+    _tax_codes_cache: List = []
 
     @ETL.extract("TaxCode")
     def extract_taxes(self, ctx: ETLContext) -> List[Dict]:
         """Extract tax codes and rates from QBO API."""
-        api_client = ctx.get_config("api_client")
-        if not api_client:
-            raise ValueError("API client not found in ETL context")
+        api_client = get_api_client(ctx)
 
         # Get existing QBO tax IDs
         ctx.env.cr.execute(
@@ -58,6 +60,9 @@ class QboTaxImporter(models.AbstractModel):
 
         # Cache all tax rates for transform phase
         QboTaxImporter._tax_rates_cache = {str(tr.get("Id")): tr for tr in tax_rates}
+
+        # Cache all tax codes for linking group children in load phase
+        QboTaxImporter._tax_codes_cache = tax_codes
 
         # Filter out already imported
         new_tax_codes = [
@@ -202,10 +207,77 @@ class QboTaxImporter(models.AbstractModel):
         """Load taxes into Odoo."""
         tax_vals = transformed.get("transform_taxes", [])
 
-        if not tax_vals:
+        if tax_vals:
+            # Batch create taxes
+            taxes = ctx.env["account.tax"].create(tax_vals)
+            _logger.info(f"Created {len(taxes)} taxes")
+        else:
             _logger.info("No new taxes to create")
+
+        # Link children to group taxes (fixes both new and existing)
+        self._link_group_tax_children(ctx)
+
+    def _link_group_tax_children(self, ctx: ETLContext) -> None:
+        """Link child tax rates to their parent group taxes.
+
+        Uses the cached QBO TaxCode data to find which tax rates belong
+        to each tax code, then sets children_tax_ids on the corresponding
+        Odoo group taxes. Applies to all group taxes (new and existing).
+        """
+        all_tax_codes = QboTaxImporter._tax_codes_cache
+        if not all_tax_codes:
+            _logger.info("No cached tax codes — skipping group children linking")
             return
 
-        # Batch create taxes
-        taxes = ctx.env["account.tax"].create(tax_vals)
-        _logger.info(f"Created {len(taxes)} taxes")
+        # Build lookup maps: {qbo_tax_rate_id: odoo_tax_id} per type_tax_use
+        ctx.env.cr.execute(
+            "SELECT qbo_tax_rate_id, id, type_tax_use FROM account_tax "
+            "WHERE qbo_tax_rate_id IS NOT NULL"
+        )
+        rate_id_map = {"sale": {}, "purchase": {}}
+        for qbo_rate_id, tax_id, type_tax_use in ctx.env.cr.fetchall():
+            rate_id_map.get(type_tax_use, {})[str(qbo_rate_id)] = tax_id
+
+        linked_count = 0
+        Tax = ctx.env["account.tax"]
+
+        for tc in all_tax_codes:
+            qbo_tax_id = str(tc.get("Id"))
+
+            for tax_use, rate_list_key in [
+                ("sale", "SalesTaxRateList"),
+                ("purchase", "PurchaseTaxRateList"),
+            ]:
+                details = tc.get(rate_list_key, {}).get("TaxRateDetail", [])
+                if not details:
+                    continue
+
+                child_ids = []
+                for detail in details:
+                    rate_ref = str(
+                        detail.get("TaxRateRef", {}).get("value", "")
+                    )
+                    odoo_id = rate_id_map[tax_use].get(rate_ref)
+                    if odoo_id:
+                        child_ids.append(odoo_id)
+
+                if not child_ids:
+                    continue
+
+                group_tax = Tax.search(
+                    [
+                        ("qbo_tax_id", "=", qbo_tax_id),
+                        ("type_tax_use", "=", tax_use),
+                        ("amount_type", "=", "group"),
+                    ],
+                    limit=1,
+                )
+                if group_tax:
+                    group_tax.children_tax_ids = [
+                        (6, 0, child_ids),
+                    ]
+                    linked_count += 1
+
+        _logger.info(
+            f"Linked children for {linked_count} group taxes"
+        )
