@@ -27,7 +27,7 @@ QBO_ACCOUNT_TYPE_MAP = {
     "Other Expense": "expense",
     "Cost of Goods Sold": "expense_direct_cost",
     "Accounts Payable": "liability_payable",
-    "Credit Card": "liability_credit_card",
+    "Credit Card": "asset_cash",  # treated as bank for reconciliation
     "Long Term Liability": "liability_non_current",
     "Other Current Liability": "liability_current",
     "Income": "income",
