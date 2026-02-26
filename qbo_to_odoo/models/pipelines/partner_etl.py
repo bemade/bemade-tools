@@ -200,10 +200,6 @@ class QboCustomerImporter(models.AbstractModel):
         partners = ctx.env["res.partner"].create(partner_vals)
         _logger.info(f"Created {len(partners)} customers")
 
-        # Update last sync timestamp
-        connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
-        if connection:
-            connection.last_customer_sync = ctx.env.cr.now()
 
 
 @ETL.pipeline(
@@ -389,10 +385,6 @@ class QboVendorImporter(models.AbstractModel):
         partners = ctx.env["res.partner"].create(partner_vals)
         _logger.info(f"Created {len(partners)} vendors")
 
-        # Update last sync timestamp
-        connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
-        if connection:
-            connection.last_vendor_sync = ctx.env.cr.now()
 
 
 @ETL.pipeline(

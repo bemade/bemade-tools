@@ -11,6 +11,8 @@ from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext
 
+from .utils import get_api_client
+
 _logger = logging.getLogger(__name__)
 
 
@@ -29,13 +31,11 @@ class QboCategoryImporter(models.AbstractModel):
     @ETL.extract("Category")
     def extract_categories(self, ctx: ETLContext) -> List[Dict]:
         """Extract categories from QBO API."""
-        api_client = ctx.get_config("api_client")
-        if not api_client:
-            raise ValueError("API client not found in ETL context")
+        api_client = get_api_client(ctx)
 
         # Get existing QBO category IDs
         ctx.env.cr.execute(
-            "SELECT qbo_category_id FROM product_category WHERE qbo_category_id IS NOT NULL"
+            "SELECT qbo_category_id FROM product_category"
         )
         existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
         _logger.info(f"Found {len(existing_ids)} existing categories in Odoo")

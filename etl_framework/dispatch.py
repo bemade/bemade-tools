@@ -82,8 +82,10 @@ class ChunkDispatcher:
         chunk: Dict[str, Any],
         source_config: Optional[Dict[str, Any]],
         chunk_index: int,
+        total_chunks: int,
     ) -> ChunkResult:
         """Send a single chunk to the endpoint, with retry on transient errors."""
+        tag = f"[{importer_name}] Chunk {chunk_index + 1}/{total_chunks}"
         url = f"{self.base_url}/etl/process_chunk"
         payload = {
             "importer_name": importer_name,
@@ -100,14 +102,14 @@ class ChunkDispatcher:
                     timeout=self.timeout,
                 )
             except requests.ConnectionError as e:
-                _logger.error("Chunk %d: connection error: %s", chunk_index, e)
+                _logger.error("%s: connection error: %s", tag, e)
                 return ChunkResult(
                     status="error",
                     error_type="ConnectionError",
                     error_message=str(e),
                 )
             except requests.Timeout as e:
-                _logger.error("Chunk %d: request timed out: %s", chunk_index, e)
+                _logger.error("%s: request timed out: %s", tag, e)
                 return ChunkResult(
                     status="error",
                     error_type="Timeout",
@@ -136,8 +138,8 @@ class ChunkDispatcher:
             if error_type in _RETRYABLE_ERROR_TYPES and attempt < _MAX_RETRIES - 1:
                 wait_time = 2**attempt
                 _logger.warning(
-                    "Chunk %d: %s (retrying in %ds, attempt %d/%d)",
-                    chunk_index,
+                    "%s: %s (retrying in %ds, attempt %d/%d)",
+                    tag,
                     error_type,
                     wait_time,
                     attempt + 1,
@@ -186,6 +188,7 @@ class ChunkDispatcher:
             importer_name,
         )
 
+        total = len(chunks)
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             future_to_index = {
                 pool.submit(
@@ -194,28 +197,24 @@ class ChunkDispatcher:
                     chunk,
                     source_config,
                     i,
+                    total,
                 ): i
                 for i, chunk in enumerate(chunks)
             }
 
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
+                tag = f"[{importer_name}] Chunk {idx + 1}/{total}"
                 try:
                     results[idx] = future.result()
                 except Exception as e:
-                    _logger.error("Chunk %d raised unexpected error: %s", idx, e)
+                    _logger.error("%s raised unexpected error: %s", tag, e)
                     results[idx] = ChunkResult(
                         status="error",
                         error_type=type(e).__name__,
                         error_message=str(e),
                     )
-                status = results[idx].status
-                _logger.info(
-                    "Chunk %d/%d completed (%s)",
-                    idx + 1,
-                    len(chunks),
-                    status,
-                )
+                _logger.info("%s completed (%s)", tag, results[idx].status)
 
         return results
 
