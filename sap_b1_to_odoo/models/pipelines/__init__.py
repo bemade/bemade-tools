@@ -16,6 +16,7 @@ from . import purchase_order_etl
 from . import purchase_requisition_etl
 from . import carrier_account_etl
 from . import product_pricelist_etl
+from . import product_supplierinfo_etl
 from . import res_users_etl
 from . import account_payment_term_etl
 from . import account_account_etl
