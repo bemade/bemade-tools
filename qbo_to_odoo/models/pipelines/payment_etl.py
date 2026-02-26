@@ -31,6 +31,8 @@ _logger = logging.getLogger(__name__)
         "qbo.account.importer",
         "qbo.customer.importer",
         "qbo.vendor.importer",
+        "qbo.credit.memo.importer",
+        "qbo.vendor.credit.importer",
     ],
     chunk_size=50,
     multiprocessing_threshold=50,
@@ -111,6 +113,9 @@ class QboPaymentImporter(models.AbstractModel):
         extractor.extra["credit_memo_map"] = extractor.qbo_id_map(
             "account_move", "qbo_credit_memo_id", where="state = 'posted'"
         )
+        extractor.extra["vendor_credit_map"] = extractor.qbo_id_map(
+            "account_move", "qbo_vendor_credit_id", where="state = 'posted'"
+        )
 
         # Pre-fetch receivable/payable accounts for destination_account_id
         extractor.extra["invoice_receivable_map"] = extractor.invoice_receivable_map()
@@ -138,6 +143,7 @@ class QboPaymentImporter(models.AbstractModel):
         invoice_map = builder.get_extra("invoice_map") or {}
         bill_map = builder.get_extra("bill_map") or {}
         credit_memo_map = builder.get_extra("credit_memo_map") or {}
+        vendor_credit_map = builder.get_extra("vendor_credit_map") or {}
         journal_bank_account_map = builder.get_extra("journal_bank_account_map") or {}
 
         payment_data = []
@@ -147,17 +153,24 @@ class QboPaymentImporter(models.AbstractModel):
         for pmt in all_payments:
             pmt_type = pmt["type"]
             pmt_data = pmt["data"]
+            total_amt = float(pmt_data.get("TotalAmt", 0) or 0)
 
-            # Zero-amount customer payments are credit memo applications:
-            # the Lines link CreditMemos to Invoices without any cash movement.
-            if pmt_type == "customer":
-                total_amt = float(pmt_data.get("TotalAmt", 0) or 0)
-                if total_amt <= 0:
+            # Zero-amount payments are credit/debit note applications:
+            # Lines link CreditMemos→Invoices or VendorCredits→Bills
+            # without any cash movement.
+            if total_amt <= 0:
+                if pmt_type == "customer":
                     apps = self._transform_credit_application(
                         pmt_data, invoice_map, credit_memo_map,
                     )
-                    credit_applications.extend(apps)
-                    continue
+                else:
+                    apps = self._transform_vendor_credit_application(
+                        pmt_data, bill_map, vendor_credit_map,
+                    )
+                credit_applications.extend(apps)
+                continue
+
+            if pmt_type == "customer":
                 result = self._transform_customer_payment(
                     pmt_data, builder, invoice_map, journal_bank_account_map,
                 )
@@ -175,7 +188,7 @@ class QboPaymentImporter(models.AbstractModel):
         _logger.info(
             f"Transformed {len(payment_data)} payments, skipped {skipped}, "
             f"{with_links} linked to invoices/bills; "
-            f"{len(credit_applications)} credit memo applications"
+            f"{len(credit_applications)} credit/debit note applications"
         )
         return {
             "payments": payment_data,
@@ -321,6 +334,53 @@ class QboPaymentImporter(models.AbstractModel):
 
         return pairs
 
+    @staticmethod
+    def _transform_vendor_credit_application(
+        bill_payment: Dict,
+        bill_map: Dict,
+        vendor_credit_map: Dict,
+    ) -> List[Dict]:
+        """Transform a zero-amount bill payment (vendor credit application).
+
+        In QBO, applying vendor credits to bills creates a BillPayment with
+        TotalAmt=0.  The Lines link VendorCredits to Bills.  In Odoo we
+        reconcile the vendor credit's AP line against the bill's AP line.
+
+        Returns a list of dicts with ``invoice_move_id`` (the bill) and
+        ``credit_memo_move_id`` (the vendor credit) for each pair.
+        """
+        qbo_id = bill_payment.get("Id")
+        bill_ids = []
+        vendor_credit_ids = []
+
+        for line in bill_payment.get("Line", []):
+            for linked in line.get("LinkedTxn", []):
+                txn_id = str(linked.get("TxnId", ""))
+                txn_type = linked.get("TxnType")
+                if txn_type == "Bill" and txn_id in bill_map:
+                    bill_ids.append(bill_map[txn_id])
+                elif txn_type == "VendorCredit" and txn_id in vendor_credit_map:
+                    vendor_credit_ids.append(vendor_credit_map[txn_id])
+
+        if not bill_ids or not vendor_credit_ids:
+            if bill_ids or vendor_credit_ids:
+                _logger.debug(
+                    f"Vendor credit application QBO-BP#{qbo_id}: only partial "
+                    f"links (bills={len(bill_ids)}, "
+                    f"credits={len(vendor_credit_ids)})"
+                )
+            return []
+
+        pairs = []
+        for bill_id in bill_ids:
+            for vc_id in vendor_credit_ids:
+                pairs.append({
+                    "invoice_move_id": bill_id,
+                    "credit_memo_move_id": vc_id,
+                    "qbo_payment_id": f"BP-{qbo_id}",
+                })
+        return pairs
+
     def _get_bank_journal(
         self, payment: Dict, builder: QBOMoveBuilder
     ) -> Optional[int]:
@@ -362,9 +422,16 @@ class QboPaymentImporter(models.AbstractModel):
                 )
                 return None
 
-        journal_id = builder.get_journal_id_for_account(account_id)
+        # Never fall back to general journal — payments need bank/cash journals
+        # with payment method lines.
+        journal_id = builder.get_journal_id_for_account(
+            account_id, fallback_type=None
+        )
         if not journal_id:
-            _logger.warning(f"No journal found for payment {payment.get('Id')}")
+            _logger.warning(
+                f"No bank/cash journal found for account {account_id} "
+                f"in payment {payment.get('Id')}"
+            )
             return None
 
         return journal_id
@@ -456,6 +523,57 @@ class QboPaymentImporter(models.AbstractModel):
             "is_customer": False,
         }
 
+    @staticmethod
+    def _ensure_payment_method_lines(ctx: ETLContext, payment_data: List[Dict]):
+        """Ensure every target journal has manual inbound/outbound method lines.
+
+        Bank/cash journals normally get these on creation, but journals created
+        by the ETL (or via raw SQL) may be missing them.  Without method lines
+        the ``account.payment`` constraint ``_check_payment_method_line_id``
+        raises a ``ValidationError``.
+        """
+        journal_ids = {
+            pmt["payment_vals"]["journal_id"]
+            for pmt in payment_data
+            if pmt["payment_vals"].get("journal_id")
+        }
+        if not journal_ids:
+            return
+
+        journals = ctx.env["account.journal"].browse(list(journal_ids))
+        manual_in = ctx.env.ref(
+            "account.account_payment_method_manual_in",
+            raise_if_not_found=False,
+        )
+        manual_out = ctx.env.ref(
+            "account.account_payment_method_manual_out",
+            raise_if_not_found=False,
+        )
+        MethodLine = ctx.env["account.payment.method.line"]
+        for journal in journals:
+            if manual_in and not journal.inbound_payment_method_line_ids.filtered(
+                lambda l, m=manual_in: l.payment_method_id == m
+            ):
+                MethodLine.create({
+                    "payment_method_id": manual_in.id,
+                    "journal_id": journal.id,
+                })
+                _logger.info(
+                    f"Added manual inbound payment method to journal "
+                    f"{journal.name} (id={journal.id})"
+                )
+            if manual_out and not journal.outbound_payment_method_line_ids.filtered(
+                lambda l, m=manual_out: l.payment_method_id == m
+            ):
+                MethodLine.create({
+                    "payment_method_id": manual_out.id,
+                    "journal_id": journal.id,
+                })
+                _logger.info(
+                    f"Added manual outbound payment method to journal "
+                    f"{journal.name} (id={journal.id})"
+                )
+
     @ETL.load()
     def load_payments(self, ctx: ETLContext, transformed: Dict) -> None:
         """Create account.payment records and attempt reconciliation."""
@@ -473,6 +591,12 @@ class QboPaymentImporter(models.AbstractModel):
             return
 
         ctx.env.invalidate_all()
+
+        # Phase 0: Ensure all target journals have manual payment method lines.
+        # Journals of type bank/cash/credit normally get these on creation, but
+        # they may be missing if the journal was created outside the normal flow
+        # (e.g. by the ETL account pipeline).
+        self._ensure_payment_method_lines(ctx, payment_data)
 
         # Phase 1: Create all payments (no lock needed)
         # outstanding_account_id is set to the journal's bank account in the
@@ -640,15 +764,16 @@ class QboPaymentImporter(models.AbstractModel):
 
         _logger.info(f"Reconciled {reconciled} payment/invoice pairs")
 
-        # Phase 4: Apply credit memos to invoices.
-        # These come from QBO Payments with TotalAmt=0 where CreditMemos are
-        # linked to Invoices.  We reconcile the credit note's AR credit line
-        # against the invoice's AR debit line.
+        # Phase 4: Apply credit/debit notes to invoices/bills.
+        # These come from zero-amount QBO Payments (CreditMemos → Invoices)
+        # and zero-amount BillPayments (VendorCredits → Bills).
+        # We reconcile the credit note's receivable/payable line against the
+        # invoice/bill's receivable/payable line.
         if not credit_applications:
             return
 
         _logger.info(
-            f"Processing {len(credit_applications)} credit memo applications"
+            f"Processing {len(credit_applications)} credit/debit note applications"
         )
         applied = 0
         for app in credit_applications:
@@ -656,29 +781,35 @@ class QboPaymentImporter(models.AbstractModel):
             inv_id = app["invoice_move_id"]
             cm_id = app["credit_memo_move_id"]
             with ctx.skippable(
-                f"credit apply QBO#{qbo_id}: inv#{inv_id} <-> cm#{cm_id}"
+                f"credit apply QBO#{qbo_id}: move#{inv_id} <-> move#{cm_id}"
             ):
                 invoice = ctx.env["account.move"].browse(inv_id)
                 credit_memo = ctx.env["account.move"].browse(cm_id)
-                inv_ar = invoice.line_ids.filtered(
-                    lambda l: (
-                        l.account_id.account_type == "asset_receivable"
+                # Determine account type from the invoice/bill move type
+                if invoice.move_type in ("out_invoice", "out_refund"):
+                    account_type = "asset_receivable"
+                else:
+                    account_type = "liability_payable"
+                inv_line = invoice.line_ids.filtered(
+                    lambda l, at=account_type: (
+                        l.account_id.account_type == at
                         and not l.reconciled
                     )
                 )
-                cm_ar = credit_memo.line_ids.filtered(
-                    lambda l: (
-                        l.account_id.account_type == "asset_receivable"
+                cm_line = credit_memo.line_ids.filtered(
+                    lambda l, at=account_type: (
+                        l.account_id.account_type == at
                         and not l.reconciled
                     )
                 )
-                if not inv_ar or not cm_ar:
+                if not inv_line or not cm_line:
                     _logger.debug(
-                        f"Credit apply QBO#{qbo_id}: no unreconciled AR lines "
-                        f"(inv={len(inv_ar)}, cm={len(cm_ar)})"
+                        f"Credit apply QBO#{qbo_id}: no unreconciled "
+                        f"{account_type} lines "
+                        f"(inv={len(inv_line)}, cm={len(cm_line)})"
                     )
                     continue
-                (inv_ar + cm_ar).reconcile()
+                (inv_line + cm_line).reconcile()
                 applied += 1
 
-        _logger.info(f"Applied {applied} credit memo applications")
+        _logger.info(f"Applied {applied} credit/debit note applications")
