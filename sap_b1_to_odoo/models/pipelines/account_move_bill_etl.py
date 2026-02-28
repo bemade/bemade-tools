@@ -9,6 +9,7 @@ from typing import Dict, List
 
 from odoo import models
 from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework.utils import post_lock
 
 _logger = logging.getLogger(__name__)
 
@@ -174,7 +175,14 @@ class AccountMoveBillETLImporter(models.AbstractModel):
 
         bills = ctx.env["account.move"].create(bill_vals)
         ctx.env.flush_all()
-        bills.action_post()
+        # Post grouped by journal under advisory lock to prevent deadlocks
+        by_journal = {}
+        for move in bills:
+            by_journal.setdefault(move.journal_id.id, self.env["account.move"])
+            by_journal[move.journal_id.id] |= move
+        for journal_id, journal_moves in sorted(by_journal.items()):
+            with post_lock(ctx.env.cr, journal_id):
+                journal_moves.action_post()
 
     def _get_order_line_link_config(self):
         """Return configuration for linking bill lines to purchase order lines."""
