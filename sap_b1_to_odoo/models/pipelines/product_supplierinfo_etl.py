@@ -69,6 +69,16 @@ class ProductSupplierinfoImporter(models.AbstractModel):
         currencies = ctx.env["res.currency"].search([])
         currency_map = {c.name: c.id for c in currencies}
 
+        # Build existing supplierinfo lookup keyed by (product_tmpl_id, partner_id)
+        # so the load phase can update instead of duplicating.
+        existing_si = ctx.env["product.supplierinfo"].search(
+            [("company_id", "=", ctx.env.company.id)]
+        )
+        existing_map = {}
+        for si in existing_si:
+            key = (si.product_tmpl_id.id, si.partner_id.id)
+            existing_map[key] = si.id
+
         return ChunkableData(
             records=rows,
             context={
@@ -77,17 +87,20 @@ class ProductSupplierinfoImporter(models.AbstractModel):
                 "currency_map": currency_map,
                 "company_id": ctx.env.company.id,
                 "company_currency_id": ctx.env.company.currency_id.id,
+                "existing_map": existing_map,
             },
         )
 
     @ETL.transform()
     def transform_supplierinfo(
         self, ctx: ETLContext, extracted: Dict
-    ) -> List[Dict]:
+    ) -> Dict:
         """Transform ITM2 rows into product.supplierinfo values.
 
         Uses OITM.lastpurprc as the vendor price. Rows without a price
         are skipped (subclasses may override to provide a fallback).
+
+        Returns a dict with 'to_create', 'to_update', and 'existing_map'.
         """
         data = extracted["extract_supplierinfo"]
         rows = data.records
@@ -97,8 +110,10 @@ class ProductSupplierinfoImporter(models.AbstractModel):
         currency_map = cache["currency_map"]
         company_id = cache["company_id"]
         company_currency_id = cache["company_currency_id"]
+        existing_map = cache["existing_map"]
 
-        supplierinfo_vals = []
+        to_create = []
+        to_update = {}  # existing record id -> vals to write
         skipped_no_product = 0
         skipped_no_partner = 0
         skipped_no_price = 0
@@ -126,23 +141,32 @@ class ProductSupplierinfoImporter(models.AbstractModel):
             if not currency_id:
                 currency_id = company_currency_id
 
-            supplierinfo_vals.append(
-                {
-                    "partner_id": partner_id,
-                    "product_tmpl_id": product_tmpl_id,
-                    "price": price,
-                    "currency_id": currency_id,
-                    "company_id": company_id,
-                }
-            )
+            vals = {
+                "partner_id": partner_id,
+                "product_tmpl_id": product_tmpl_id,
+                "price": price,
+                "currency_id": currency_id,
+                "company_id": company_id,
+            }
+
+            key = (product_tmpl_id, partner_id)
+            existing_id = existing_map.get(key)
+            if existing_id:
+                to_update[existing_id] = vals
+            else:
+                # Only create once per unique key within this batch
+                if key not in existing_map:
+                    existing_map[key] = True  # mark as seen
+                    to_create.append(vals)
 
         _logger.info(
-            f"Transformed {len(supplierinfo_vals)} supplierinfo records "
+            f"Transformed supplierinfo: {len(to_create)} to create, "
+            f"{len(to_update)} to update "
             f"(skipped: {skipped_no_product} no product, "
             f"{skipped_no_partner} no partner, "
             f"{skipped_no_price} no price)."
         )
-        return supplierinfo_vals
+        return {"to_create": to_create, "to_update": to_update}
 
     def _get_vendor_price(self, row: Dict) -> float:
         """Return the vendor price for a given ITM2+OITM row.
@@ -160,11 +184,23 @@ class ProductSupplierinfoImporter(models.AbstractModel):
 
     @ETL.load()
     def load_supplierinfo(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Load supplier info records into Odoo."""
-        vals_list = transformed["transform_supplierinfo"]
+        """Load supplier info records into Odoo (upsert).
 
-        if vals_list:
-            ctx.env["product.supplierinfo"].create(vals_list)
-            _logger.info(f"Created {len(vals_list)} product.supplierinfo records.")
-        else:
-            _logger.info("No supplier info records to create.")
+        Creates new records and updates existing ones where the
+        (product_tmpl_id, partner_id) key already exists.
+        """
+        result = transformed["transform_supplierinfo"]
+        to_create = result["to_create"]
+        to_update = result["to_update"]
+
+        if to_create:
+            ctx.env["product.supplierinfo"].create(to_create)
+
+        SupplierInfo = ctx.env["product.supplierinfo"]
+        for rec_id, vals in to_update.items():
+            SupplierInfo.browse(rec_id).write(vals)
+
+        _logger.info(
+            f"Supplier info: created {len(to_create)}, "
+            f"updated {len(to_update)} records."
+        )
