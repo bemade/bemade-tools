@@ -87,7 +87,11 @@ class AccountInternalReconciliation(models.AbstractModel):
             f"{len(new_itr)} new ITR entries to process"
         )
 
-        all_itr = new_itr
+        # Sort by type + doc so all entries for the same document are
+        # contiguous.  Because chunks are sequential slices, this ensures a
+        # given move_id lands in a single chunk and avoids serialization
+        # conflicts when parallel workers try to reconcile the same line.
+        all_itr = sorted(new_itr, key=lambda e: (e["itr_type"], e["doc_id"]))
 
         # Pre-load all invoices and bills - build ID maps
         invoice_docentries = [
