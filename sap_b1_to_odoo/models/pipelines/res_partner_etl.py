@@ -6,7 +6,7 @@ from odoo import api, models
 from odoo.tools import email_normalize
 from odoo.tools.sql import SQL
 
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 
 _logger = logging.getLogger(__name__)
@@ -96,20 +96,18 @@ class ResPartnerCompanyImporter(models.AbstractModel):
     _name = "res.partner.company.importer"
     _description = "SAP Partner Companies Importer (OCRD)"
 
-    # Class-level cache for lookup dictionaries (shared across instances)
-    _lookup_cache = {}
-
     @ETL.extract("ocrd")
-    def extract_companies(self, ctx: ETLContext) -> List[Dict]:
+    def extract_companies(self, ctx: ETLContext) -> ChunkableData:
         """Extract business partner companies from SAP OCRD table.
 
-        Also pre-computes lookup dictionaries for use in transform phase.
+        Also pre-computes lookup dictionaries passed to the transform phase
+        via ChunkableData.context.
 
         Args:
             ctx: ETL context with SAP cursor and Odoo environment.
 
         Returns:
-            List of company dictionaries from SAP.
+            ChunkableData with company dictionaries and lookup context.
         """
         # Get existing partners to avoid duplicates
         ctx.env.cr.execute(
@@ -128,8 +126,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         sap_partners = ctx.cr.dictfetchall()
         _logger.info(f"Extracted {len(sap_partners)} companies from SAP OCRD.")
 
-        # Pre-compute lookup dictionaries in main process (before multiprocessing)
-        # Store in class-level cache so they're available to worker processes
+        # Pre-compute lookup dictionaries for use in the transform phase
         # IMPORTANT: Store IDs only, not recordsets (recordsets can't be pickled)
         _logger.info("Pre-computing lookup dictionaries for transform phase...")
 
@@ -182,7 +179,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
                 exc_info=True,
             )
 
-        ResPartnerCompanyImporter._lookup_cache = {
+        cache = {
             "countries_dict": countries_dict,
             "states_dict": states_dict,
             "users_dict": users_dict,
@@ -194,7 +191,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         }
         _logger.info("Lookup dictionaries ready.")
 
-        return sap_partners
+        return ChunkableData(records=sap_partners, context=cache)
 
     @ETL.transform()
     def transform_companies(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -209,12 +206,9 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         Returns:
             List of partner value dictionaries ready for creation.
         """
-        sap_partners = extracted["extract_companies"]
-
-        # Use pre-computed lookup dictionaries from class cache (no database queries in workers)
-        cache = ResPartnerCompanyImporter._lookup_cache
-        if not cache:
-            raise RuntimeError("Cache is empty in transform! This should never happen.")
+        data = extracted["extract_companies"]
+        sap_partners = data.records
+        cache = data.context
 
         countries_dict = cache["countries_dict"]
         states_dict = cache["states_dict"]
@@ -333,20 +327,18 @@ class ResPartnerAddressImporter(models.AbstractModel):
     _name = "res.partner.address.importer"
     _description = "SAP Partner Addresses Importer (CRD1)"
 
-    # Class-level cache for lookup dictionaries (shared across instances)
-    _lookup_cache = {}
-
     @ETL.extract("crd1")
-    def extract_addresses(self, ctx: ETLContext) -> List[Dict]:
+    def extract_addresses(self, ctx: ETLContext) -> ChunkableData:
         """Extract partner addresses from SAP CRD1 table.
 
-        Also pre-computes lookup dictionaries for use in transform phase.
+        Also pre-computes lookup dictionaries passed to the transform phase
+        via ChunkableData.context.
 
         Args:
             ctx: ETL context with SAP cursor and Odoo environment.
 
         Returns:
-            List of address dictionaries from SAP.
+            ChunkableData with address dictionaries and lookup context.
         """
         # Get existing addresses to avoid duplicates
         # Addresses are uniquely identified by parent cardcode + linenum
@@ -376,16 +368,15 @@ class ResPartnerAddressImporter(models.AbstractModel):
             f"Extracted {len(sap_addresses)} new addresses from SAP CRD1 (filtered from {len(all_addresses)} total)."
         )
 
-        # Pre-compute lookup dictionaries in main process (before multiprocessing)
-        # Store in class-level cache so they're available to worker processes
+        # Pre-compute lookup dictionaries for use in the transform phase
         _logger.info("Pre-computing lookup dictionaries for transform phase...")
-        ResPartnerAddressImporter._lookup_cache = {
+        cache = {
             "countries_dict": get_countries_dict(ctx.env),
             "states_dict": get_states_dict(ctx.env),
         }
         _logger.info("Lookup dictionaries ready.")
 
-        return sap_addresses
+        return ChunkableData(records=sap_addresses, context=cache)
 
     @ETL.transform()
     def transform_addresses(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -400,19 +391,9 @@ class ResPartnerAddressImporter(models.AbstractModel):
         Returns:
             List of partner value dictionaries ready for creation.
         """
-        sap_addresses = extracted["extract_addresses"]
-
-        # Use pre-computed lookup dictionaries from class cache (no database queries in workers)
-        cache = ResPartnerAddressImporter._lookup_cache
-        if not cache:
-            _logger.error(
-                "Cache is empty in transform! This will cause database queries in workers."
-            )
-            # Fallback to querying (will cause contention but better than crashing)
-            cache = {
-                "countries_dict": get_countries_dict(ctx.env),
-                "states_dict": get_states_dict(ctx.env),
-            }
+        data = extracted["extract_addresses"]
+        sap_addresses = data.records
+        cache = data.context
 
         countries_dict = cache["countries_dict"]
         states_dict = cache["states_dict"]

@@ -4,7 +4,7 @@ from typing import Dict, List
 from odoo import models
 from odoo.sql_db import SQL
 
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 
 _logger = logging.getLogger(__name__)
@@ -23,11 +23,8 @@ class ProductImporter(models.AbstractModel):
     _name = "product.product.importer"
     _description = "SAP Product Importer (OITM)"
 
-    # Class-level cache for lookup dictionaries
-    _lookup_cache = {}
-
     @ETL.extract("oitm")
-    def extract_products(self, ctx: ETLContext) -> List[Dict]:
+    def extract_products(self, ctx: ETLContext) -> ChunkableData:
         """Extract products from SAP OITM table.
 
         Also pre-computes category mapping for use in transform phase.
@@ -77,12 +74,13 @@ class ProductImporter(models.AbstractModel):
         # Get company ID
         company_id = ctx.env.company.id
 
-        ProductImporter._lookup_cache = {
-            "categories_map": categories_map,
-            "company_id": company_id,
-        }
-
-        return sap_products
+        return ChunkableData(
+            records=sap_products,
+            context={
+                "categories_map": categories_map,
+                "company_id": company_id,
+            },
+        )
 
     @ETL.transform()
     def transform_products(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -97,12 +95,9 @@ class ProductImporter(models.AbstractModel):
         Returns:
             List of product value dictionaries ready for creation.
         """
-        sap_products = extracted["extract_products"]
-
-        # Use pre-computed lookups from class cache
-        cache = ProductImporter._lookup_cache
-        if not cache:
-            raise RuntimeError("Cache is empty in transform! This should never happen.")
+        data = extracted["extract_products"]
+        sap_products = data.records
+        cache = data.context
 
         categories_map = cache["categories_map"]
         company_id = cache["company_id"]
