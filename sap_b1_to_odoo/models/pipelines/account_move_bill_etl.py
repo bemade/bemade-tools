@@ -67,6 +67,9 @@ class AccountMoveBillETLImporter(models.AbstractModel):
         for bill in bills:
             bill["_lines"] = lines_by_doc.get(bill["docentry"], [])
 
+        # Sort by partner so chunks span fewer partners, reducing conflicts
+        bills.sort(key=lambda b: b.get("cardcode", ""))
+
         _logger.info(
             f"Extracted {len(bills)} vendor bills with {len(lines)} lines from SAP"
         )

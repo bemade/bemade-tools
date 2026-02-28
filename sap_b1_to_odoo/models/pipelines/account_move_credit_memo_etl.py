@@ -103,6 +103,9 @@ class AccountMoveCreditMemoETLImporter(models.AbstractModel):
         for doc in docs:
             doc["_lines"] = lines_by_doc.get(doc["docentry"], [])
 
+        # Sort by partner so chunks span fewer partners, reducing conflicts
+        docs.sort(key=lambda d: d.get("cardcode", ""))
+
         _logger.info(f"Extracted {len(docs)} A/R credit memos from SAP ORIN")
         return {"headers": docs}
 
@@ -283,6 +286,9 @@ class AccountMoveVendorCreditMemoETLImporter(models.AbstractModel):
             lines_by_doc.setdefault(line["docentry"], []).append(line)
         for doc in docs:
             doc["_lines"] = lines_by_doc.get(doc["docentry"], [])
+
+        # Sort by partner so chunks span fewer partners, reducing conflicts
+        docs.sort(key=lambda d: d.get("cardcode", ""))
 
         _logger.info(f"Extracted {len(docs)} A/P credit memos from SAP ORPC")
         return {"headers": docs}
