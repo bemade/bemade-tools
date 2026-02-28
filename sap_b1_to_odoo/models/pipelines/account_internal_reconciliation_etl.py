@@ -1,7 +1,8 @@
 import logging
 
 from odoo import api, models
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
+from odoo.addons.etl_framework.utils import post_lock
 
 _logger = logging.getLogger(__name__)
 
@@ -20,9 +21,6 @@ _logger = logging.getLogger(__name__)
 class AccountInternalReconciliation(models.AbstractModel):
     _name = "account.internal.reconciliation"
     _description = "SAP Internal Reconciliation - Apply ITR entries to Invoices/Bills"
-
-    # Class-level cache for multiprocessing (only primitive types!)
-    _lookup_cache = {}
 
     @ETL.extract("itr1")
     def extract_internal_reconciliations(self, ctx: ETLContext):
@@ -150,16 +148,16 @@ class AccountInternalReconciliation(models.AbstractModel):
             )
             return []
 
-        # Store in class-level cache for workers
-        AccountInternalReconciliation._lookup_cache = {
-            "invoices_map": invoices_map,
-            "bills_map": bills_map,
-            "journal_id": payment_journal.id,
-            "receivable_account_id": receivable_account.id,
-            "payable_account_id": payable_account.id,
-        }
-
-        return all_itr
+        return ChunkableData(
+            records=all_itr,
+            context={
+                "invoices_map": invoices_map,
+                "bills_map": bills_map,
+                "journal_id": payment_journal.id,
+                "receivable_account_id": receivable_account.id,
+                "payable_account_id": payable_account.id,
+            },
+        )
 
     @ETL.transform()
     def transform_internal_reconciliations(self, ctx: ETLContext, extracted):
@@ -168,9 +166,9 @@ class AccountInternalReconciliation(models.AbstractModel):
         Aggregates multiple ITR entries per document to avoid parallel workers
         trying to reconcile the same document simultaneously.
         """
-        entries = extracted.get("extract_internal_reconciliations", [])
-
-        cache = AccountInternalReconciliation._lookup_cache
+        data = extracted.get("extract_internal_reconciliations")
+        entries = data.records if data else []
+        cache = data.context if data else {}
         invoices_map = cache.get("invoices_map", {})
         bills_map = cache.get("bills_map", {})
 
@@ -215,23 +213,27 @@ class AccountInternalReconciliation(models.AbstractModel):
             f"[InternalReconciliation] Prepared {len(reconciliation_data)} "
             f"internal reconciliations (aggregated from {len(entries)} entries)"
         )
-        return reconciliation_data
+        return {
+            "data": reconciliation_data,
+            "journal_id": cache.get("journal_id"),
+            "receivable_account_id": cache.get("receivable_account_id"),
+            "payable_account_id": cache.get("payable_account_id"),
+        }
 
     @ETL.load()
     def load_internal_reconciliations(self, ctx: ETLContext, transformed):
         """Create journal entries to reconcile internal reconciliation entries."""
-        reconciliation_data = transformed.get("transform_internal_reconciliations", [])
+        result = transformed.get("transform_internal_reconciliations", {})
+        reconciliation_data = result.get("data", [])
+        journal_id = result.get("journal_id")
+        receivable_account_id = result.get("receivable_account_id")
+        payable_account_id = result.get("payable_account_id")
 
         if not reconciliation_data:
             _logger.info(
                 "[InternalReconciliation] No internal reconciliations in chunk"
             )
             return
-
-        cache = AccountInternalReconciliation._lookup_cache
-        journal_id = cache.get("journal_id")
-        receivable_account_id = cache.get("receivable_account_id")
-        payable_account_id = cache.get("payable_account_id")
 
         if not journal_id or not receivable_account_id or not payable_account_id:
             _logger.warning(
@@ -332,11 +334,17 @@ class AccountInternalReconciliation(models.AbstractModel):
         )
         recon_moves = ctx.env["account.move"].create(recon_vals_list)
 
-        # Phase 3: Batch post all journal entries
-        _logger.info(
-            f"[InternalReconciliation] Batch posting {len(recon_moves)} journal entries"
-        )
-        recon_moves.action_post()
+        # Phase 3: Post grouped by journal under advisory lock to prevent deadlocks
+        by_journal = {}
+        for move in recon_moves:
+            by_journal.setdefault(move.journal_id.id, self.env["account.move"])
+            by_journal[move.journal_id.id] |= move
+        for journal_id, journal_moves in sorted(by_journal.items()):
+            _logger.info(
+                f"[InternalReconciliation] Posting {len(journal_moves)} entries for journal {journal_id}"
+            )
+            with post_lock(ctx.env.cr, journal_id):
+                journal_moves.action_post()
 
         # Phase 4: Reconcile each pair (can't be batched)
         reconciled_count = 0
