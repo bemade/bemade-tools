@@ -66,8 +66,20 @@ class ProductPricelistItemImporter(models.AbstractModel):
             product.sap_item_code: product.product_tmpl_id.id for product in products
         }
 
-        # Get partners
-        cardcodes = [blanket["bpcode"] for blanket in blanket_orders]
+        # Extract customer default pricelist assignments (OCRD.listnum)
+        ctx.cr.execute(
+            "SELECT cardcode, listnum FROM ocrd WHERE cardtype = 'C' AND listnum IS NOT NULL"
+        )
+        customer_listnum_map = {row[0]: row[1] for row in ctx.cr.fetchall()}
+        _logger.info(
+            f"Extracted {len(customer_listnum_map)} customer pricelist assignments from OCRD."
+        )
+
+        # Get partners (blanket agreement partners + all customers with pricelist)
+        cardcodes = list(
+            set([blanket["bpcode"] for blanket in blanket_orders])
+            | set(customer_listnum_map.keys())
+        )
         partners = ctx.env["res.partner"].search(
             [("sap_card_code", "in", cardcodes), ("active", "in", [True, False])]
         )
@@ -108,6 +120,7 @@ class ProductPricelistItemImporter(models.AbstractModel):
             "partner_pricelist_map": partner_pricelist_map,
             "currencies_map": currencies_map,
             "agreement_partners_dict": agreement_partners_dict,
+            "customer_listnum_map": customer_listnum_map,
             "company_id": ctx.env.company.id,
         }
 
@@ -238,6 +251,8 @@ class ProductPricelistItemImporter(models.AbstractModel):
             "base_pricelist_vals": base_pricelist_vals,
             "derived_pricelist_vals": derived_pricelist_vals,
             "customer_pricelist_vals": customer_pricelist_vals,
+            "customer_listnum_map": data["customer_listnum_map"],
+            "partners_map": data["partners_map"],
         }
 
     @ETL.load()
@@ -383,6 +398,26 @@ class ProductPricelistItemImporter(models.AbstractModel):
             _logger.info(
                 f"Loaded customer pricelists "
                 f"({cust_created} created, {cust_updated} updated)."
+            )
+
+        # 4. Set customer default pricelists from OCRD.listnum
+        customer_listnum_map = data["customer_listnum_map"]
+        partners_map = data["partners_map"]
+        if customer_listnum_map:
+            Partner = ctx.env["res.partner"]
+            updated_count = 0
+            skipped_count = 0
+            for cardcode, listnum in customer_listnum_map.items():
+                partner_id = partners_map.get(cardcode)
+                pricelist_id = listnum_to_id.get(listnum)
+                if not partner_id or not pricelist_id:
+                    skipped_count += 1
+                    continue
+                Partner.browse(partner_id).property_product_pricelist = pricelist_id
+                updated_count += 1
+            _logger.info(
+                f"Set default pricelists for {updated_count} customers "
+                f"({skipped_count} skipped — missing partner or pricelist)."
             )
 
         # Set USD pricelist for USD partners
