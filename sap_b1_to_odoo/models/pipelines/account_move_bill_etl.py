@@ -32,13 +32,13 @@ class AccountMoveBillETLImporter(models.AbstractModel):
 
     @ETL.extract("opch")
     def extract_bills(self, ctx: ETLContext):
-        """Extract vendor bills from SAP OPCH table."""
+        """Extract vendor bills and their lines from SAP OPCH/PCH1 tables."""
         # Get existing bills (idempotence) - include both invoices and refunds
         ctx.env.cr.execute(
             """
-            SELECT DISTINCT sap_docnum 
-            FROM account_move 
-            WHERE sap_docnum IS NOT NULL 
+            SELECT DISTINCT sap_docnum
+            FROM account_move
+            WHERE sap_docnum IS NOT NULL
             AND sap_table = 'opch'
             AND move_type IN ('in_invoice', 'in_refund')
             """
@@ -54,30 +54,23 @@ class AccountMoveBillETLImporter(models.AbstractModel):
             ctx.cr.execute(sql)
 
         bills = ctx.cr.dictfetchall()
-        _logger.info(f"Extracted {len(bills)} vendor bills from SAP OPCH")
-        return {"headers": bills}  # Use "headers" key for chunking
 
-    @ETL.extract("pch1")
-    def extract_bill_lines(self, ctx: ETLContext):
-        """Extract vendor bill lines from SAP PCH1 table with account formatcode."""
-        ctx.cr.execute(
-            """
-            SELECT 
-                p.*,
-                a.formatcode as acct_formatcode
-            FROM pch1 p
-            LEFT JOIN oact a ON p.acctcode = a.acctcode
-        """
-        )
-        lines = ctx.cr.dictfetchall()
+        if not bills:
+            _logger.info("No new vendor bills to extract from SAP OPCH")
+            return {"headers": []}
 
-        # Group lines by bill for easier access
-        lines_dict = {}
+        # Embed lines into each header so chunking keeps data together
+        lines = self._get_lines(ctx.cr, "pch1", bills)
+        lines_by_doc = {}
         for line in lines:
-            lines_dict.setdefault(line["docentry"], []).append(line)
+            lines_by_doc.setdefault(line["docentry"], []).append(line)
+        for bill in bills:
+            bill["_lines"] = lines_by_doc.get(bill["docentry"], [])
 
-        _logger.info(f"Extracted {len(lines)} bill lines from SAP PCH1")
-        return {"lines": lines_dict}
+        _logger.info(
+            f"Extracted {len(bills)} vendor bills with {len(lines)} lines from SAP"
+        )
+        return {"headers": bills}
 
     @ETL.extract("por1")
     def extract_metadata(self, ctx: ETLContext):
@@ -106,11 +99,11 @@ class AccountMoveBillETLImporter(models.AbstractModel):
         bills_data = extracted["extract_bills"]
         bills = bills_data.get("headers", [])
 
-        lines_data = extracted["extract_bill_lines"]
-        lines = lines_data.get("lines", {})
-
         if not bills:
             return {"move_vals": [], "lookups": {}}
+
+        # Rebuild lines dict from embedded _lines for _get_move_vals
+        lines = {bill["docentry"]: bill.pop("_lines", []) for bill in bills}
 
         # Get partner and order line lookups from metadata
         metadata = extracted["extract_metadata"]
@@ -173,16 +166,27 @@ class AccountMoveBillETLImporter(models.AbstractModel):
         # Batch-create any pending currency rates before creating moves
         self._create_pending_currency_rates(lookups)
 
-        bills = ctx.env["account.move"].create(bill_vals)
-        ctx.env.flush_all()
-        # Post grouped by journal under advisory lock to prevent deadlocks
+        # Create moves one-at-a-time so a single bad record doesn't kill the chunk
+        bills = ctx.env["account.move"]
+        for vals in bill_vals:
+            ref = f"bill SAP#{vals.get('sap_docnum', '?')}"
+            with ctx.skippable(ref):
+                move = ctx.env["account.move"].create(vals)
+                bills |= move
+
+        if not bills:
+            return
+
+        # Post one-at-a-time grouped by journal under advisory lock
         by_journal = {}
         for move in bills:
             by_journal.setdefault(move.journal_id.id, self.env["account.move"])
             by_journal[move.journal_id.id] |= move
         for journal_id, journal_moves in sorted(by_journal.items()):
             with post_lock(ctx.env.cr, journal_id):
-                journal_moves.action_post()
+                for move in journal_moves:
+                    with ctx.skippable(f"post bill SAP#{move.sap_docnum or '?'}"):
+                        move.action_post()
 
     def _get_order_line_link_config(self):
         """Return configuration for linking bill lines to purchase order lines."""
