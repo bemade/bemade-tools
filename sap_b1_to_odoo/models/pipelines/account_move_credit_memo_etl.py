@@ -93,15 +93,18 @@ class AccountMoveCreditMemoETLImporter(models.AbstractModel):
         docs = ctx.cr.dictfetchall()
 
         if not docs:
-            return {"headers": [], "lines": {}}
+            return {"headers": []}
 
+        # Embed lines into each header so chunking keeps data together
         lines = self._get_lines(ctx.cr, "rin1", docs)
-        lines_dict = {}
+        lines_by_doc = {}
         for line in lines:
-            lines_dict.setdefault(line["docentry"], []).append(line)
+            lines_by_doc.setdefault(line["docentry"], []).append(line)
+        for doc in docs:
+            doc["_lines"] = lines_by_doc.get(doc["docentry"], [])
 
         _logger.info(f"Extracted {len(docs)} A/R credit memos from SAP ORIN")
-        return {"headers": docs, "lines": lines_dict}
+        return {"headers": docs}
 
     @ETL.extract("metadata")
     def extract_metadata(self, ctx: ETLContext):
@@ -126,10 +129,12 @@ class AccountMoveCreditMemoETLImporter(models.AbstractModel):
         """Transform SAP credit memo headers/lines into account.move create vals."""
         data = extracted["extract_credit_memos"]
         headers = data.get("headers", [])
-        lines_dict = data.get("lines", {})
 
         if not headers:
             return {"move_vals": [], "lookups": {}}
+
+        # Rebuild lines dict from embedded _lines for _get_move_vals
+        lines_dict = {doc["docentry"]: doc.pop("_lines", []) for doc in headers}
 
         metadata = extracted["extract_metadata"]
         partners_id_dict = metadata["partners"]
@@ -176,19 +181,26 @@ class AccountMoveCreditMemoETLImporter(models.AbstractModel):
 
         self._create_pending_currency_rates(lookups)
 
-        moves = ctx.env["account.move"].create(move_vals)
-        ctx.env.flush_all()
-        # Post grouped by journal under advisory lock to prevent deadlocks
+        # Create moves one-at-a-time so a single bad record doesn't kill the chunk
+        moves = ctx.env["account.move"]
+        for vals in move_vals:
+            ref = f"A/R credit memo SAP#{vals.get('sap_docnum', '?')}"
+            with ctx.skippable(ref):
+                moves |= ctx.env["account.move"].create(vals)
+
+        if not moves:
+            return
+
+        # Post one-at-a-time grouped by journal under advisory lock
         by_journal = {}
         for move in moves:
             by_journal.setdefault(move.journal_id.id, self.env["account.move"])
             by_journal[move.journal_id.id] |= move
-        posted = 0
         for journal_id, journal_moves in sorted(by_journal.items()):
             with post_lock(ctx.env.cr, journal_id):
-                journal_moves.action_post()
-                posted += len(journal_moves)
-        _logger.info(f"Created and posted {posted} A/R credit memos")
+                for move in journal_moves:
+                    with ctx.skippable(f"post A/R credit memo SAP#{move.sap_docnum or '?'}"):
+                        move.action_post()
 
 
 # =============================================================================
@@ -262,16 +274,18 @@ class AccountMoveVendorCreditMemoETLImporter(models.AbstractModel):
         docs = ctx.cr.dictfetchall()
 
         if not docs:
-            return {"headers": [], "lines": {}}
+            return {"headers": []}
 
-        # For vendor credit memos, join with OACT to get account formatcode
+        # Embed lines into each header so chunking keeps data together
         lines = self._get_lines_with_accounts(ctx.cr, "rpc1", docs)
-        lines_dict = {}
+        lines_by_doc = {}
         for line in lines:
-            lines_dict.setdefault(line["docentry"], []).append(line)
+            lines_by_doc.setdefault(line["docentry"], []).append(line)
+        for doc in docs:
+            doc["_lines"] = lines_by_doc.get(doc["docentry"], [])
 
         _logger.info(f"Extracted {len(docs)} A/P credit memos from SAP ORPC")
-        return {"headers": docs, "lines": lines_dict}
+        return {"headers": docs}
 
     def _get_lines_with_accounts(self, cr, line_table, docs):
         """Get lines with account formatcode for vendor credit memos."""
@@ -308,10 +322,12 @@ class AccountMoveVendorCreditMemoETLImporter(models.AbstractModel):
         """Transform SAP vendor credit memo headers/lines into account.move create vals."""
         data = extracted["extract_vendor_credit_memos"]
         headers = data.get("headers", [])
-        lines_dict = data.get("lines", {})
 
         if not headers:
             return {"move_vals": [], "lookups": {}}
+
+        # Rebuild lines dict from embedded _lines for _get_move_vals
+        lines_dict = {doc["docentry"]: doc.pop("_lines", []) for doc in headers}
 
         metadata = extracted["extract_metadata"]
         partners_id_dict = metadata["partners"]
@@ -358,16 +374,23 @@ class AccountMoveVendorCreditMemoETLImporter(models.AbstractModel):
 
         self._create_pending_currency_rates(lookups)
 
-        moves = ctx.env["account.move"].create(move_vals)
-        ctx.env.flush_all()
-        # Post grouped by journal under advisory lock to prevent deadlocks
+        # Create moves one-at-a-time so a single bad record doesn't kill the chunk
+        moves = ctx.env["account.move"]
+        for vals in move_vals:
+            ref = f"A/P credit memo SAP#{vals.get('sap_docnum', '?')}"
+            with ctx.skippable(ref):
+                moves |= ctx.env["account.move"].create(vals)
+
+        if not moves:
+            return
+
+        # Post one-at-a-time grouped by journal under advisory lock
         by_journal = {}
         for move in moves:
             by_journal.setdefault(move.journal_id.id, self.env["account.move"])
             by_journal[move.journal_id.id] |= move
-        posted = 0
         for journal_id, journal_moves in sorted(by_journal.items()):
             with post_lock(ctx.env.cr, journal_id):
-                journal_moves.action_post()
-                posted += len(journal_moves)
-        _logger.info(f"Created and posted {posted} A/P credit memos")
+                for move in journal_moves:
+                    with ctx.skippable(f"post A/P credit memo SAP#{move.sap_docnum or '?'}"):
+                        move.action_post()
