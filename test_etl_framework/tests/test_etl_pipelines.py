@@ -42,13 +42,16 @@ class TestMultiprocessingConfig(TransactionCase):
         self.assertFalse(config.should_use_multiprocessing(10000))
 
     def test_get_workers_default(self):
-        """Test default worker count is CPU count - 1."""
-        import os
+        """Test default worker count uses Odoo workers config or falls back to 3."""
+        from odoo.tools import config as odoo_config
 
-        config = MultiprocessingConfig()
-        cpu_count = os.cpu_count() or 1
-        expected = max(1, cpu_count - 2)
-        self.assertEqual(config.get_workers(), expected)
+        mp_config = MultiprocessingConfig()
+        odoo_workers = int(odoo_config.get("workers", 0) or 0)
+        if odoo_workers > 1:
+            expected = odoo_workers - 1
+        else:
+            expected = 3
+        self.assertEqual(mp_config.get_workers(), expected)
 
     def test_get_workers_explicit(self):
         """Test explicit worker count is respected."""
