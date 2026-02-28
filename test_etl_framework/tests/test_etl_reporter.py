@@ -273,6 +273,7 @@ class TestExecutorReporting(TransactionCase):
             # Pipeline should NOT have raised despite the failure
             self.assertEqual(line.state, "done")
 
+    @mute_logger("odoo.addons.test_etl_framework.models.test_importers")
     def test_logged_warnings_and_errors_auto_captured(self):
         """_logger.warning() and _logger.error() in pipelines are auto-captured."""
         with patch.object(self.env.cr, "commit", lambda: None):
