@@ -14,7 +14,7 @@ from typing import Dict, List, Any
 from odoo import api, models, Command
 from odoo.tools.sql import SQL
 
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
 from odoo.addons.sap_b1_to_odoo.tools import fix_tz
 
 _logger = logging.getLogger(__name__)
@@ -41,8 +41,6 @@ class SaleQuotationHeaderImporter(models.AbstractModel):
     _name = "sale.quotation.header.importer"
     _description = "SAP Sales Quotation Header Importer (OQUT)"
     _inherit = "sale.purchase.order.etl.mixin"
-
-    _lookup_cache = {}
 
     @ETL.extract("oqut")
     def extract_headers(self, ctx: ETLContext) -> List[Dict]:
@@ -74,8 +72,7 @@ class SaleQuotationHeaderImporter(models.AbstractModel):
         _logger.info(f"Extracted {len(headers)} new quotation headers from OQUT.")
 
         if not headers:
-            # Initialize empty cache for transform phase
-            SaleQuotationHeaderImporter._lookup_cache = {
+            return ChunkableData(records=[], context={
                 "partners_map": {},
                 "partner_addresses_map": {},
                 "contacts_map": {},
@@ -84,8 +81,7 @@ class SaleQuotationHeaderImporter(models.AbstractModel):
                 "pricelists_map": {},
                 "carriers_map": {},
                 "company_id": ctx.env.company.id,
-            }
-            return []
+            })
 
         # Pre-compute lookups (same as sale orders)
         _logger.info("Pre-computing lookup dictionaries...")
@@ -171,8 +167,9 @@ class SaleQuotationHeaderImporter(models.AbstractModel):
             if tpt.delivery_carrier_id
         }
 
-        # Store in cache
-        SaleQuotationHeaderImporter._lookup_cache = {
+        _logger.info("Lookup dictionaries ready.")
+
+        return ChunkableData(records=headers, context={
             "partners_map": partners_map,
             "partner_addresses_map": partner_addresses_map,
             "contacts_map": contacts_map,
@@ -181,16 +178,14 @@ class SaleQuotationHeaderImporter(models.AbstractModel):
             "pricelists_map": pricelists_map,
             "carriers_map": carriers_map,
             "company_id": ctx.env.company.id,
-        }
-        _logger.info("Lookup dictionaries ready.")
-
-        return headers
+        })
 
     @ETL.transform()
     def transform_headers(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
         """Transform SAP quotation headers into Odoo sale.order values."""
-        headers = extracted["extract_headers"]
-        cache = SaleQuotationHeaderImporter._lookup_cache
+        data = extracted["extract_headers"]
+        headers = data.records
+        cache = data.context
 
         if not headers:
             _logger.info("No headers to transform.")
@@ -277,8 +272,6 @@ class SaleQuotationLineImporter(models.AbstractModel):
     _name = "sale.quotation.line.importer"
     _description = "SAP Sales Quotation Product Line Importer (QUT1)"
 
-    _lookup_cache = {}
-
     @ETL.extract("qut1")
     def extract_lines(self, ctx: ETLContext) -> List[Dict]:
         """Extract product lines from SAP QUT1 table."""
@@ -327,13 +320,11 @@ class SaleQuotationLineImporter(models.AbstractModel):
         )
 
         if not lines:
-            # Initialize empty cache for transform phase
-            SaleQuotationLineImporter._lookup_cache = {
+            return ChunkableData(records=[], context={
                 "products_map": {},
                 "orders_map": {},
                 "uom_unit_id": ctx.env.ref("uom.product_uom_unit").id,
-            }
-            return []
+            })
 
         # Group lines by order to prevent concurrent updates
         lines_by_order = {}
@@ -363,32 +354,34 @@ class SaleQuotationLineImporter(models.AbstractModel):
         taxes_map = {tax.sap_tax_code: tax.id for tax in taxes if tax.sap_tax_code}
         _logger.info(f"Pre-loaded {len(taxes_map)} sale taxes for lookup")
 
-        SaleQuotationLineImporter._lookup_cache = {
-            "products_map": products_map,
-            "orders_map": orders_map,
-            "taxes_map": taxes_map,
-            "uom_unit_id": ctx.env.ref("uom.product_uom_unit").id,
-        }
         _logger.info("Lookup dictionaries ready.")
 
         # Return list of orders with their lines
-        return [
-            {"docentry": docentry, "lines": order_lines}
-            for docentry, order_lines in lines_by_order.items()
-        ]
+        return ChunkableData(
+            records=[
+                {"docentry": docentry, "lines": order_lines}
+                for docentry, order_lines in lines_by_order.items()
+            ],
+            context={
+                "products_map": products_map,
+                "orders_map": orders_map,
+                "taxes_map": taxes_map,
+                "uom_unit_id": ctx.env.ref("uom.product_uom_unit").id,
+            },
+        )
 
     @api.model
-    def _lookup_tax(self, ctx, vatgroup):
+    def _lookup_tax(self, ctx, vatgroup, cache):
         """Look up Odoo tax by SAP tax code (vatgroup) using pre-loaded cache.
 
         Args:
             ctx: ETL context
             vatgroup: SAP tax code (e.g., "CO", "WY 01")
+            cache: lookup cache dict containing taxes_map
 
         Returns:
             account.tax ID or False
         """
-        cache = SaleQuotationLineImporter._lookup_cache
         taxes_map = cache.get("taxes_map", {})
 
         if not taxes_map:
@@ -408,11 +401,9 @@ class SaleQuotationLineImporter(models.AbstractModel):
     @ETL.transform()
     def transform_lines(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
         """Transform SAP product lines into Odoo sale.order.line values."""
-        orders_with_lines = extracted["extract_lines"]
-        cache = SaleQuotationLineImporter._lookup_cache
-
-        if not cache:
-            raise RuntimeError("Cache is empty in transform!")
+        data = extracted["extract_lines"]
+        orders_with_lines = data.records
+        cache = data.context
 
         line_vals = []
         for order_data in orders_with_lines:
@@ -461,7 +452,7 @@ class SaleQuotationLineImporter(models.AbstractModel):
                 # Map SAP tax code (vatgroup) to Odoo tax
                 vatgroup = line.get("vatgroup")
                 if vatgroup:
-                    tax_id = self._lookup_tax(ctx, vatgroup)
+                    tax_id = self._lookup_tax(ctx, vatgroup, cache)
                     if tax_id:
                         vals["tax_ids"] = [Command.set([tax_id])]
 
@@ -498,8 +489,6 @@ class SaleQuotationLineImporter(models.AbstractModel):
 class SaleQuotationTextLineImporter(models.AbstractModel):
     _name = "sale.quotation.text.line.importer"
     _description = "SAP Sales Quotation Text Line Importer (QUT10)"
-
-    _lookup_cache = {}
 
     @ETL.extract("qut10")
     def extract_text_lines(self, ctx: ETLContext) -> List[Dict]:
@@ -561,11 +550,9 @@ class SaleQuotationTextLineImporter(models.AbstractModel):
         )
 
         if not lines:
-            # Initialize empty cache for transform phase
-            SaleQuotationTextLineImporter._lookup_cache = {
+            return ChunkableData(records=[], context={
                 "orders_map": {},
-            }
-            return []
+            })
 
         # Group lines by order to prevent concurrent updates
         lines_by_order = {}
@@ -584,25 +571,25 @@ class SaleQuotationTextLineImporter(models.AbstractModel):
         orders = ctx.env["sale.order"].search([("sap_docentry", "in", docentries)])
         orders_map = {order.sap_docentry: order.id for order in orders}
 
-        SaleQuotationTextLineImporter._lookup_cache = {
-            "orders_map": orders_map,
-        }
         _logger.info("Lookup dictionaries ready.")
 
         # Return list of orders with their lines
-        return [
-            {"docentry": docentry, "lines": order_lines}
-            for docentry, order_lines in lines_by_order.items()
-        ]
+        return ChunkableData(
+            records=[
+                {"docentry": docentry, "lines": order_lines}
+                for docentry, order_lines in lines_by_order.items()
+            ],
+            context={
+                "orders_map": orders_map,
+            },
+        )
 
     @ETL.transform()
     def transform_text_lines(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
         """Transform SAP text lines into Odoo sale.order.line values."""
-        orders_with_lines = extracted["extract_text_lines"]
-        cache = SaleQuotationTextLineImporter._lookup_cache
-
-        if not cache:
-            raise RuntimeError("Cache is empty in transform!")
+        data = extracted["extract_text_lines"]
+        orders_with_lines = data.records
+        cache = data.context
 
         line_vals = []
         for order_data in orders_with_lines:

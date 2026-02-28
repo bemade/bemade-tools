@@ -4,6 +4,7 @@ from odoo import api, models
 from odoo.tools.sql import SQL
 
 from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework.utils import post_lock
 
 _logger = logging.getLogger(__name__)
 
@@ -159,8 +160,17 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
 
         moves = ctx.env["account.move"].create(move_vals)
         ctx.env.flush_all()
-        # Skip Odoo's automatic COGS generation - we've imported COGS from SAP
-        moves.with_context(skip_cogs_generation=True).action_post()
+        # Post grouped by journal under advisory lock to prevent deadlocks
+        # on account_move_unique_name when multiple workers post concurrently
+        by_journal = {}
+        for move in moves:
+            by_journal.setdefault(move.journal_id.id, self.env["account.move"])
+            by_journal[move.journal_id.id] |= move
+        for journal_id, journal_moves in sorted(by_journal.items()):
+            with post_lock(ctx.env.cr, journal_id):
+                journal_moves.with_context(
+                    skip_cogs_generation=True
+                ).action_post()
 
     @api.model
     def _trigger_recomputation(self, lines):

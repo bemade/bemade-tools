@@ -10,7 +10,7 @@ from typing import Dict, List
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
 
 _logger = logging.getLogger(__name__)
 
@@ -27,16 +27,13 @@ _SAP_CURRENCY_MAP = {
     importer_name="product.supplierinfo.importer",
     sap_source="itm2,oitm",
     depends_on=["product.product.importer", "res.partner.company.importer"],
-    allow_multiprocessing=False,
 )
 class ProductSupplierinfoImporter(models.AbstractModel):
     _name = "product.supplierinfo.importer"
     _description = "SAP Product Supplier Info Importer (ITM2/OITM)"
 
-    _lookup_cache = {}
-
     @ETL.extract("itm2,oitm")
-    def extract_supplierinfo(self, ctx: ETLContext) -> List[Dict]:
+    def extract_supplierinfo(self, ctx: ETLContext) -> ChunkableData:
         """Extract vendor-item links from ITM2 joined with OITM pricing.
 
         Returns:
@@ -72,15 +69,16 @@ class ProductSupplierinfoImporter(models.AbstractModel):
         currencies = ctx.env["res.currency"].search([])
         currency_map = {c.name: c.id for c in currencies}
 
-        ProductSupplierinfoImporter._lookup_cache = {
-            "product_tmpl_map": product_tmpl_map,
-            "partner_map": partner_map,
-            "currency_map": currency_map,
-            "company_id": ctx.env.company.id,
-            "company_currency_id": ctx.env.company.currency_id.id,
-        }
-
-        return rows
+        return ChunkableData(
+            records=rows,
+            context={
+                "product_tmpl_map": product_tmpl_map,
+                "partner_map": partner_map,
+                "currency_map": currency_map,
+                "company_id": ctx.env.company.id,
+                "company_currency_id": ctx.env.company.currency_id.id,
+            },
+        )
 
     @ETL.transform()
     def transform_supplierinfo(
@@ -91,8 +89,9 @@ class ProductSupplierinfoImporter(models.AbstractModel):
         Uses OITM.lastpurprc as the vendor price. Rows without a price
         are skipped (subclasses may override to provide a fallback).
         """
-        rows = extracted["extract_supplierinfo"]
-        cache = ProductSupplierinfoImporter._lookup_cache
+        data = extracted["extract_supplierinfo"]
+        rows = data.records
+        cache = data.context
         product_tmpl_map = cache["product_tmpl_map"]
         partner_map = cache["partner_map"]
         currency_map = cache["currency_map"]

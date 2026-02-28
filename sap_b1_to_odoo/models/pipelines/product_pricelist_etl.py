@@ -18,13 +18,10 @@ _logger = logging.getLogger(__name__)
     importer_name="product.pricelist.item.importer",
     sap_source="opln,ooat,oat1",
     depends_on=["product.product.importer", "res.partner.company.importer"],
-    allow_multiprocessing=False,  # Small dataset, always single-process
 )
 class ProductPricelistItemImporter(models.AbstractModel):
     _name = "product.pricelist.item.importer"
     _description = "SAP Product Pricelist Items Importer (OPLN/OOAT/OAT1)"
-
-    _lookup_cache = {}
 
     @ETL.extract("opln,ooat,oat1")
     def extract_pricelists_and_blankets(self, ctx: ETLContext) -> Dict:
@@ -98,7 +95,12 @@ class ProductPricelistItemImporter(models.AbstractModel):
             if partner_id:
                 agreement_partners_dict.setdefault(agreement_id, []).append(partner_id)
 
-        ProductPricelistItemImporter._lookup_cache = {
+        _logger.info("Lookup dictionaries ready.")
+
+        return {
+            "basic_pricelists": basic_pricelists,
+            "blanket_orders": blanket_orders,
+            "blanket_lines_dict": lines_dict,
             "products_map": products_map,
             "product_tmpl_map": product_tmpl_map,
             "partners_map": partners_map,
@@ -107,13 +109,6 @@ class ProductPricelistItemImporter(models.AbstractModel):
             "currencies_map": currencies_map,
             "agreement_partners_dict": agreement_partners_dict,
             "company_id": ctx.env.company.id,
-        }
-        _logger.info("Lookup dictionaries ready.")
-
-        return {
-            "basic_pricelists": basic_pricelists,
-            "blanket_orders": blanket_orders,
-            "blanket_lines_dict": lines_dict,
         }
 
     @ETL.transform()
@@ -133,15 +128,13 @@ class ProductPricelistItemImporter(models.AbstractModel):
         basic_pricelists = data["basic_pricelists"]
         blanket_orders = data["blanket_orders"]
         blanket_lines_dict = data["blanket_lines_dict"]
-
-        cache = ProductPricelistItemImporter._lookup_cache
-        products_map = cache["products_map"]
-        product_tmpl_map = cache["product_tmpl_map"]
-        partners_map = cache["partners_map"]
-        partner_type_map = cache["partner_type_map"]
-        partner_pricelist_map = cache["partner_pricelist_map"]
-        currencies_map = cache["currencies_map"]
-        company_id = cache["company_id"]
+        products_map = data["products_map"]
+        product_tmpl_map = data["product_tmpl_map"]
+        partners_map = data["partners_map"]
+        partner_type_map = data["partner_type_map"]
+        partner_pricelist_map = data["partner_pricelist_map"]
+        currencies_map = data["currencies_map"]
+        company_id = data["company_id"]
 
         # Transform basic pricelists (OPLN)
         # Separate into base pricelists (self-referencing) and derived

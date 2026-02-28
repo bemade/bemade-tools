@@ -18,13 +18,10 @@ _logger = logging.getLogger(__name__)
     importer_name="purchase.requisition.importer",
     sap_source="ooat,oat1",
     depends_on=["product.product.importer", "res.partner.company.importer"],
-    allow_multiprocessing=False,  # Small dataset, always single-process
 )
 class PurchaseRequisitionImporter(models.AbstractModel):
     _name = "purchase.requisition.importer"
     _description = "SAP Purchase Blanket Order Importer (OOAT/OAT1)"
-
-    _lookup_cache = {}
 
     @ETL.extract("ooat,oat1")
     def extract_blanket_orders(self, ctx: ETLContext) -> Dict:
@@ -104,18 +101,16 @@ class PurchaseRequisitionImporter(models.AbstractModel):
             if partner_id:
                 agreement_customers_dict.setdefault(agreement_id, []).append(partner_id)
 
-        PurchaseRequisitionImporter._lookup_cache = {
-            "products_map": products_map,
-            "partners_map": partners_map,
-            "partner_type_map": partner_type_map,
-            "currencies_map": currencies_map,
-            "agreement_customers_dict": agreement_customers_dict,
-        }
         _logger.info("Lookup dictionaries ready.")
 
         return {
             "blanket_orders": blanket_orders,
             "blanket_lines_dict": lines_dict,
+            "products_map": products_map,
+            "partners_map": partners_map,
+            "partner_type_map": partner_type_map,
+            "currencies_map": currencies_map,
+            "agreement_customers_dict": agreement_customers_dict,
         }
 
     @ETL.transform()
@@ -132,13 +127,11 @@ class PurchaseRequisitionImporter(models.AbstractModel):
         data = extracted["extract_blanket_orders"]
         blanket_orders = data["blanket_orders"]
         blanket_lines_dict = data["blanket_lines_dict"]
-
-        cache = PurchaseRequisitionImporter._lookup_cache
-        products_map = cache["products_map"]
-        partners_map = cache["partners_map"]
-        partner_type_map = cache["partner_type_map"]
-        currencies_map = cache["currencies_map"]
-        agreement_customers_dict = cache["agreement_customers_dict"]
+        products_map = data["products_map"]
+        partners_map = data["partners_map"]
+        partner_type_map = data["partner_type_map"]
+        currencies_map = data["currencies_map"]
+        agreement_customers_dict = data["agreement_customers_dict"]
 
         def _get_status(blanket):
             """Map SAP status to Odoo state."""
