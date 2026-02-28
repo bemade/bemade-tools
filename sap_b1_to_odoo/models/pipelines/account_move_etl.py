@@ -75,14 +75,17 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
         docs = ctx.cr.dictfetchall()
 
         if not docs:
-            return {"headers": [], "lines": {}}
+            return {"headers": []}
 
+        # Embed lines into each header so chunking keeps data together
         lines = self._get_lines(ctx.cr, "inv1", docs)
-        lines_dict = {}
+        lines_by_doc = {}
         for line in lines:
-            lines_dict.setdefault(line["docentry"], []).append(line)
+            lines_by_doc.setdefault(line["docentry"], []).append(line)
+        for doc in docs:
+            doc["_lines"] = lines_by_doc.get(doc["docentry"], [])
 
-        return {"headers": docs, "lines": lines_dict}
+        return {"headers": docs}
 
     @ETL.extract("rdr1")
     def extract_metadata(self, ctx: ETLContext):
@@ -110,10 +113,12 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
         """Transform SAP invoice headers/lines into account.move create vals."""
         data = extracted["extract_invoices"]
         headers = data.get("headers", [])
-        lines_dict = data.get("lines", {})
 
         if not headers:
             return {"move_vals": [], "lookups": {}}
+
+        # Rebuild lines dict from embedded _lines for _get_move_vals
+        lines_dict = {doc["docentry"]: doc.pop("_lines", []) for doc in headers}
 
         metadata = extracted["extract_metadata"]
         partners_id_dict = metadata["partners"]
@@ -158,19 +163,28 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
         # Batch-create any pending currency rates before creating moves
         self._create_pending_currency_rates(lookups)
 
-        moves = ctx.env["account.move"].create(move_vals)
-        ctx.env.flush_all()
-        # Post grouped by journal under advisory lock to prevent deadlocks
-        # on account_move_unique_name when multiple workers post concurrently
+        # Create moves one-at-a-time so a single bad record doesn't kill the chunk
+        moves = ctx.env["account.move"]
+        for vals in move_vals:
+            ref = f"invoice SAP#{vals.get('sap_docnum', '?')}"
+            with ctx.skippable(ref):
+                moves |= ctx.env["account.move"].create(vals)
+
+        if not moves:
+            return
+
+        # Post one-at-a-time grouped by journal under advisory lock
         by_journal = {}
         for move in moves:
             by_journal.setdefault(move.journal_id.id, self.env["account.move"])
             by_journal[move.journal_id.id] |= move
         for journal_id, journal_moves in sorted(by_journal.items()):
             with post_lock(ctx.env.cr, journal_id):
-                journal_moves.with_context(
-                    skip_cogs_generation=True
-                ).action_post()
+                for move in journal_moves:
+                    with ctx.skippable(f"post invoice SAP#{move.sap_docnum or '?'}"):
+                        move.with_context(
+                            skip_cogs_generation=True
+                        ).action_post()
 
     @api.model
     def _trigger_recomputation(self, lines):
