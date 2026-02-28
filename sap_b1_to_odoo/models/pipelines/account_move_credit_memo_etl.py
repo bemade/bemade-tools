@@ -17,6 +17,7 @@ from odoo import api, models
 from odoo.tools.sql import SQL
 
 from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework.utils import post_lock
 
 _logger = logging.getLogger(__name__)
 
@@ -177,8 +178,17 @@ class AccountMoveCreditMemoETLImporter(models.AbstractModel):
 
         moves = ctx.env["account.move"].create(move_vals)
         ctx.env.flush_all()
-        moves.action_post()
-        _logger.info(f"Created and posted {len(moves)} A/R credit memos")
+        # Post grouped by journal under advisory lock to prevent deadlocks
+        by_journal = {}
+        for move in moves:
+            by_journal.setdefault(move.journal_id.id, self.env["account.move"])
+            by_journal[move.journal_id.id] |= move
+        posted = 0
+        for journal_id, journal_moves in sorted(by_journal.items()):
+            with post_lock(ctx.env.cr, journal_id):
+                journal_moves.action_post()
+                posted += len(journal_moves)
+        _logger.info(f"Created and posted {posted} A/R credit memos")
 
 
 # =============================================================================
@@ -350,5 +360,14 @@ class AccountMoveVendorCreditMemoETLImporter(models.AbstractModel):
 
         moves = ctx.env["account.move"].create(move_vals)
         ctx.env.flush_all()
-        moves.action_post()
-        _logger.info(f"Created and posted {len(moves)} A/P credit memos")
+        # Post grouped by journal under advisory lock to prevent deadlocks
+        by_journal = {}
+        for move in moves:
+            by_journal.setdefault(move.journal_id.id, self.env["account.move"])
+            by_journal[move.journal_id.id] |= move
+        posted = 0
+        for journal_id, journal_moves in sorted(by_journal.items()):
+            with post_lock(ctx.env.cr, journal_id):
+                journal_moves.action_post()
+                posted += len(journal_moves)
+        _logger.info(f"Created and posted {posted} A/P credit memos")

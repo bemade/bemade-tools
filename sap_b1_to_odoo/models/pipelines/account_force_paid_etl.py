@@ -1,7 +1,8 @@
 import logging
 
 from odoo import api, models
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
+from odoo.addons.etl_framework.utils import post_lock
 
 _logger = logging.getLogger(__name__)
 
@@ -19,9 +20,6 @@ _logger = logging.getLogger(__name__)
 class AccountForcePaidReconciliation(models.AbstractModel):
     _name = "account.force.paid.reconciliation"
     _description = "SAP Force Paid - Reconcile invoices/bills marked paid in SAP without payment records"
-
-    # Class-level cache for multiprocessing (only primitive types!)
-    _lookup_cache = {}
 
     @ETL.extract("oinv")
     def extract_force_paid(self, ctx: ETLContext):
@@ -140,15 +138,6 @@ class AccountForcePaidReconciliation(models.AbstractModel):
             )
             return []
 
-        # Store in class-level cache for workers
-        AccountForcePaidReconciliation._lookup_cache = {
-            "invoices_map": invoices_map,
-            "bills_map": bills_map,
-            "journal_id": payment_journal.id,
-            "receivable_account_id": receivable_account.id,
-            "payable_account_id": payable_account.id,
-        }
-
         # Only return documents that need reconciliation
         result = []
         for p in paid_invoices:
@@ -157,14 +146,24 @@ class AccountForcePaidReconciliation(models.AbstractModel):
         for p in paid_bills:
             if p["docentry"] in bills_map:
                 result.append(p)
-        return result
+
+        return ChunkableData(
+            records=result,
+            context={
+                "invoices_map": invoices_map,
+                "bills_map": bills_map,
+                "journal_id": payment_journal.id,
+                "receivable_account_id": receivable_account.id,
+                "payable_account_id": payable_account.id,
+            },
+        )
 
     @ETL.transform()
     def transform_force_paid(self, ctx: ETLContext, extracted):
         """Prepare force-paid reconciliation data."""
-        documents = extracted.get("extract_force_paid", [])
-
-        cache = AccountForcePaidReconciliation._lookup_cache
+        data = extracted.get("extract_force_paid")
+        documents = data.records if data else []
+        cache = data.context if data else {}
         invoices_map = cache.get("invoices_map", {})
         bills_map = cache.get("bills_map", {})
 
@@ -194,23 +193,27 @@ class AccountForcePaidReconciliation(models.AbstractModel):
             f"[ForcePaidReconciliation] Prepared {len(reconciliation_data)} "
             f"force-paid reconciliations"
         )
-        return reconciliation_data
+        return {
+            "data": reconciliation_data,
+            "journal_id": cache.get("journal_id"),
+            "receivable_account_id": cache.get("receivable_account_id"),
+            "payable_account_id": cache.get("payable_account_id"),
+        }
 
     @ETL.load()
     def load_force_paid(self, ctx: ETLContext, transformed):
         """Create journal entries to force-reconcile remaining invoices/bills."""
-        reconciliation_data = transformed.get("transform_force_paid", [])
+        result = transformed.get("transform_force_paid", {})
+        reconciliation_data = result.get("data", [])
+        journal_id = result.get("journal_id")
+        receivable_account_id = result.get("receivable_account_id")
+        payable_account_id = result.get("payable_account_id")
 
         if not reconciliation_data:
             _logger.info(
                 "[ForcePaidReconciliation] No force-paid reconciliations in chunk"
             )
             return
-
-        cache = AccountForcePaidReconciliation._lookup_cache
-        journal_id = cache.get("journal_id")
-        receivable_account_id = cache.get("receivable_account_id")
-        payable_account_id = cache.get("payable_account_id")
 
         if not journal_id or not receivable_account_id or not payable_account_id:
             _logger.warning(
@@ -304,7 +307,8 @@ class AccountForcePaidReconciliation(models.AbstractModel):
 
             with ctx.skippable(ref):
                 writeoff_move = ctx.env["account.move"].create(writeoff_vals)
-                writeoff_move.action_post()
+                with post_lock(ctx.env.cr, journal_id):
+                    writeoff_move.action_post()
 
                 # Reconcile with the invoice/bill
                 if doc_type == "customer":

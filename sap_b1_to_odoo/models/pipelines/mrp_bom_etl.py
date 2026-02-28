@@ -3,7 +3,7 @@ from typing import Dict, List
 
 from odoo import api, models
 
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
 
 _logger = logging.getLogger(__name__)
 
@@ -17,8 +17,6 @@ _logger = logging.getLogger(__name__)
 class MrpBomImporter(models.AbstractModel):
     _name = "mrp.bom.importer"
     _description = "SAP BOM Importer (OITT/ITT1) with Operations"
-
-    _lookup_cache = {}
 
     @ETL.extract("oitt")
     def extract_boms(self, ctx: ETLContext) -> List[Dict]:
@@ -84,17 +82,19 @@ class MrpBomImporter(models.AbstractModel):
         workcenter = ctx.env["mrp.workcenter"].search([("code", "=", "PROD")], limit=1)
         workcenter_id = workcenter.id if workcenter else None
 
-        MrpBomImporter._lookup_cache = {
-            "products_map": products_map,
-            "product_tmpl_map": product_tmpl_map,
-            "company_id": company_id,
-            "bom_lines": sap_bom_lines,
-            "labor_items": labor_items,
-            "workcenter_id": workcenter_id,
-        }
         _logger.info(f"Product lookup ready with {len(products_map)} products.")
 
-        return sap_boms
+        return ChunkableData(
+            records=sap_boms,
+            context={
+                "products_map": products_map,
+                "product_tmpl_map": product_tmpl_map,
+                "company_id": company_id,
+                "bom_lines": sap_bom_lines,
+                "labor_items": labor_items,
+                "workcenter_id": workcenter_id,
+            },
+        )
 
     @ETL.transform()
     def transform_boms(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -107,11 +107,9 @@ class MrpBomImporter(models.AbstractModel):
         Returns:
             List of BOM value dictionaries ready for creation.
         """
-        sap_boms = extracted["extract_boms"]
-        cache = MrpBomImporter._lookup_cache
-
-        if not cache:
-            raise RuntimeError("Cache is empty in transform! This should never happen.")
+        data = extracted["extract_boms"]
+        sap_boms = data.records
+        cache = data.context
 
         product_tmpl_map = cache["product_tmpl_map"]
         company_id = cache["company_id"]
@@ -135,7 +133,7 @@ class MrpBomImporter(models.AbstractModel):
             )
 
         _logger.info(f"Transformed {len(bom_vals)} BOM records.")
-        return bom_vals
+        return {"bom_vals": bom_vals, "cache": cache}
 
     @ETL.load()
     def load_boms(self, ctx: ETLContext, transformed: Dict) -> None:
@@ -145,7 +143,9 @@ class MrpBomImporter(models.AbstractModel):
             ctx: ETL context.
             transformed: Dictionary containing transformed data.
         """
-        bom_vals = transformed["transform_boms"]
+        transform_result = transformed["transform_boms"]
+        bom_vals = transform_result["bom_vals"]
+        cache = transform_result["cache"]
 
         if not bom_vals:
             _logger.info("No new BOMs to create.")
@@ -156,7 +156,6 @@ class MrpBomImporter(models.AbstractModel):
         _logger.info(f"Created {len(boms)} BOMs.")
 
         # Create BOM lines
-        cache = MrpBomImporter._lookup_cache
         products_map = cache["products_map"]
         company_id = cache["company_id"]
         sap_bom_lines = cache["bom_lines"]

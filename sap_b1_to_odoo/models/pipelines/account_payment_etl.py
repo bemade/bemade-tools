@@ -1,7 +1,8 @@
 import logging
 
 from odoo import api, models
-from odoo.addons.etl_framework import ETL, ETLContext
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
+from odoo.addons.etl_framework.utils import post_lock
 
 _logger = logging.getLogger(__name__)
 
@@ -24,9 +25,6 @@ class AccountPaymentReconciliation(models.AbstractModel):
     _description = (
         "SAP Payment Reconciliation - Create Journal Entries for Paid Invoices/Bills"
     )
-
-    # Class-level cache for multiprocessing (only primitive types!)
-    _lookup_cache = {}
 
     @ETL.extract("oinv")
     def extract_payments(self, ctx: ETLContext):
@@ -207,21 +205,21 @@ class AccountPaymentReconciliation(models.AbstractModel):
             _logger.error("[PaymentReconciliation] No bank account found!")
             return []
 
-        # Store in class-level cache for workers
-        AccountPaymentReconciliation._lookup_cache = {
-            "moves_map": moves_map,
-            "journal_id": payment_journal.id,
-            "bank_account_id": bank_account.id,
-        }
-
-        return all_payments
+        return ChunkableData(
+            records=all_payments,
+            context={
+                "moves_map": moves_map,
+                "journal_id": payment_journal.id,
+                "bank_account_id": bank_account.id,
+            },
+        )
 
     @ETL.transform()
     def transform_payments(self, ctx: ETLContext, extracted):
         """Match SAP payments to Odoo move IDs and prepare reconciliation data."""
-        payments = extracted.get("extract_payments", [])
-
-        cache = AccountPaymentReconciliation._lookup_cache
+        data = extracted.get("extract_payments")
+        payments = data.records if data else []
+        cache = data.context if data else {}
         moves_map = cache.get("moves_map", {})
 
         # Map invtype to SAP table name
@@ -264,20 +262,23 @@ class AccountPaymentReconciliation(models.AbstractModel):
         _logger.info(
             f"[PaymentReconciliation] Prepared {len(payment_data)} payment reconciliations"
         )
-        return payment_data
+        return {
+            "data": payment_data,
+            "journal_id": cache.get("journal_id"),
+            "bank_account_id": cache.get("bank_account_id"),
+        }
 
     @ETL.load()
     def load_payments(self, ctx: ETLContext, transformed):
         """Create journal entries to reconcile paid invoices/bills."""
-        reconciliation_data = transformed.get("transform_payments", [])
+        result = transformed.get("transform_payments", {})
+        reconciliation_data = result.get("data", [])
+        journal_id = result.get("journal_id")
+        bank_account_id = result.get("bank_account_id")
 
         if not reconciliation_data:
             _logger.info("[PaymentReconciliation] No payments to reconcile in chunk")
             return
-
-        cache = AccountPaymentReconciliation._lookup_cache
-        journal_id = cache.get("journal_id")
-        bank_account_id = cache.get("bank_account_id")
 
         if not journal_id or not bank_account_id:
             _logger.warning(
@@ -377,11 +378,17 @@ class AccountPaymentReconciliation(models.AbstractModel):
         )
         payment_moves = ctx.env["account.move"].create(payment_vals_list)
 
-        # Phase 3: Batch post all payment journal entries
-        _logger.info(
-            f"[PaymentReconciliation] Batch posting {len(payment_moves)} payment entries"
-        )
-        payment_moves.action_post()
+        # Phase 3: Post grouped by journal under advisory lock to prevent deadlocks
+        by_journal = {}
+        for move in payment_moves:
+            by_journal.setdefault(move.journal_id.id, self.env["account.move"])
+            by_journal[move.journal_id.id] |= move
+        for journal_id, journal_moves in sorted(by_journal.items()):
+            _logger.info(
+                f"[PaymentReconciliation] Posting {len(journal_moves)} entries for journal {journal_id}"
+            )
+            with post_lock(ctx.env.cr, journal_id):
+                journal_moves.action_post()
 
         # Phase 4: Reconcile each pair (can't be batched)
         reconciled_count = 0
