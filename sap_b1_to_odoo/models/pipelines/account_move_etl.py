@@ -85,6 +85,9 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
         for doc in docs:
             doc["_lines"] = lines_by_doc.get(doc["docentry"], [])
 
+        # Sort by partner so chunks span fewer partners, reducing conflicts
+        docs.sort(key=lambda d: d.get("cardcode", ""))
+
         return {"headers": docs}
 
     @ETL.extract("rdr1")
