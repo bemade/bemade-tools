@@ -61,27 +61,55 @@ class QboBankJournalProcessor(models.AbstractModel):
                     }
                 )
 
+        # Collect existing journal codes to avoid duplicates in transform
+        existing_codes = set(
+            ctx.env["account.journal"]
+            .search([("company_id", "=", company.id)])
+            .mapped("code")
+        )
+
         _logger.info(
             f"Found {len(bank_accounts)} QBO bank accounts, "
             f"{len(accounts_needing_journals)} need journals"
         )
-        return accounts_needing_journals
+        return {
+            "accounts": accounts_needing_journals,
+            "existing_codes": list(existing_codes),
+            "company_id": company.id,
+        }
 
     @ETL.transform()
     def transform_journals(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
         """Transform bank accounts into journal values."""
-        accounts = extracted.get("extract_bank_accounts", [])
-        company = ctx.env.company
+        data = extracted.get("extract_bank_accounts", {})
+        accounts = data.get("accounts", [])
+        existing_codes = set(data.get("existing_codes", []))
+        company_id = data.get("company_id")
 
         journal_vals = []
         for acc in accounts:
+            code = acc["code"][:5]
+            if code in existing_codes:
+                # Try shorter truncations, then add numeric suffix
+                for length in (4, 3):
+                    candidate = acc["code"][:length]
+                    if candidate not in existing_codes:
+                        code = candidate
+                        break
+                else:
+                    suffix = 1
+                    base = acc["code"][:4]
+                    while f"{base}{suffix}" in existing_codes:
+                        suffix += 1
+                    code = f"{base}{suffix}"
+            existing_codes.add(code)
             journal_vals.append(
                 {
                     "name": acc["name"],
                     "type": "bank",
-                    "code": acc["code"][:5],  # Journal code max 5 chars
+                    "code": code,
                     "default_account_id": acc["id"],
-                    "company_id": company.id,
+                    "company_id": company_id,
                 }
             )
 

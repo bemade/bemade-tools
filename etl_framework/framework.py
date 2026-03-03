@@ -725,6 +725,7 @@ class ETLExecutor:
         dispatcher = ChunkDispatcher(
             base_url=base_url,
             api_key=api_key,
+            dbname=self.ctx.env.cr.dbname,
         )
 
         try:
