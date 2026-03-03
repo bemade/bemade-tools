@@ -56,9 +56,15 @@ class ChunkDispatcher:
     """
 
     def __init__(
-        self, base_url: str, api_key: str, timeout: int = 600, pool_size: int = 64
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: int = 600,
+        pool_size: int = 64,
+        dbname: Optional[str] = None,
     ):
         self.base_url = base_url.rstrip("/")
+        self.dbname = dbname
         self.api_key = api_key
         self.timeout = timeout
         self._session = requests.Session()
@@ -87,6 +93,8 @@ class ChunkDispatcher:
         """Send a single chunk to the endpoint, with retry on transient errors."""
         tag = f"[{importer_name}] Chunk {chunk_index + 1}/{total_chunks}"
         url = f"{self.base_url}/etl/process_chunk"
+        if self.dbname:
+            url += f"?db={self.dbname}"
         payload = {
             "importer_name": importer_name,
             "chunk": base64.b64encode(pickle.dumps(chunk, protocol=5)).decode(),
