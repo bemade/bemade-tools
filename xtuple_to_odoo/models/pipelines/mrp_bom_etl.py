@@ -201,6 +201,8 @@ class XtupleMrpBomLineImporter(models.AbstractModel):
         JOIN item component_item ON (bomitem_item_id = component_item.item_id)
         LEFT JOIN uom ON (bomitem_uom_id = uom.uom_id)
         WHERE parent_item.item_type IN ('M', 'F')
+          AND (bomitem_expires IS NULL OR bomitem_expires > CURRENT_DATE)
+          AND (bomitem_effective IS NULL OR bomitem_effective <= CURRENT_DATE)
         """
 
         if existing_bomitem_ids:
