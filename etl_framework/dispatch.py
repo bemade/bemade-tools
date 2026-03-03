@@ -65,6 +65,7 @@ class ChunkDispatcher:
     ):
         self.base_url = base_url.rstrip("/")
         self.dbname = dbname
+
         self.api_key = api_key
         self.timeout = timeout
         self._session = requests.Session()
