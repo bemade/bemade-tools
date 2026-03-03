@@ -12,7 +12,7 @@ Pipeline execution order:
 import logging
 from typing import Any, Dict, List
 
-from odoo import api, models
+from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext
 
@@ -193,26 +193,45 @@ class XtupleProductImporter(models.AbstractModel):
         )
         default_category_id = all_category.id if all_category else False
 
-        # Build UoM lookup dict
-        uom_xmlid_mapping = {
-            4: "uom.product_uom_unit",  # EA -> Unit
-            5: "uom.product_uom_unit",  # CS (Case) -> Unit
-            6: "uom.product_uom_unit",  # PL (Pallet) -> Unit
-            7: "uom.product_uom_kgm",  # KG -> kg
-            8: "uom.product_uom_litre",  # L -> Liter
-            9: "uom.product_uom_lb",  # LB -> lb
-            10: "uom.product_uom_gal",  # USGAL -> gal
-            11: "uom.product_uom_gal",  # IMP GAL -> gal
-            12: "uom.product_uom_ton",  # THSND -> Ton
-            13: "uom.product_uom_yard",  # YD -> Yard
-            14: "uom.product_uom_foot",  # FT -> Foot
+        # Build UoM lookup dict by querying xTuple's uom table and mapping by name.
+        # This avoids relying on installation-specific integer IDs.
+        uom_name_to_xmlid = {
+            "EA": "uom.product_uom_unit",
+            "CS": "uom.product_uom_unit",
+            "PL": "uom.product_uom_unit",
+            "EACH": "uom.product_uom_unit",
+            "KG": "uom.product_uom_kgm",
+            "KGM": "uom.product_uom_kgm",
+            "L": "uom.product_uom_litre",
+            "LT": "uom.product_uom_litre",
+            "LITRE": "uom.product_uom_litre",
+            "LITER": "uom.product_uom_litre",
+            "LB": "uom.product_uom_lb",
+            "USGAL": "uom.product_uom_gal",
+            "GAL": "uom.product_uom_gal",
+            "IMP GAL": "uom.product_uom_gal",
+            "THSND": "uom.product_uom_ton",
+            "YD": "uom.product_uom_yard",
+            "FT": "uom.product_uom_foot",
         }
         default_uom = ctx.env.ref("uom.product_uom_unit", raise_if_not_found=False)
         default_uom_id = default_uom.id if default_uom else False
-        uom_dict = {}
-        for xtuple_id, xmlid in uom_xmlid_mapping.items():
+
+        # Resolve xmlids to Odoo DB ids once
+        xmlid_to_odoo_id = {}
+        for xmlid in set(uom_name_to_xmlid.values()):
             uom = ctx.env.ref(xmlid, raise_if_not_found=False)
-            uom_dict[xtuple_id] = uom.id if uom else default_uom_id
+            xmlid_to_odoo_id[xmlid] = uom.id if uom else default_uom_id
+
+        # Query xTuple uom table and build id -> Odoo uom_id mapping by name
+        ctx.cr.execute("SELECT uom_id, uom_name FROM uom")
+        uom_dict = {}
+        for row in ctx.cr.dictfetchall():
+            uom_name = (row["uom_name"] or "").strip().upper()
+            xmlid = uom_name_to_xmlid.get(uom_name)
+            uom_dict[row["uom_id"]] = (
+                xmlid_to_odoo_id[xmlid] if xmlid else default_uom_id
+            )
 
         return category_dict, default_category_id, uom_dict, default_uom_id
 
@@ -281,6 +300,8 @@ class XtupleProductImporter(models.AbstractModel):
         )
         existing_default_codes = {row[0] for row in ctx.env.cr.fetchall()}
 
+        _, _, uom_dict, default_uom_id = self._get_lookup_dicts(ctx)
+
         select_clause = f"""
         SELECT
             {PRODUCT_SELECT}
@@ -301,11 +322,14 @@ class XtupleProductImporter(models.AbstractModel):
         products = ctx.cr.dictfetchall()
 
         # Filter to only products that exist by default_code (need update)
-        products_to_update = [
-            p
-            for p in products
-            if p.get("item_number") and p.get("item_number") in existing_default_codes
-        ]
+        # Embed UoM so the transform can include it in update_vals
+        products_to_update = []
+        for p in products:
+            if not p.get("item_number") or p.get("item_number") not in existing_default_codes:
+                continue
+            inv_uom_id = p.get("item_inv_uom_id")
+            p["_uom_id"] = uom_dict.get(inv_uom_id, default_uom_id)
+            products_to_update.append(p)
 
         _logger.info(
             f"Extracted {len(products_to_update)} products to update with xTuple fields"
@@ -403,6 +427,7 @@ class XtupleProductImporter(models.AbstractModel):
                     "xtuple_item_number": product.get("item_number"),
                     "xtuple_item_type": item_type,
                     "xtuple_classcode": product.get("classcode_code"),
+                    "uom_id": product.get("_uom_id"),
                 }
             )
 
@@ -433,14 +458,39 @@ class XtupleProductImporter(models.AbstractModel):
         # Update existing products with xTuple fields
         if update_vals:
             updated = 0
+            tmpl_ids_to_invalidate = []
             for vals in update_vals:
                 default_code = vals.pop("default_code")
+                # Pop uom_id before the ORM write and apply it separately:
+                # product.template.write() calls _update_uom() then fires the
+                # account @api.constrains which blocks cross-UoM changes on
+                # products with posted invoices. Instead we call _update_uom()
+                # directly (to cascade the new UoM onto moves, BOMs, etc.) and
+                # then write uom_id/uom_po_id via SQL.
+                uom_id = vals.pop("uom_id", None)
                 product = ctx.env["product.product"].search(
                     [("default_code", "=", default_code)], limit=1
                 )
-                if product:
+                if not product:
+                    continue
+                if vals:
                     product.write(vals)
-                    updated += 1
+                if uom_id and uom_id != product.uom_id.id:
+                    product.product_variant_ids.with_context(
+                        skip_uom_conversion=True
+                    )._update_uom(uom_id)
+                    ctx.env.cr.execute(
+                        """
+                        UPDATE product_template
+                        SET uom_id = %(uom)s, uom_po_id = %(uom)s
+                        WHERE id = %(tmpl_id)s
+                        """,
+                        {"uom": uom_id, "tmpl_id": product.product_tmpl_id.id},
+                    )
+                    tmpl_ids_to_invalidate.append(product.product_tmpl_id.id)
+                updated += 1
+            if tmpl_ids_to_invalidate:
+                ctx.env["product.template"].invalidate_model(["uom_id", "uom_po_id"])
             _logger.info(f"Updated {updated} existing products with xTuple fields")
 
         if not create_vals and not update_vals:
