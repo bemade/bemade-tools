@@ -110,6 +110,8 @@ class QboAccountImporter(models.AbstractModel):
             # Clear company fields that reference default accounts before archiving,
             # otherwise Odoo will error when those accounts are used (e.g. during
             # payment posting which checks early payment discount accounts)
+            # Accounts referenced by company fields that will be reassigned
+            # by _set_account_defaults — safe to clear and archive.
             account_fields = [
                 "account_journal_early_pay_discount_loss_account_id",
                 "account_journal_early_pay_discount_gain_account_id",
@@ -131,6 +133,18 @@ class QboAccountImporter(models.AbstractModel):
                         f"Cleared company.{field_name} ({account.code}) "
                         f"before archiving"
                     )
+
+            # Exclude system accounts that are still needed by other
+            # pipelines (e.g. the transfer pipeline uses the transit account
+            # for cross-currency postings).
+            keep_accounts = ctx.env["account.account"]
+            if company.transfer_account_id and company.transfer_account_id in odoo_default_accounts:
+                keep_accounts |= company.transfer_account_id
+                _logger.info(
+                    f"Keeping company.transfer_account_id "
+                    f"({company.transfer_account_id.code}) active"
+                )
+            odoo_default_accounts -= keep_accounts
 
             _logger.info(
                 f"Found {len(odoo_default_accounts)} Odoo default accounts to archive "
