@@ -112,16 +112,31 @@ class StockQuantImporter(models.AbstractModel):
 
     @ETL.load()
     def load_stock_quants(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Load stock quants into Odoo.
+        """Zero out all internal quants then set SAP quantities.
+
+        Stock moves from SO/PO/MRP imports leave behind quants that may not
+        match SAP. We reset everything to zero first, then write the SAP
+        on-hand values so Odoo matches SAP exactly.
 
         Args:
             ctx: ETL context.
             transformed: Dictionary containing transformed data.
         """
         quant_vals = transformed.get("transform_stock_quants") or []
+        Quant = ctx.env["stock.quant"].sudo()
+
+        # Zero out all existing internal quants
+        internal_quants = Quant.search(
+            [("location_id.usage", "=", "internal")]
+        )
+        if internal_quants:
+            _logger.info(
+                f"Zeroing out {len(internal_quants)} existing internal quants."
+            )
+            internal_quants.write({"quantity": 0, "reserved_quantity": 0})
 
         if not quant_vals:
-            _logger.info("No stock quants to create.")
+            _logger.info("No stock quants to import from SAP.")
             return
 
         created_count = 0
@@ -130,19 +145,17 @@ class StockQuantImporter(models.AbstractModel):
             location = ctx.env["stock.location"].browse(vals["location_id"])
 
             # Use _gather to find existing quant
-            existing_quant = ctx.env["stock.quant"]._gather(
-                product, location, strict=False
-            )
+            existing_quant = Quant._gather(product, location, strict=False)
 
             if existing_quant:
-                existing_quant.sudo().write(
+                existing_quant.write(
                     {
                         "quantity": vals["quantity"],
                         "reserved_quantity": vals["reserved_quantity"],
                     }
                 )
             else:
-                ctx.env["stock.quant"].sudo().create(vals)
+                Quant.create(vals)
             created_count += 1
 
         _logger.info(f"Processed {created_count} stock quant records.")
