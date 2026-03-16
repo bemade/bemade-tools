@@ -369,10 +369,12 @@ class XtupleProductImporter(models.AbstractModel):
         # Determine if product is sold (based on category)
         is_sold = product.get("item_prodcat_id") in [28, 31, 32, 33, 34]
 
-        # Get product name
-        name = product.get("item_descrip1", "")
-        if not name:
-            name = product.get("item_number", "")
+        # Get product name (from item_number per client requirement)
+        # Client wants: item_number -> name, item_descrip1 -> default_code (Reference)
+        name = product.get("item_number", "")
+
+        # Reference field gets the description
+        default_code = product.get("item_descrip1", "")
 
         description = product.get("item_descrip2", "")
 
@@ -389,7 +391,7 @@ class XtupleProductImporter(models.AbstractModel):
         return {
             "name": name,
             "description": description,
-            "default_code": product.get("item_number"),
+            "default_code": default_code,
             "barcode": product.get("item_upccode"),
             "type": product_type,
             "tracking": tracking,
@@ -417,12 +419,13 @@ class XtupleProductImporter(models.AbstractModel):
         create_vals = [self._transform_product(p) for p in new_products]
 
         # Transform products that need xTuple fields updated
+        # Note: default_code gets item_descrip1 per client requirement (fields were reversed)
         update_vals = []
         for product in products_to_update:
             item_type = product.get("item_type", "")
             update_vals.append(
                 {
-                    "default_code": product.get("item_number"),
+                    "default_code": product.get("item_descrip1"),
                     "xtuple_item_id": product.get("item_id"),
                     "xtuple_item_number": product.get("item_number"),
                     "xtuple_item_type": item_type,
