@@ -419,13 +419,19 @@ class XtupleProductImporter(models.AbstractModel):
         create_vals = [self._transform_product(p) for p in new_products]
 
         # Transform products that need xTuple fields updated
-        # Note: default_code gets item_descrip1 per client requirement (fields were reversed)
+        # Note: Fields were reversed in original import - fixing both name and default_code
+        # xTuple item_number (Product name) -> Odoo name
+        # xTuple item_descrip1 (Description) -> Odoo default_code (Reference)
+        # IMPORTANT: Products in Odoo currently have default_code = item_number (wrong mapping)
+        # We need to look up by item_number (current default_code) to find them
         update_vals = []
         for product in products_to_update:
             item_type = product.get("item_type", "")
             update_vals.append(
                 {
+                    "name": product.get("item_number"),
                     "default_code": product.get("item_descrip1"),
+                    "_lookup_code": product.get("item_number"),  # Current default_code in Odoo
                     "xtuple_item_id": product.get("item_id"),
                     "xtuple_item_number": product.get("item_number"),
                     "xtuple_item_type": item_type,
@@ -463,21 +469,36 @@ class XtupleProductImporter(models.AbstractModel):
             updated = 0
             tmpl_ids_to_invalidate = []
             for vals in update_vals:
-                default_code = vals.pop("default_code")
+                # Pop the fields we need for lookup before writing
+                lookup_code = vals.pop("_lookup_code")  # Current default_code in Odoo (item_number)
+                xtuple_item_id = vals.get("xtuple_item_id")
+                uom_id = vals.pop("uom_id", None)
+                
+                # Look up product by xtuple_item_id (most reliable since that's already correct)
+                # Fallback to _lookup_code (current default_code = item_number in Odoo)
+                product = ctx.env["product.product"].search(
+                    [("xtuple_item_id", "=", xtuple_item_id)], limit=1
+                )
+                if not product:
+                    product = ctx.env["product.product"].search(
+                        [("default_code", "=", lookup_code)], limit=1
+                    )
+                if not product:
+                    continue
+                
                 # Pop uom_id before the ORM write and apply it separately:
                 # product.template.write() calls _update_uom() then fires the
                 # account @api.constrains which blocks cross-UoM changes on
                 # products with posted invoices. Instead we call _update_uom()
                 # directly (to cascade the new UoM onto moves, BOMs, etc.) and
                 # then write uom_id/uom_po_id via SQL.
-                uom_id = vals.pop("uom_id", None)
-                product = ctx.env["product.product"].search(
-                    [("default_code", "=", default_code)], limit=1
-                )
-                if not product:
-                    continue
                 if vals:
-                    product.write(vals)
+                    # name is on product.template, other fields on product.product
+                    name_val = vals.pop("name", None)
+                    if name_val:
+                        product.product_tmpl_id.write({"name": name_val})
+                    if vals:
+                        product.write(vals)
                 if uom_id and uom_id != product.uom_id.id:
                     product.product_variant_ids.with_context(
                         skip_uom_conversion=True
@@ -811,3 +832,132 @@ class XtupleProductLinker(models.AbstractModel):
             )
 
         _logger.info(f"Linked {len(link_updates)} existing products to xTuple items")
+
+
+# =============================================================================
+# Product Field Fix Pipeline (corrects name/reference swap)
+# =============================================================================
+
+
+@ETL.pipeline(
+    target_model="product.product",
+    importer_name="xtuple.product.fieldfix.importer",
+    sap_source="item",
+    depends_on=["xtuple.product.importer"],
+)
+class XtupleProductFieldFixImporter(models.AbstractModel):
+    """ETL Pipeline to fix products where name and default_code were swapped.
+
+    Original import incorrectly mapped:
+        - item_number -> default_code (Reference)
+        - item_descrip1 -> name (Product Name)
+
+    Correct mapping (per client requirement):
+        - item_number -> name (Product Name)
+        - item_descrip1 -> default_code (Reference)
+
+    This pipeline reimports products that already have xtuple_item_id set
+    and fixes the name and default_code fields.
+    """
+
+    _name = "xtuple.product.fieldfix.importer"
+    _description = "xTuple Product Field Fix Importer"
+
+    @ETL.extract("item")
+    def extract_products_to_fix(self, ctx: ETLContext) -> List[Dict]:
+        """Extract products from Odoo that have xtuple_item_id and need fixing."""
+        # Get all products with xtuple_item_id
+        ctx.env.cr.execute(
+            """
+            SELECT pp.id, pp.default_code, pt.name, pp.xtuple_item_id, pp.xtuple_item_number
+            FROM product_product pp
+            JOIN product_template pt ON pp.product_tmpl_id = pt.id
+            WHERE pp.xtuple_item_id IS NOT NULL
+            """
+        )
+        odoo_products = ctx.env.cr.dictfetchall()
+        _logger.info(f"Found {len(odoo_products)} products with xtuple_item_id in Odoo")
+
+        if not odoo_products:
+            return []
+
+        # Get the xtuple item data for these products
+        item_ids = [p["xtuple_item_id"] for p in odoo_products]
+
+        # We only need item_id, item_number, and item_descrip1 for the fix
+        select_clause = """
+        SELECT
+            item_id,
+            item_number,
+            item_descrip1
+        FROM item
+        WHERE item_id IN %s
+        """
+        ctx.cr.execute(select_clause, (tuple(item_ids),))
+        xtuple_items = ctx.cr.dictfetchall()
+        _logger.info(f"Found {len(xtuple_items)} xTuple items to check")
+
+        # Create lookup by item_id
+        xtuple_by_id = {item["item_id"]: item for item in xtuple_items}
+
+        # Embed Odoo data in xTuple items
+        odoo_by_item_id = {p["xtuple_item_id"]: p for p in odoo_products}
+        for item in xtuple_items:
+            item["_odoo_product_id"] = odoo_by_item_id.get(item["item_id"], {}).get("id")
+            item["_odoo_name"] = odoo_by_item_id.get(item["item_id"], {}).get("name")
+            item["_odoo_default_code"] = odoo_by_item_id.get(item["item_id"], {}).get("default_code")
+
+        return xtuple_items
+
+    @ETL.transform()
+    def transform_products_to_fix(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+        """Transform xTuple items into field fix updates."""
+        items = extracted.get("extract_products_to_fix", [])
+
+        fix_vals = []
+        for item in items:
+            odoo_product_id = item.get("_odoo_product_id")
+            if not odoo_product_id:
+                continue
+
+            # Correct mapping:
+            # item_number -> name (Product Name)
+            # item_descrip1 -> default_code (Reference)
+            correct_name = item.get("item_number", "")
+            correct_default_code = item.get("item_descrip1", "")
+
+            fix_vals.append(
+                {
+                    "product_id": odoo_product_id,
+                    "name": correct_name,
+                    "default_code": correct_default_code,
+                }
+            )
+
+        _logger.info(f"Prepared {len(fix_vals)} products for field fix")
+        return fix_vals
+
+    @ETL.load()
+    def load_field_fixes(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Apply field fixes to products."""
+        fix_vals = transformed.get("transform_products_to_fix", [])
+
+        if not fix_vals:
+            _logger.info("No products to fix")
+            return
+
+        fixed = 0
+        for vals in fix_vals:
+            product_id = vals.pop("product_id")
+
+            product = ctx.env["product.product"].browse(product_id)
+            if not product.exists():
+                continue
+
+            # Update name on template and default_code on variant
+            product.product_tmpl_id.write({"name": vals["name"]})
+            product.write({"default_code": vals["default_code"]})
+
+            fixed += 1
+
+        _logger.info(f"Fixed {fixed} products with correct name/reference mapping")
