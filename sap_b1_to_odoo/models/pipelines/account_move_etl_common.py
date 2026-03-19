@@ -156,17 +156,18 @@ class AccountMoveCommon(models.AbstractModel):
 
         cogs_account_id = cogs_account_info[0]
 
-        # Get stock valuation account from product category
-        # For now, use a lookup by common stock account codes
-        stock_account_id = None
-        for code, (acc_id, acc_type) in accounts_dict.items():
-            if acc_type == "asset_current" and "107" in str(code):
-                stock_account_id = acc_id
-                break
+        # Get stock valuation account from SAP item group configuration.
+        # Resolved during extraction: itemcode → OITM.itmsgrpcod → OITB.balinvntac
+        stock_acct_formatcode = row.get("stock_acct_formatcode")
+        stock_account_info = (
+            accounts_dict.get(stock_acct_formatcode) if stock_acct_formatcode else None
+        )
+        stock_account_id = stock_account_info[0] if stock_account_info else None
 
         if not stock_account_id:
             _logger.warning(
-                f"Stock valuation account not found, skipping COGS for "
+                f"Stock valuation account not found for itemcode={row.get('itemcode')}, "
+                f"stock_acct_formatcode={stock_acct_formatcode}, skipping COGS for "
                 f"docentry={row.get('docentry')}, linenum={row.get('linenum')}"
             )
             return []
@@ -445,18 +446,23 @@ class AccountMoveCommon(models.AbstractModel):
     @api.model
     def _get_lines(self, cr, lines_table, sap_orders):
         docentries = [order["docentry"] for order in sap_orders]
-        # Get product lines with account formatcode and COGS account
+        # Get product lines with account formatcode, COGS account, and stock
+        # valuation account (resolved from item group: OITM → OITB → OACT)
         query = SQL(
             """
-            SELECT 
-                l.*, 
+            SELECT
+                l.*,
                 'product' as line_type,
                 a.formatcode as acct_formatcode,
-                cogs.formatcode as cogs_formatcode
+                cogs.formatcode as cogs_formatcode,
+                stock_acct.formatcode as stock_acct_formatcode
             FROM %s l
             LEFT JOIN oact a ON l.acctcode = a.acctcode
             LEFT JOIN oact cogs ON l.cogsacct = cogs.acctcode
-            WHERE l.docentry in %s 
+            LEFT JOIN oitm ON l.itemcode = oitm.itemcode
+            LEFT JOIN oitb ON oitm.itmsgrpcod = oitb.itmsgrpcod
+            LEFT JOIN oact stock_acct ON oitb.balinvntac = stock_acct.acctcode
+            WHERE l.docentry in %s
             ORDER BY l.docentry, l.linenum
             """,
             SQL.identifier(lines_table),
@@ -531,8 +537,8 @@ class AccountMoveCommon(models.AbstractModel):
                         )
                     )
                 )
-                # Add COGS lines for customer invoices (inv1) with stockvalue
-                if "inv" in sap_line_table.lower():
+                # Add COGS lines for sales documents (invoices and credit memos)
+                if sap_line_table.lower() in ("inv1", "rin1"):
                     cogs_lines = self._get_cogs_line_vals(line, lookups)
                     for cogs_vals in cogs_lines:
                         move_lines.append(Command.create(cogs_vals))
