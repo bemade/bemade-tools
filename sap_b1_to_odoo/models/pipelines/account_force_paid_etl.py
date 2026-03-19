@@ -1,6 +1,6 @@
 import logging
 
-from odoo import api, models
+from odoo import models
 from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
 from odoo.addons.etl_framework.utils import post_lock
 
@@ -123,19 +123,13 @@ class AccountForcePaidReconciliation(models.AbstractModel):
             _logger.error("[ForcePaidReconciliation] SAPRC journal not found!")
             return []
 
-        # Get receivable and payable accounts
-        receivable_account = ctx.env["account.account"].search(
-            [("account_type", "=", "asset_receivable")],
+        # Get bank account for the counterpart line (same approach as payment pipeline)
+        bank_account = ctx.env["account.account"].search(
+            [("account_type", "=", "asset_cash")],
             limit=1,
         )
-        payable_account = ctx.env["account.account"].search(
-            [("account_type", "=", "liability_payable")],
-            limit=1,
-        )
-        if not receivable_account or not payable_account:
-            _logger.error(
-                "[ForcePaidReconciliation] No receivable/payable account found!"
-            )
+        if not bank_account:
+            _logger.error("[ForcePaidReconciliation] No bank account found!")
             return []
 
         # Only return documents that need reconciliation
@@ -153,8 +147,7 @@ class AccountForcePaidReconciliation(models.AbstractModel):
                 "invoices_map": invoices_map,
                 "bills_map": bills_map,
                 "journal_id": payment_journal.id,
-                "receivable_account_id": receivable_account.id,
-                "payable_account_id": payable_account.id,
+                "bank_account_id": bank_account.id,
             },
         )
 
@@ -196,8 +189,7 @@ class AccountForcePaidReconciliation(models.AbstractModel):
         return {
             "data": reconciliation_data,
             "journal_id": cache.get("journal_id"),
-            "receivable_account_id": cache.get("receivable_account_id"),
-            "payable_account_id": cache.get("payable_account_id"),
+            "bank_account_id": cache.get("bank_account_id"),
         }
 
     @ETL.load()
@@ -206,8 +198,7 @@ class AccountForcePaidReconciliation(models.AbstractModel):
         result = transformed.get("transform_force_paid", {})
         reconciliation_data = result.get("data", [])
         journal_id = result.get("journal_id")
-        receivable_account_id = result.get("receivable_account_id")
-        payable_account_id = result.get("payable_account_id")
+        bank_account_id = result.get("bank_account_id")
 
         if not reconciliation_data:
             _logger.info(
@@ -215,9 +206,9 @@ class AccountForcePaidReconciliation(models.AbstractModel):
             )
             return
 
-        if not journal_id or not receivable_account_id or not payable_account_id:
+        if not journal_id or not bank_account_id:
             _logger.warning(
-                "[ForcePaidReconciliation] Missing journal or accounts, skipping"
+                "[ForcePaidReconciliation] Missing journal or bank account, skipping"
             )
             return
 
@@ -246,10 +237,8 @@ class AccountForcePaidReconciliation(models.AbstractModel):
             # Determine account type based on document type
             if doc_type == "customer":
                 account_type = "asset_receivable"
-                offset_account_id = receivable_account_id
             else:
                 account_type = "liability_payable"
-                offset_account_id = payable_account_id
 
             # Find the receivable/payable line to reconcile
             line_to_reconcile = move.line_ids.filtered(
@@ -261,19 +250,16 @@ class AccountForcePaidReconciliation(models.AbstractModel):
                 skipped_no_line += 1
                 continue
 
-            # Create journal entry to write off the remaining balance
-            # For customer: credit receivable, debit offset
-            # For vendor: debit payable, credit offset
-            if doc_type == "customer":
-                line1_debit, line1_credit = 0, amount_residual
-                line2_debit, line2_credit = amount_residual, 0
-            else:
-                line1_debit, line1_credit = amount_residual, 0
-                line2_debit, line2_credit = 0, amount_residual
-
-            # Use the same account for both sides to ensure reconciliation works
-            # (bills may have different payable accounts)
             reconcile_account_id = line_to_reconcile[0].account_id.id
+
+            # Create journal entry: receivable/payable line (for reconciliation)
+            # offset by a bank line (the money went somewhere)
+            if doc_type == "customer":
+                recv_debit, recv_credit = 0, amount_residual
+                bank_debit, bank_credit = amount_residual, 0
+            else:
+                recv_debit, recv_credit = amount_residual, 0
+                bank_debit, bank_credit = 0, amount_residual
 
             writeoff_vals = {
                 "journal_id": journal_id,
@@ -286,8 +272,8 @@ class AccountForcePaidReconciliation(models.AbstractModel):
                         {
                             "account_id": reconcile_account_id,
                             "partner_id": move.partner_id.id,
-                            "debit": line1_debit,
-                            "credit": line1_credit,
+                            "debit": recv_debit,
+                            "credit": recv_credit,
                             "name": ref,
                         },
                     ),
@@ -295,10 +281,10 @@ class AccountForcePaidReconciliation(models.AbstractModel):
                         0,
                         0,
                         {
-                            "account_id": reconcile_account_id,
+                            "account_id": bank_account_id,
                             "partner_id": move.partner_id.id,
-                            "debit": line2_debit,
-                            "credit": line2_credit,
+                            "debit": bank_debit,
+                            "credit": bank_credit,
                             "name": ref,
                         },
                     ),
@@ -310,17 +296,10 @@ class AccountForcePaidReconciliation(models.AbstractModel):
                 with post_lock(ctx.env.cr, journal_id):
                     writeoff_move.action_post()
 
-                # Reconcile with the invoice/bill
-                if doc_type == "customer":
-                    writeoff_line = writeoff_move.line_ids.filtered(
-                        lambda l: l.account_id.account_type == "asset_receivable"
-                        and l.credit > 0
-                    )
-                else:
-                    writeoff_line = writeoff_move.line_ids.filtered(
-                        lambda l: l.account_id.account_type == "liability_payable"
-                        and l.debit > 0
-                    )
+                # Find the receivable/payable line on the new JE to reconcile
+                writeoff_line = writeoff_move.line_ids.filtered(
+                    lambda l: l.account_id.id == reconcile_account_id
+                )
 
                 if writeoff_line and line_to_reconcile:
                     (line_to_reconcile + writeoff_line).reconcile()
