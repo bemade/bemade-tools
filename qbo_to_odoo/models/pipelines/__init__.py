@@ -23,3 +23,4 @@ from . import expense_etl
 from . import deposit_etl
 from . import sales_receipt_etl
 from . import refund_receipt_etl
+from . import archive_inactive_accounts_etl
