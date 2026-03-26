@@ -3,16 +3,14 @@
 This module handles the migration of Transfers from QBO to Odoo
 as journal entries using the ETL framework.
 
-QBO Transfers represent bank-to-bank transfers. Each transfer creates
-one or two journal entries depending on whether the source and
-destination accounts are in the same currency:
+QBO Transfers represent bank-to-bank transfers.  Each transfer always
+creates **two journal entries** routed through the company's internal
+transfer (transit) account — one per bank journal — mirroring Odoo's
+native internal-transfer pattern.  The transit-account lines are
+auto-reconciled after posting.
 
-* **Same-currency**: a single JE in the bank journal of the source
-  account debiting the destination and crediting the source.
-* **Cross-currency**: two JEs routed through the company's internal
-  transfer (transit) account — one per bank journal — mirroring
-  Odoo's native internal-transfer pattern.  The transit-account lines
-  are auto-reconciled after posting.
+For accounts with a secondary currency (e.g. a USD bank account),
+the bank line carries ``currency_id`` and ``amount_currency``.
 """
 
 import logging
@@ -74,13 +72,13 @@ class QboTransferImporter(models.AbstractModel):
         extractor.preload_journals("general")
         extractor.preload_account_journal_map()
 
-        # Transit account for cross-currency transfers
+        # Transit account — required for all transfers (two-JE pattern)
         company = ctx.env.company
         transit_account = company.transfer_account_id
         if not transit_account:
-            _logger.warning(
+            _logger.error(
                 "No internal transfer account configured on company — "
-                "cross-currency transfers will fall back to single-JE mode"
+                "transfers cannot be imported"
             )
         extractor.extra["transit_account_id"] = transit_account.id if transit_account else None
 
@@ -91,10 +89,11 @@ class QboTransferImporter(models.AbstractModel):
 
     @ETL.transform()
     def transform_transfers(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
-        """Transform QBO transfers into Odoo account.move journal entry values.
+        """Transform QBO transfers into Odoo account.move journal entry pairs.
 
-        Same-currency transfers produce one move; cross-currency transfers
-        produce a pair of moves routed through the transit account.
+        Every transfer produces two JEs routed through the company's
+        internal transfer (transit) account — matching Odoo's native
+        internal-transfer pattern.
         """
         data = extracted.get("extract_transfers")
         if not data:
@@ -105,11 +104,18 @@ class QboTransferImporter(models.AbstractModel):
         builder = QBOMoveBuilder(context["extractor"])
         transit_account_id = builder.get_extra("transit_account_id")
 
+        if not transit_account_id:
+            _logger.error(
+                "No internal transfer account configured on company — "
+                "cannot import transfers"
+            )
+            return []
+
         move_vals_list = []
         skipped = 0
 
         for transfer in transfers:
-            result = self._build_transfer_moves(
+            result = self._build_transfer_pair(
                 builder, transfer, transit_account_id,
             )
             if result:
@@ -128,15 +134,20 @@ class QboTransferImporter(models.AbstractModel):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_transfer_moves(
+    def _build_transfer_pair(
         builder: QBOMoveBuilder,
         transfer: Dict,
-        transit_account_id: Optional[int],
+        transit_account_id: int,
     ) -> Optional[List[Dict]]:
-        """Build one or two JE vals dicts for a single QBO Transfer.
+        """Build a pair of JEs for a QBO Transfer via the transit account.
 
-        Returns a list of move vals (length 1 for same-currency, 2 for
-        cross-currency) or None to skip.
+        Always produces two JEs regardless of currency — each JE sits in
+        the bank journal of one side, with the transit account as the
+        counterpart.  Transit lines are reconciled after posting.
+
+        For accounts with a secondary currency (e.g. USD bank), the bank
+        line carries ``currency_id`` and ``amount_currency``.  For
+        company-currency accounts, the line uses only ``debit``/``credit``.
         """
         qbo_id = transfer.get("Id")
         amount = float(transfer.get("Amount", 0) or 0)
@@ -169,142 +180,49 @@ class QboTransferImporter(models.AbstractModel):
             )
             return None
 
-        # Resolve QBO transaction currency
+        # QBO transaction currency and company-currency equivalent
         currency_id, is_foreign, exchange_rate = builder.resolve_currency(transfer)
         amount_company = builder.convert_to_company_currency(
             amount, exchange_rate, is_foreign,
         )
-
-        # Determine whether the two accounts are in different currencies.
-        # account_currency_map is keyed by QBO ID and holds the Odoo
-        # currency_id (None = company currency).
-        from_currency = builder.account_currency_map.get(int(from_qbo_id))
-        to_currency = builder.account_currency_map.get(int(to_qbo_id))
-        is_cross_currency = (
-            is_foreign
-            and transit_account_id
-            and from_currency != to_currency
-        )
+        company_currency_id = builder._company_currency_id
 
         txn_date = transfer.get("TxnDate")
         ref = f"Transfer QBO-{qbo_id}"
 
-        if is_cross_currency:
-            assert transit_account_id is not None  # guarded by is_cross_currency
-            return QboTransferImporter._build_cross_currency_pair(
-                builder, qbo_id, txn_date, ref,
-                amount, amount_company, currency_id,
-                from_account_id, to_account_id,
-                from_ref, to_ref,
-                transit_account_id,
-            )
+        # Per-account secondary currencies (None = company currency)
+        from_acct_currency = builder.account_currency_map.get(int(from_qbo_id))
+        to_acct_currency = builder.account_currency_map.get(int(to_qbo_id))
 
-        # Same-currency: single JE (source journal preferred)
-        return QboTransferImporter._build_same_currency_move(
-            builder, qbo_id, txn_date, ref,
-            amount, amount_company, currency_id, is_foreign,
-            from_account_id, to_account_id,
-            from_ref, to_ref,
-        )
-
-    @staticmethod
-    def _build_same_currency_move(
-        builder: QBOMoveBuilder,
-        qbo_id, txn_date, ref,
-        amount, amount_company, currency_id, is_foreign,
-        from_account_id, to_account_id,
-        from_ref, to_ref,
-    ) -> Optional[List[Dict]]:
-        """Single JE for a same-currency transfer."""
-        # Prefer the bank journal of the source account; fall back to general
-        journal_id = (
-            builder.get_journal_id_for_account(from_account_id, fallback_type=None)
-            or builder.get_journal_id_for_account(to_account_id, fallback_type=None)
-            or builder.get_journal_id("general")
-        )
-
-        from_line = {
-            "account_id": from_account_id,
-            "name": f"Transfer to {to_ref.get('name', 'account')}",
-            "credit": amount_company,
-            "debit": 0,
-        }
-        to_line = {
-            "account_id": to_account_id,
-            "name": f"Transfer from {from_ref.get('name', 'account')}",
-            "debit": amount_company,
-            "credit": 0,
-        }
-
-        if is_foreign:
-            from_line["currency_id"] = currency_id
-            from_line["amount_currency"] = -amount
-            to_line["currency_id"] = currency_id
-            to_line["amount_currency"] = amount
-
-        line_ids = [(0, 0, from_line), (0, 0, to_line)]
-        builder.balance_lines(line_ids, is_foreign, ref)
-
-        return [{
-            "move_type": "entry",
-            "journal_id": journal_id,
-            "date": txn_date,
-            "ref": ref,
-            "qbo_transfer_id": int(qbo_id) if qbo_id else 0,
-            "company_id": builder._company_id,
-            "currency_id": currency_id,
-            "line_ids": line_ids,
-        }]
-
-    @staticmethod
-    def _build_cross_currency_pair(
-        builder: QBOMoveBuilder,
-        qbo_id, txn_date, ref,
-        amount_foreign, amount_company,
-        foreign_currency_id,
-        from_account_id, to_account_id,
-        from_ref, to_ref,
-        transit_account_id: int,
-    ) -> Optional[List[Dict]]:
-        """Two JEs for a cross-currency transfer via the transit account.
-
-        QBO CurrencyRef/Amount are in the foreign currency (e.g. USD).
-        amount_company is the CAD equivalent (amount × rate).
-
-        JE 1 — source bank journal (foreign currency):
-            Credit source account  (foreign amount)
-            Debit  transit account (company amount)
-
-        JE 2 — destination bank journal (company currency):
-            Debit  destination account (company amount)
-            Credit transit account     (company amount)
-        """
-        company_currency_id = builder._company_currency_id
-
-        # --- JE 1: outgoing from the foreign-currency bank ---
+        # --- JE 1: source side (money leaving from_account) ---
         from_journal_id = (
             builder.get_journal_id_for_account(from_account_id, fallback_type=None)
             or builder.get_journal_id("general")
         )
+        from_is_foreign = (
+            from_acct_currency and from_acct_currency != company_currency_id
+        )
 
-        from_line = {
+        from_bank_line = {
             "account_id": from_account_id,
             "name": f"Transfer to {to_ref.get('name', 'account')}",
             "credit": amount_company,
             "debit": 0,
-            "currency_id": foreign_currency_id,
-            "amount_currency": -amount_foreign,
         }
-        transit_debit_line = {
+        if from_is_foreign:
+            from_bank_line["currency_id"] = from_acct_currency
+            from_bank_line["amount_currency"] = -amount
+
+        from_transit_line = {
             "account_id": transit_account_id,
             "name": f"Transfer to {to_ref.get('name', 'account')}",
             "debit": amount_company,
             "credit": 0,
         }
 
-        je1_lines = [(0, 0, from_line), (0, 0, transit_debit_line)]
-        builder.balance_lines(je1_lines, True, f"{ref} (out)")
+        je1_lines = [(0, 0, from_bank_line), (0, 0, from_transit_line)]
 
+        je1_currency = from_acct_currency if from_is_foreign else company_currency_id
         je1 = {
             "move_type": "entry",
             "journal_id": from_journal_id,
@@ -312,32 +230,39 @@ class QboTransferImporter(models.AbstractModel):
             "ref": ref,
             "qbo_transfer_id": int(qbo_id) if qbo_id else 0,
             "company_id": builder._company_id,
-            "currency_id": foreign_currency_id,
+            "currency_id": je1_currency,
             "line_ids": je1_lines,
         }
 
-        # --- JE 2: incoming to the company-currency bank ---
+        # --- JE 2: destination side (money arriving to to_account) ---
         to_journal_id = (
             builder.get_journal_id_for_account(to_account_id, fallback_type=None)
             or builder.get_journal_id("general")
         )
+        to_is_foreign = (
+            to_acct_currency and to_acct_currency != company_currency_id
+        )
 
-        to_line = {
+        to_bank_line = {
             "account_id": to_account_id,
             "name": f"Transfer from {from_ref.get('name', 'account')}",
             "debit": amount_company,
             "credit": 0,
         }
-        transit_credit_line = {
+        if to_is_foreign:
+            to_bank_line["currency_id"] = to_acct_currency
+            to_bank_line["amount_currency"] = amount
+
+        to_transit_line = {
             "account_id": transit_account_id,
             "name": f"Transfer from {from_ref.get('name', 'account')}",
             "credit": amount_company,
             "debit": 0,
         }
 
-        je2_lines = [(0, 0, to_line), (0, 0, transit_credit_line)]
-        builder.balance_lines(je2_lines, False, f"{ref} (in)")
+        je2_lines = [(0, 0, to_bank_line), (0, 0, to_transit_line)]
 
+        je2_currency = to_acct_currency if to_is_foreign else company_currency_id
         je2 = {
             "move_type": "entry",
             "journal_id": to_journal_id,
@@ -345,7 +270,7 @@ class QboTransferImporter(models.AbstractModel):
             "ref": ref,
             "qbo_transfer_id": int(qbo_id) if qbo_id else 0,
             "company_id": builder._company_id,
-            "currency_id": company_currency_id,
+            "currency_id": je2_currency,
             "line_ids": je2_lines,
         }
 
@@ -416,9 +341,26 @@ class QboTransferImporter(models.AbstractModel):
         reconciled = 0
         for qbo_tid, lines in groups.items():
             if len(lines) == 2:
-                pair = lines[0] | lines[1]
                 try:
-                    pair.reconcile()
+                    line_a, line_b = lines
+                    # Identify debit and credit sides
+                    if line_a.balance >= 0:
+                        debit_line, credit_line = line_a, line_b
+                    else:
+                        debit_line, credit_line = line_b, line_a
+                    amount = abs(debit_line.amount_residual)
+                    ctx.env["account.partial.reconcile"].create({
+                        "debit_move_id": debit_line.id,
+                        "credit_move_id": credit_line.id,
+                        "amount": amount,
+                        "debit_amount_currency": abs(
+                            debit_line.amount_residual_currency
+                        ),
+                        "credit_amount_currency": abs(
+                            credit_line.amount_residual_currency
+                        ),
+                        "company_id": debit_line.company_id.id,
+                    })
                     reconciled += 1
                 except Exception:
                     _logger.warning(
