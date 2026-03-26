@@ -238,9 +238,10 @@ class QboDepositImporter(models.AbstractModel):
             )
             return None
 
-        # Add tax lines from TxnTaxDetail
+        # Add tax lines from TxnTaxDetail — deposits are income,
+        # so tax collected is a credit (liability).
         tax_line_tuples, _total_tax_company = builder.build_tax_lines_from_detail(
-            deposit, currency_id, exchange_rate, is_foreign,
+            deposit, currency_id, exchange_rate, is_foreign, as_credit=True,
         )
         line_ids.extend(tax_line_tuples)
 
