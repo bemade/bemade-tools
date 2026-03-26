@@ -218,32 +218,15 @@ class QboAccountImporter(models.AbstractModel):
 
             account_vals.append(vals)
 
-        # Collect QBO IDs of inactive accounts for archiving after load
-        inactive_qbo_ids = [
-            int(account.get("Id"))
-            for account in accounts
-            if not account.get("Active", True) and account.get("Id")
-        ]
         _logger.info(
-            f"Transformed {len(account_vals)} accounts, skipped {skipped}, "
-            f"{len(inactive_qbo_ids)} inactive QBO accounts to archive"
+            f"Transformed {len(account_vals)} accounts, skipped {skipped}"
         )
-        return {
-            "account_vals": account_vals,
-            "inactive_qbo_ids": inactive_qbo_ids,
-        }
+        return account_vals
 
     @ETL.load()
     def load_accounts(self, ctx: ETLContext, transformed: Dict) -> None:
         """Load accounts into Odoo and set proper defaults."""
-        transform_result = transformed.get("transform_accounts", {})
-        # Support both old list format and new dict format
-        if isinstance(transform_result, list):
-            account_vals = transform_result
-            inactive_qbo_ids = []
-        else:
-            account_vals = transform_result.get("account_vals", [])
-            inactive_qbo_ids = transform_result.get("inactive_qbo_ids", [])
+        account_vals = transformed.get("transform_accounts", [])
 
         if not account_vals:
             _logger.info("No new accounts to create")
@@ -252,58 +235,8 @@ class QboAccountImporter(models.AbstractModel):
             accounts = ctx.env["account.account"].create(account_vals)
             _logger.info(f"Created {len(accounts)} accounts")
 
-        # Archive QBO-imported accounts that are marked inactive in QBO
-        self._archive_inactive_qbo_accounts(ctx, inactive_qbo_ids)
-
         # Always set account defaults (fixes company fields even on re-runs)
         self._set_account_defaults(ctx)
-
-    def _archive_inactive_qbo_accounts(
-        self, ctx: ETLContext, inactive_qbo_ids: List[int]
-    ) -> None:
-        """Archive Odoo accounts that correspond to inactive QBO accounts.
-
-        Finds all ``account.account`` records imported from QBO (i.e. with a
-        ``qbo_id``) whose matching QBO account is marked ``Active=false``, and
-        sets ``active=False`` on them in Odoo.
-
-        :param ctx: ETL context.
-        :param inactive_qbo_ids: List of QBO account IDs that are inactive.
-        """
-        if not inactive_qbo_ids:
-            _logger.info("No inactive QBO accounts to archive")
-            return
-
-        accounts_to_archive = (
-            ctx.env["account.account"]
-            .with_context(active_test=False)
-            .search([("qbo_id", "in", inactive_qbo_ids)])
-        )
-
-        if not accounts_to_archive:
-            _logger.info(
-                f"No Odoo accounts found matching {len(inactive_qbo_ids)} "
-                f"inactive QBO IDs — nothing to archive"
-            )
-            return
-
-        already_archived = accounts_to_archive.filtered(lambda a: not a.active)
-        to_archive = accounts_to_archive - already_archived
-
-        if already_archived:
-            _logger.info(
-                f"{len(already_archived)} QBO-imported accounts were already "
-                f"archived: {', '.join(already_archived.mapped('code'))}"
-            )
-
-        if to_archive:
-            to_archive.write({"active": False})
-            _logger.info(
-                f"Archived {len(to_archive)} QBO-imported accounts that are "
-                f"inactive in QBO: {', '.join(to_archive.mapped('code'))}"
-            )
-        else:
-            _logger.info("All inactive QBO accounts were already archived in Odoo")
 
     def _set_account_defaults(self, ctx: ETLContext) -> None:
         """Set proper account defaults based on imported QBO accounts.
@@ -517,3 +450,84 @@ class QboAccountImporter(models.AbstractModel):
                     f"Updated {len(journals)} {journal_type} journals with "
                     f"default account: {account.code} - {account.name}"
                 )
+
+
+@ETL.pipeline(
+    target_model="account.account",
+    importer_name="qbo.account.finalizer",
+    sap_source="Account",
+    depends_on=[
+        "qbo.payment.importer",
+        "qbo.journal.entry.importer",
+        "qbo.transfer.importer",
+        "qbo.deposit.importer",
+        "qbo.expense.importer",
+        "qbo.sales.receipt.importer",
+        "qbo.refund.receipt.importer",
+        "qbo.tax.payment.importer",
+    ],
+)
+class QboAccountFinalizer(models.AbstractModel):
+    """Archive inactive QBO accounts after all transactions are posted.
+
+    This must run after every transaction pipeline so that moves referencing
+    inactive accounts can be posted before the accounts are archived.
+    """
+
+    _name = "qbo.account.finalizer"
+    _description = "QBO Account Finalizer"
+
+    @ETL.extract("Account")
+    def extract_inactive_accounts(self, ctx: ETLContext) -> List[Dict]:
+        """Fetch inactive accounts from QBO."""
+        api_client = get_api_client(ctx)
+        accounts = api_client.query_all(
+            entity="Account", where="Active = false", order_by="Id"
+        )
+        _logger.info(f"Found {len(accounts)} inactive accounts in QBO")
+        return accounts
+
+    @ETL.transform()
+    def transform_inactive_accounts(
+        self, ctx: ETLContext, extracted: Dict
+    ) -> List[int]:
+        """Collect QBO IDs of inactive accounts to archive."""
+        accounts = extracted.get("extract_inactive_accounts", [])
+        return [int(a["Id"]) for a in accounts if a.get("Id")]
+
+    @ETL.load()
+    def load_archive_accounts(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Archive Odoo accounts whose QBO counterparts are inactive."""
+        inactive_qbo_ids = transformed.get("transform_inactive_accounts", [])
+        if not inactive_qbo_ids:
+            _logger.info("No inactive QBO accounts to archive")
+            return
+
+        accounts_to_archive = (
+            ctx.env["account.account"]
+            .with_context(active_test=False)
+            .search([("qbo_id", "in", inactive_qbo_ids)])
+        )
+
+        if not accounts_to_archive:
+            _logger.info(
+                f"No Odoo accounts found matching {len(inactive_qbo_ids)} "
+                f"inactive QBO IDs — nothing to archive"
+            )
+            return
+
+        already_archived = accounts_to_archive.filtered(lambda a: not a.active)
+        to_archive = accounts_to_archive - already_archived
+
+        if already_archived:
+            _logger.info(
+                f"{len(already_archived)} QBO-imported accounts were already "
+                f"archived: {', '.join(already_archived.mapped('code'))}"
+            )
+
+        if to_archive:
+            to_archive.write({"active": False})
+            _logger.info(
+                f"Archived {len(to_archive)} QBO-imported accounts that are "
+                f"inactive in QBO: {', '.join(to_archive.mapped('code'))}"
+            )

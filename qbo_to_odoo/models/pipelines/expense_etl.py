@@ -31,6 +31,7 @@ _logger = logging.getLogger(__name__)
     depends_on=[
         "qbo.account.importer",
         "qbo.item.importer",
+        "qbo.tax.importer",
         "qbo.category.account.fixer",
     ],
 )
@@ -69,6 +70,9 @@ class QboExpenseImporter(models.AbstractModel):
         # Preload maps for transform
         extractor.preload("account", "product", "product_expense", "currency")
         extractor.preload_journals("general")
+
+        # Tax rate ref → tax account ID for expenses with TxnTaxDetail
+        extractor.preload_tax_rate_account_map()
 
         return ChunkableData(
             records=new_purchases,
@@ -157,6 +161,21 @@ class QboExpenseImporter(models.AbstractModel):
 
         if not line_ids:
             return None
+
+        # Add tax lines from TxnTaxDetail (not included in Line entries)
+        tax_line_tuples, total_tax_company = builder.build_tax_lines_from_detail(
+            purchase, currency_id, exchange_rate, is_foreign,
+        )
+        line_ids.extend(tax_line_tuples)
+        # Tax amounts affect the total owed to/from the payment account
+        total_amount_company += total_tax_company
+
+        # Compute foreign-currency tax total for the credit line
+        total_tax_foreign = 0.0
+        if is_foreign:
+            for _, _, tl in tax_line_tuples:
+                total_tax_foreign += tl.get("amount_currency", 0)
+            total_amount_foreign += total_tax_foreign
 
         # Credit line for payment account
         credit_line_vals = {

@@ -22,7 +22,7 @@ _logger = logging.getLogger(__name__)
     target_model="account.move",
     importer_name="qbo.journal.entry.importer",
     sap_source="JournalEntry",
-    depends_on=["qbo.account.importer"],
+    depends_on=["qbo.account.importer", "qbo.tax.importer"],
 )
 class QboJournalEntryImporter(models.AbstractModel):
     """ETL Pipeline for importing QBO Journal Entries."""
@@ -58,6 +58,9 @@ class QboJournalEntryImporter(models.AbstractModel):
         # Preload maps for transform
         extractor.preload("account", "account_currency", "currency")
         extractor.preload_journals("general")
+
+        # Tax rate ref → tax account ID for JEs with TxnTaxDetail
+        extractor.preload_tax_rate_account_map()
 
         return ChunkableData(
             records=new_entries,
@@ -170,6 +173,12 @@ class QboJournalEntryImporter(models.AbstractModel):
                     line_data["amount_currency"] = -credit
 
             line_vals.append((0, 0, line_data))
+
+        # Add tax lines from TxnTaxDetail (not included in Line entries)
+        tax_line_tuples, _total_tax = builder.build_tax_lines_from_detail(
+            entry, currency_id, exchange_rate, is_foreign,
+        )
+        line_vals.extend(tax_line_tuples)
 
         return line_vals or None
 
