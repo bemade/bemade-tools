@@ -86,3 +86,9 @@ class AccountMove(models.Model):
         copy=False,
         help="QuickBooks Online TaxPayment ID (sales tax remittances)",
     )
+    qbo_cc_payment_id = fields.Integer(
+        string="QBO CC Payment ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online CreditCardPayment ID",
+    )
