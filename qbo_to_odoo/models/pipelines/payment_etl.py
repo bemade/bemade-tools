@@ -715,33 +715,32 @@ class QboPaymentImporter(models.AbstractModel):
 
         reconciled = 0
         for account_id, group in sorted(by_account.items()):
-            with post_lock(ctx.env.cr, account_id):
-                for payment, payment_line, linked_moves in group:
-                    for linked_id, qbo_amount in linked_moves:
-                        with ctx.skippable(
-                            f"reconcile {payment.name} <-> move#{linked_id}"
-                        ):
-                            pay_line_open = payment_line.filtered(
-                                lambda l: not l.reconciled
+            for payment, payment_line, linked_moves in group:
+                for linked_id, qbo_amount in linked_moves:
+                    with ctx.skippable(
+                        f"reconcile {payment.name} <-> move#{linked_id}"
+                    ):
+                        pay_line_open = payment_line.filtered(
+                            lambda l: not l.reconciled
+                        )
+                        if not pay_line_open:
+                            break
+                        original_move = ctx.env["account.move"].browse(linked_id)
+                        inv_line = original_move.line_ids.filtered(
+                            lambda l, aid=account_id: (
+                                l.account_id.id == aid and not l.reconciled
                             )
-                            if not pay_line_open:
-                                break
-                            original_move = ctx.env["account.move"].browse(linked_id)
-                            inv_line = original_move.line_ids.filtered(
-                                lambda l, aid=account_id: (
-                                    l.account_id.id == aid and not l.reconciled
-                                )
+                        )
+                        if not inv_line:
+                            _logger.debug(
+                                f"No unreconciled {account_id} line on "
+                                f"move#{linked_id} for {payment.name}"
                             )
-                            if not inv_line:
-                                _logger.debug(
-                                    f"No unreconciled {account_id} line on "
-                                    f"move#{linked_id} for {payment.name}"
-                                )
-                                continue
-                            self._partial_reconcile(
-                                ctx, pay_line_open[0], inv_line[0], qbo_amount,
-                            )
-                            reconciled += 1
+                            continue
+                        self._partial_reconcile(
+                            ctx, pay_line_open[0], inv_line[0], qbo_amount,
+                        )
+                        reconciled += 1
 
         _logger.info(f"Reconciled {reconciled} payment/invoice pairs")
 

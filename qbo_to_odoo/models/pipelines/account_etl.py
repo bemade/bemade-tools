@@ -465,6 +465,8 @@ class QboAccountImporter(models.AbstractModel):
         "qbo.sales.receipt.importer",
         "qbo.refund.receipt.importer",
         "qbo.tax.payment.importer",
+        "qbo.cc.payment.importer",
+        "qbo.gl.import",
     ],
 )
 class QboAccountFinalizer(models.AbstractModel):
