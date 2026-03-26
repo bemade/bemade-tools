@@ -65,6 +65,13 @@ def _parse_journal_export(file_content: bytes) -> List[Dict]:
     transactions = []
     current_id = None
     current_lines = []
+    has_txn_id_col = False
+
+    for row in ws.iter_rows(min_row=5, max_row=5, values_only=True):
+        # Detect Transaction ID column (index 10)
+        if len(row) > 10 and row[10] and "Transaction ID" in str(row[10]):
+            has_txn_id_col = True
+        break
 
     for row in ws.iter_rows(min_row=6, values_only=True):
         col0 = row[0]
@@ -77,6 +84,7 @@ def _parse_journal_export(file_content: bytes) -> List[Dict]:
         acct_name = row[7]
         debit = row[8]
         credit = row[9]
+        txn_id_col = row[10] if len(row) > 10 else None
 
         # Transaction header (ID)
         if col0 and not txn_date:
@@ -97,8 +105,13 @@ def _parse_journal_export(file_content: bytes) -> List[Dict]:
                 current_lines = []
             continue
 
-        # Transaction line
+        # Transaction line — use Transaction ID column if available,
+        # otherwise fall back to the group header ID
         if txn_type and acct_code is not None:
+            if has_txn_id_col and txn_id_col:
+                line_txn_id = str(int(txn_id_col)) if isinstance(txn_id_col, float) else str(txn_id_col)
+                # Update current_id from the column for accuracy
+                current_id = line_txn_id
             # Parse date (DD/MM/YYYY → YYYY-MM-DD)
             date_str = str(txn_date) if txn_date else None
             if date_str and "/" in date_str:
