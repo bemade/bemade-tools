@@ -50,12 +50,28 @@
                             </p>
                         </group>
                     </group>
+                    <group string="QBO Journal Export">
+                        <group>
+                            <field name="gl_export_file" filename="gl_export_filename"
+                                   string="Journal Export (XLSX)"/>
+                            <field name="gl_export_filename" invisible="1"/>
+                        </group>
+                        <group>
+                            <p class="text-muted">
+                                Upload the QBO Journal export (All Dates, XLSX)
+                                before running the import. Payroll Cheques and other
+                                transactions not available via the API will be imported
+                                from this file. Use the Journal (not General Ledger)
+                                export for complete payroll deduction detail.
+                            </p>
+                        </group>
+                    </group>
                     <notebook>
                         <page string="Import Actions" invisible="state != 'connected'">
                             <group>
-                                <button name="action_import_all" 
-                                        string="Import All Data" 
-                                        type="object" 
+                                <button name="action_import_all"
+                                        string="Import All Data"
+                                        type="object"
                                         class="btn-primary"/>
                             </group>
                         </page>

@@ -165,7 +165,16 @@ class QBOApiClient:
         data = response.json()
         query_response = data.get("QueryResponse", {})
 
-        return query_response.get(entity, [])
+        # QBO usually returns results under the entity name, but some
+        # entities use a different key (e.g. CreditCardPayment →
+        # CreditCardPaymentTxn).  Fall back to the first list value.
+        results = query_response.get(entity)
+        if results is None:
+            for value in query_response.values():
+                if isinstance(value, list):
+                    results = value
+                    break
+        return results or []
 
     def query_all(
         self, entity: str, where: str = "", order_by: str = "Id"
@@ -312,6 +321,16 @@ class QboConnection(models.Model):
     last_invoice_sync = fields.Datetime(string="Last Invoice Sync")
     last_bill_sync = fields.Datetime(string="Last Bill Sync")
     last_journal_entry_sync = fields.Datetime(string="Last Journal Entry Sync")
+
+    # General Ledger export for transactions not available via the API
+    # (Payroll Cheques, Sales Tax Adjustments, Inventory Starting Values)
+    gl_export_file = fields.Binary(
+        string="General Ledger Export (XLSX)",
+        help="Upload the QBO General Ledger export (All Dates, Excel format) "
+        "to import Payroll Cheques and other transactions not available "
+        "via the QBO API.",
+    )
+    gl_export_filename = fields.Char(string="GL Export Filename")
 
     # Connection state
     state = fields.Selection(
