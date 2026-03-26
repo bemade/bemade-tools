@@ -383,7 +383,53 @@ class AccountJournalSetup(models.AbstractModel):
         if company_vals:
             company.write(company_vals)
 
+        # Set the suspense account on all bank/cash journal payment method lines
+        # that don't have one. Without this, payments skip the outstanding account
+        # and post directly to the destination (receivable/payable), bypassing the
+        # pending → reconciled workflow.
+        self._set_payment_method_suspense_accounts(ctx)
+
         # Note: chart_template field is a dynamic selection - only valid template codes
         # from installed modules are allowed. We don't set it here since SAP import
         # provides its own CoA. Odoo will not auto-install a chart template if accounts
         # already exist for the company.
+
+    def _set_payment_method_suspense_accounts(self, ctx: ETLContext):
+        """Set payment_account_id on bank/cash journal payment method lines.
+
+        When payment_account_id is empty, payments bypass the outstanding
+        account and post directly to the partner's receivable/payable. This
+        sets it to the company's suspense account so payments go through the
+        pending → reconciled workflow.
+        """
+        company = ctx.env.company
+        suspense_account = company.account_journal_suspense_account_id
+        if not suspense_account:
+            _logger.warning(
+                "No suspense account configured on company %s; "
+                "skipping payment method line setup.",
+                company.name,
+            )
+            return
+
+        bank_cash_journals = ctx.env["account.journal"].search(
+            [
+                ("company_id", "=", company.id),
+                ("type", "in", ("bank", "cash")),
+            ]
+        )
+        lines_to_fix = ctx.env["account.payment.method.line"].search(
+            [
+                ("journal_id", "in", bank_cash_journals.ids),
+                ("payment_account_id", "=", False),
+            ]
+        )
+        if lines_to_fix:
+            lines_to_fix.write({"payment_account_id": suspense_account.id})
+            _logger.info(
+                "Set payment_account_id to %s on %d payment method line(s) "
+                "across %d journal(s).",
+                suspense_account.display_name,
+                len(lines_to_fix),
+                len(lines_to_fix.mapped("journal_id")),
+            )
