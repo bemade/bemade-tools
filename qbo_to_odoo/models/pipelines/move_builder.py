@@ -194,15 +194,17 @@ class QBOMoveBuilder:
         product_id: Optional[int],
         direction: Literal["income", "expense"],
     ) -> Optional[int]:
-        """Resolve an account: AccountRef -> product fallback -> None."""
-        account_ref = detail.get("AccountRef", {})
-        if account_ref and account_ref.get("value"):
-            try:
-                account_id = self.account_map.get(int(account_ref["value"]))
-            except (ValueError, TypeError):
-                account_id = None
-            if account_id:
-                return account_id
+        """Resolve an account: AccountRef/ItemAccountRef -> product fallback -> None."""
+        # SalesItemLineDetail uses ItemAccountRef; AccountBased uses AccountRef
+        for ref_key in ("ItemAccountRef", "AccountRef"):
+            account_ref = detail.get(ref_key, {})
+            if account_ref and account_ref.get("value"):
+                try:
+                    account_id = self.account_map.get(int(account_ref["value"]))
+                except (ValueError, TypeError):
+                    account_id = None
+                if account_id:
+                    return account_id
         if product_id:
             if direction == "income":
                 return self.product_income_map.get(product_id)
