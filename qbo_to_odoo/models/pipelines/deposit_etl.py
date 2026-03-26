@@ -71,7 +71,7 @@ class QboDepositImporter(models.AbstractModel):
         extractor.preload_undeposited_funds()
 
         # Tax rate ref → tax account ID for deposits with TxnTaxDetail
-        extractor.preload_tax_rate_account_map()
+        extractor.preload_tax_rate_account_map(use_suspense=True)
 
         return ChunkableData(
             records=new_deposits,
