@@ -156,7 +156,7 @@ class QboExpenseImporter(models.AbstractModel):
             if line_vals:
                 amount_foreign = line_vals.pop("_amount_foreign", 0)
                 total_amount_foreign += amount_foreign
-                total_amount_company += line_vals.get("debit", 0)
+                total_amount_company += line_vals.get("debit", 0) - line_vals.get("credit", 0)
                 line_ids.append((0, 0, line_vals))
 
         if not line_ids:
@@ -189,6 +189,17 @@ class QboExpenseImporter(models.AbstractModel):
             credit_line_vals["amount_currency"] = -total_amount_foreign
 
         line_ids.append((0, 0, credit_line_vals))
+
+        # QBO Purchase entities with Credit=true are refunds/credits —
+        # the debit/credit sides are reversed.
+        if purchase.get("Credit"):
+            for _, _, lv in line_ids:
+                d, c = lv.get("debit", 0), lv.get("credit", 0)
+                lv["debit"] = c
+                lv["credit"] = d
+                if "amount_currency" in lv:
+                    lv["amount_currency"] = -lv["amount_currency"]
+
         return line_ids
 
     @ETL.load()
