@@ -62,32 +62,33 @@ class QboTaxPaymentImporter(models.AbstractModel):
         extractor.preload("account")
         extractor.preload_journals("general")
 
-        # Find the tax payable account (GlobalTaxPayable subtype = 2615)
-        tax_payable = ctx.env["account.account"].search(
+        # QBO routes tax payments through the GlobalTaxSuspense account
+        # (2310 GST/HST - QST Suspense), not the payable account.
+        tax_suspense = ctx.env["account.account"].search(
             [
                 ("qbo_id", "!=", False),
-                ("code", "=", "2615"),
+                ("code", "=", "2310"),
                 ("company_ids", "in", [ctx.env.company.id]),
             ],
             limit=1,
         )
-        if not tax_payable:
-            # Broader fallback
-            tax_payable = ctx.env["account.account"].search(
+        if not tax_suspense:
+            # Broader fallback — look for GlobalTaxSuspense subtype
+            tax_suspense = ctx.env["account.account"].search(
                 [
                     ("qbo_id", "!=", False),
-                    ("name", "ilike", "GST/HST"),
-                    ("name", "ilike", "Payable"),
+                    ("name", "ilike", "Suspense"),
+                    ("name", "ilike", "GST"),
                     ("company_ids", "in", [ctx.env.company.id]),
                 ],
                 limit=1,
             )
-        extractor.extra["tax_payable_account_id"] = (
-            tax_payable.id if tax_payable else None
+        extractor.extra["tax_suspense_account_id"] = (
+            tax_suspense.id if tax_suspense else None
         )
-        if not tax_payable:
+        if not tax_suspense:
             _logger.error(
-                "No tax payable account found — tax payments cannot be imported"
+                "No tax suspense account found — tax payments cannot be imported"
             )
 
         return {"payments": new_payments, "extractor": extractor.export()}
@@ -107,10 +108,10 @@ class QboTaxPaymentImporter(models.AbstractModel):
         from .move_builder import QBOMoveBuilder
 
         builder = QBOMoveBuilder(extractor_data)
-        tax_payable_id = builder.get_extra("tax_payable_account_id")
+        tax_suspense_id = builder.get_extra("tax_suspense_account_id")
 
-        if not tax_payable_id:
-            _logger.error("No tax payable account — skipping all tax payments")
+        if not tax_suspense_id:
+            _logger.error("No tax suspense account — skipping all tax payments")
             return []
 
         journal_id = builder.get_journal_id("general")
@@ -155,7 +156,7 @@ class QboTaxPaymentImporter(models.AbstractModel):
                 # Debit tax payable, Credit bank
                 lines = [
                     (0, 0, {
-                        "account_id": tax_payable_id,
+                        "account_id": tax_suspense_id,
                         "name": f"Sales tax remittance QBO-TP-{qbo_id}",
                         "debit": abs_amount,
                         "credit": 0,
@@ -178,7 +179,7 @@ class QboTaxPaymentImporter(models.AbstractModel):
                         "credit": 0,
                     }),
                     (0, 0, {
-                        "account_id": tax_payable_id,
+                        "account_id": tax_suspense_id,
                         "name": f"Sales tax refund QBO-TP-{qbo_id}",
                         "debit": 0,
                         "credit": abs_amount,
