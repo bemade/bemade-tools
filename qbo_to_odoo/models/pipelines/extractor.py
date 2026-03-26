@@ -148,6 +148,29 @@ class QBOExtractor:
         self._undeposited_funds_id = account.id if account else None
         return self
 
+    def preload_tax_rate_account_map(self) -> "QBOExtractor":
+        """Build QBO tax rate ref → Odoo tax account map.
+
+        Used by entry-style pipelines (expenses, JEs, deposits) to add
+        explicit tax lines from QBO's TxnTaxDetail.
+        """
+        self.env.cr.execute("""
+            SELECT t.qbo_tax_rate_id, arl.account_id
+            FROM account_tax t
+            JOIN account_tax_repartition_line arl
+                ON arl.tax_id = t.id
+            WHERE t.qbo_tax_rate_id IS NOT NULL
+                AND t.qbo_tax_rate_id != ''
+                AND arl.repartition_type = 'tax'
+                AND arl.account_id IS NOT NULL
+            ORDER BY t.qbo_tax_rate_id, arl.id
+        """)
+        tax_rate_account_map = {}
+        for rate_id, account_id in self.env.cr.fetchall():
+            tax_rate_account_map.setdefault(str(rate_id), account_id)
+        self.extra["tax_rate_account_map"] = tax_rate_account_map
+        return self
+
     # ------------------------------------------------------------------
     # Generic query helpers
     # ------------------------------------------------------------------

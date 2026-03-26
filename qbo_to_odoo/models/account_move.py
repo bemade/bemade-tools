@@ -80,3 +80,9 @@ class AccountMove(models.Model):
         copy=False,
         help="QuickBooks Online RefundReceipt ID (customer refunds)",
     )
+    qbo_tax_payment_id = fields.Integer(
+        string="QBO Tax Payment ID",
+        index=True,
+        copy=False,
+        help="QuickBooks Online TaxPayment ID (sales tax remittances)",
+    )
