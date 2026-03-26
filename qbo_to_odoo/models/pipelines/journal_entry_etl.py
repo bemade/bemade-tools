@@ -60,7 +60,7 @@ class QboJournalEntryImporter(models.AbstractModel):
         extractor.preload_journals("general")
 
         # Tax rate ref → tax account ID for JEs with TxnTaxDetail
-        extractor.preload_tax_rate_account_map()
+        extractor.preload_tax_rate_account_map(use_suspense=True)
 
         return ChunkableData(
             records=new_entries,
