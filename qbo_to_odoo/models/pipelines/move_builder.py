@@ -346,6 +346,83 @@ class QBOMoveBuilder:
                 )
 
     # ------------------------------------------------------------------
+    # Tax line builders (for entry-style moves with TxnTaxDetail)
+    # ------------------------------------------------------------------
+
+    def build_tax_lines_from_detail(
+        self,
+        entry: Dict,
+        currency_id: int,
+        exchange_rate: float,
+        is_foreign: bool,
+    ) -> List[tuple]:
+        """Build explicit journal entry lines from QBO TxnTaxDetail.
+
+        Invoice and bill pipelines use Odoo's ``tax_ids`` field, which
+        computes tax lines automatically. But entry-style moves (journal
+        entries, expenses, deposits) don't use ``tax_ids`` — they build
+        raw debit/credit lines. When QBO puts taxes in ``TxnTaxDetail``
+        rather than as regular ``Line`` entries, we need to add them as
+        explicit lines using the tax rate's account from the preloaded
+        ``tax_rate_account_map``.
+
+        Returns a list of ``(0, 0, line_vals)`` tuples, plus the total
+        company-currency tax amount (positive = debit, negative = credit).
+        """
+        tax_rate_account_map = self.get_extra("tax_rate_account_map") or {}
+        tax_lines = entry.get("TxnTaxDetail", {}).get("TaxLine", [])
+        result = []
+        total_tax_company = 0.0
+
+        for tax_line in tax_lines:
+            detail = tax_line.get("TaxLineDetail", {})
+            tax_amount = float(tax_line.get("Amount", 0) or 0)
+            if tax_amount == 0:
+                continue
+            rate_ref = detail.get("TaxRateRef", {}).get("value")
+            if not rate_ref:
+                continue
+            tax_account_id = tax_rate_account_map.get(str(rate_ref))
+            if not tax_account_id:
+                _logger.warning(
+                    f"No tax account for rate ref {rate_ref} in "
+                    f"entry {entry.get('Id')}"
+                )
+                continue
+
+            abs_amount = abs(tax_amount)
+            company_amount = self.convert_to_company_currency(
+                abs_amount, exchange_rate, is_foreign
+            )
+
+            if tax_amount < 0:
+                line_data = {
+                    "account_id": tax_account_id,
+                    "name": detail.get("TaxRateRef", {}).get("name", "Tax"),
+                    "debit": 0.0,
+                    "credit": round(company_amount, 2),
+                }
+                total_tax_company -= round(company_amount, 2)
+            else:
+                line_data = {
+                    "account_id": tax_account_id,
+                    "name": detail.get("TaxRateRef", {}).get("name", "Tax"),
+                    "debit": round(company_amount, 2),
+                    "credit": 0.0,
+                }
+                total_tax_company += round(company_amount, 2)
+
+            if is_foreign:
+                line_data["currency_id"] = currency_id
+                line_data["amount_currency"] = (
+                    -abs_amount if tax_amount < 0 else abs_amount
+                )
+
+            result.append((0, 0, line_data))
+
+        return result, total_tax_company
+
+    # ------------------------------------------------------------------
     # Invoice-style line builders
     # ------------------------------------------------------------------
 

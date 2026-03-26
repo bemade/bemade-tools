@@ -217,6 +217,9 @@ class QboTaxImporter(models.AbstractModel):
         # Link children to group taxes (fixes both new and existing)
         self._link_group_tax_children(ctx)
 
+        # Set tax accounts on repartition lines
+        self._set_repartition_accounts(ctx)
+
     def _link_group_tax_children(self, ctx: ETLContext) -> None:
         """Link child tax rates to their parent group taxes.
 
@@ -280,4 +283,61 @@ class QboTaxImporter(models.AbstractModel):
 
         _logger.info(
             f"Linked children for {linked_count} group taxes"
+        )
+
+    @staticmethod
+    def _set_repartition_accounts(ctx: ETLContext) -> None:
+        """Set tax accounts on repartition lines for QBO-imported taxes.
+
+        QBO uses a single tax payable account (GlobalTaxPayable subtype)
+        for all sales tax repartition.  We find that account and set it
+        on every repartition line of type 'tax' that has no account.
+        """
+        # Find the QBO tax payable account (GlobalTaxPayable subtype)
+        tax_payable = ctx.env["account.account"].search(
+            [("qbo_id", "!=", False), ("name", "ilike", "GST/HST - QST Payable")],
+            limit=1,
+        )
+        if not tax_payable:
+            # Fallback: any account with GlobalTaxPayable subtype
+            ctx.env.cr.execute("""
+                SELECT id FROM account_account
+                WHERE qbo_id IS NOT NULL AND qbo_id != 0
+                AND code = '2615'
+            """)
+            row = ctx.env.cr.fetchone()
+            if row:
+                tax_payable = ctx.env["account.account"].browse(row[0])
+
+        if not tax_payable:
+            _logger.warning(
+                "No GST/HST - QST Payable account found — "
+                "tax repartition accounts not set"
+            )
+            return
+
+        # Find all QBO-imported taxes (non-group, non-zero rate)
+        qbo_taxes = ctx.env["account.tax"].search([
+            "|",
+            ("qbo_tax_id", "!=", False),
+            ("qbo_tax_rate_id", "!=", False),
+            ("amount_type", "!=", "group"),
+        ])
+
+        updated = 0
+        for tax in qbo_taxes:
+            for rep_line in tax.invoice_repartition_line_ids.filtered(
+                lambda l: l.repartition_type == "tax" and not l.account_id
+            ):
+                rep_line.account_id = tax_payable.id
+                updated += 1
+            for rep_line in tax.refund_repartition_line_ids.filtered(
+                lambda l: l.repartition_type == "tax" and not l.account_id
+            ):
+                rep_line.account_id = tax_payable.id
+                updated += 1
+
+        _logger.info(
+            f"Set tax account {tax_payable.code} ({tax_payable.name}) "
+            f"on {updated} repartition lines"
         )

@@ -103,6 +103,7 @@ class QBOApiClient:
         return {
             "Authorization": f"Bearer {self.connection.access_token}",
             "Accept": "application/json",
+            "Accept-Encoding": "identity",
             "Content-Type": "application/json",
         }
 
@@ -441,6 +442,53 @@ class QboConnection(models.Model):
             raise UserError(_("Not connected to QuickBooks. Please authorize first."))
 
         return QBOApiClient(self)
+
+    def query_qbo(self, entity, where="", order_by="Id", max_results=0):
+        """Run a QBO API query and return results as a list of dicts.
+
+        Callable via MCP / xmlrpc for ad-hoc data exploration.
+
+        Args:
+            entity: QBO entity name (e.g. "Invoice", "Account", "Bill").
+            where: Optional WHERE clause (e.g. "Active = true").
+            order_by: ORDER BY clause, default "Id".
+            max_results: If >0, use single-page query with this limit.
+                         If 0 (default), fetch all pages.
+
+        Returns:
+            List of QBO entity dicts.
+        """
+        self.ensure_one()
+        client = self.get_api_client()
+        if max_results:
+            return client.query(
+                entity, where=where, order_by=order_by, max_results=max_results
+            )
+        return client.query_all(entity, where=where, order_by=order_by)
+
+    def count_qbo(self, entity, where=""):
+        """Return the record count for a QBO entity.
+
+        Uses SELECT COUNT(*) for efficiency — no record data transferred.
+        """
+        self.ensure_one()
+        client = self.get_api_client()
+        client._ensure_token_valid()
+        client.rate_limiter.wait_if_needed()
+        query = f"SELECT COUNT(*) FROM {entity}"
+        if where:
+            query += f" WHERE {where}"
+        url = f"{client.base_url}/query"
+        response = requests.get(
+            url, headers=client.headers, params={"query": query}
+        )
+        if response.status_code == 401:
+            client.connection.refresh_access_token()
+            response = requests.get(
+                url, headers=client.headers, params={"query": query}
+            )
+        data = response.json()
+        return data.get("QueryResponse", {}).get("totalCount", 0)
 
     def _get_source_config(self) -> dict:
         """Build source configuration dictionary for ETL framework.

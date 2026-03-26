@@ -32,6 +32,7 @@ _logger = logging.getLogger(__name__)
         "qbo.account.importer",
         "qbo.customer.importer",
         "qbo.vendor.importer",
+        "qbo.tax.importer",
     ],
 )
 class QboDepositImporter(models.AbstractModel):
@@ -68,6 +69,9 @@ class QboDepositImporter(models.AbstractModel):
         extractor.preload("account", "customer", "vendor", "currency")
         extractor.preload_journals("general")
         extractor.preload_undeposited_funds()
+
+        # Tax rate ref → tax account ID for deposits with TxnTaxDetail
+        extractor.preload_tax_rate_account_map()
 
         return ChunkableData(
             records=new_deposits,
@@ -233,6 +237,12 @@ class QboDepositImporter(models.AbstractModel):
                 f"DetailTypes={detail_types}"
             )
             return None
+
+        # Add tax lines from TxnTaxDetail
+        tax_line_tuples, _total_tax_company = builder.build_tax_lines_from_detail(
+            deposit, currency_id, exchange_rate, is_foreign,
+        )
+        line_ids.extend(tax_line_tuples)
 
         # Debit line for bank account (DepositToAccountRef)
         debit_company = builder.convert_to_company_currency(
