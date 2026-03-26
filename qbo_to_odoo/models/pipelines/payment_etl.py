@@ -116,6 +116,9 @@ class QboPaymentImporter(models.AbstractModel):
         extractor.extra["vendor_credit_map"] = extractor.qbo_id_map(
             "account_move", "qbo_vendor_credit_id", where="state = 'posted'"
         )
+        extractor.extra["journal_entry_map"] = extractor.qbo_id_map(
+            "account_move", "qbo_journal_entry_id", where="state = 'posted'"
+        )
 
         # Pre-fetch receivable/payable accounts for destination_account_id
         extractor.extra["invoice_receivable_map"] = extractor.invoice_receivable_map()
@@ -144,6 +147,7 @@ class QboPaymentImporter(models.AbstractModel):
         bill_map = builder.get_extra("bill_map") or {}
         credit_memo_map = builder.get_extra("credit_memo_map") or {}
         vendor_credit_map = builder.get_extra("vendor_credit_map") or {}
+        journal_entry_map = builder.get_extra("journal_entry_map") or {}
         journal_bank_account_map = builder.get_extra("journal_bank_account_map") or {}
 
         payment_data = []
@@ -162,10 +166,12 @@ class QboPaymentImporter(models.AbstractModel):
                 if pmt_type == "customer":
                     apps = self._transform_credit_application(
                         pmt_data, invoice_map, credit_memo_map,
+                        journal_entry_map,
                     )
                 else:
                     apps = self._transform_vendor_credit_application(
                         pmt_data, bill_map, vendor_credit_map,
+                        journal_entry_map,
                     )
                 credit_applications.extend(apps)
                 continue
@@ -290,45 +296,53 @@ class QboPaymentImporter(models.AbstractModel):
         payment: Dict,
         invoice_map: Dict,
         credit_memo_map: Dict,
+        journal_entry_map: Dict,
     ) -> List[Dict]:
         """Transform a zero-amount payment (credit memo application).
 
         In QBO, applying credit memos to invoices creates a Payment with
-        TotalAmt=0.  The Lines link CreditMemos (credit side) to Invoices
-        (debit side).  In Odoo we don't create an account.payment; we just
-        reconcile the credit note's AR line against the invoice's AR line.
+        TotalAmt=0.  Each Line carries an Amount and a LinkedTxn pointing
+        to either an Invoice, CreditMemo, or JournalEntry.
 
-        Returns a list of dicts with ``invoice_move_id`` and
-        ``credit_memo_move_id`` for each pair to reconcile.
+        We pair each credit line with each invoice line, carrying the QBO
+        line Amount so the load phase can create exact partial reconciles.
+
+        Returns a list of dicts with ``invoice_move_id``,
+        ``credit_memo_move_id``, ``amount``, and ``qbo_payment_id``.
         """
         qbo_id = payment.get("Id")
-        pairs = []
-        invoice_ids = []
-        credit_memo_ids = []
+        invoices = []   # (odoo_move_id, qbo_amount)
+        credits = []    # (odoo_move_id, qbo_amount)
 
         for line in payment.get("Line", []):
+            amount = float(line.get("Amount", 0) or 0)
             for linked in line.get("LinkedTxn", []):
                 txn_id = str(linked.get("TxnId", ""))
                 txn_type = linked.get("TxnType")
                 if txn_type == "Invoice" and txn_id in invoice_map:
-                    invoice_ids.append(invoice_map[txn_id])
+                    invoices.append((invoice_map[txn_id], amount))
                 elif txn_type == "CreditMemo" and txn_id in credit_memo_map:
-                    credit_memo_ids.append(credit_memo_map[txn_id])
+                    credits.append((credit_memo_map[txn_id], amount))
+                elif txn_type == "JournalEntry" and txn_id in journal_entry_map:
+                    credits.append((journal_entry_map[txn_id], amount))
 
-        if not invoice_ids or not credit_memo_ids:
-            if invoice_ids or credit_memo_ids:
+        if not invoices or not credits:
+            if invoices or credits:
                 _logger.debug(
                     f"Credit application QBO#{qbo_id}: only partial links "
-                    f"(invoices={len(invoice_ids)}, memos={len(credit_memo_ids)})"
+                    f"(invoices={len(invoices)}, credits={len(credits)})"
                 )
             return []
 
-        # Each invoice gets paired with all credit memos in this application.
-        for inv_id in invoice_ids:
-            for cm_id in credit_memo_ids:
+        # Pair credits to invoices using the credit's QBO amount.
+        # Each credit is applied for its stated amount.
+        pairs = []
+        for credit_id, credit_amount in credits:
+            for inv_id, _inv_amount in invoices:
                 pairs.append({
                     "invoice_move_id": inv_id,
-                    "credit_memo_move_id": cm_id,
+                    "credit_memo_move_id": credit_id,
+                    "amount": credit_amount,
                     "qbo_payment_id": qbo_id,
                 })
 
@@ -339,44 +353,49 @@ class QboPaymentImporter(models.AbstractModel):
         bill_payment: Dict,
         bill_map: Dict,
         vendor_credit_map: Dict,
+        journal_entry_map: Dict,
     ) -> List[Dict]:
         """Transform a zero-amount bill payment (vendor credit application).
 
         In QBO, applying vendor credits to bills creates a BillPayment with
-        TotalAmt=0.  The Lines link VendorCredits to Bills.  In Odoo we
-        reconcile the vendor credit's AP line against the bill's AP line.
+        TotalAmt=0.  Each Line carries an Amount and a LinkedTxn pointing
+        to either a Bill, VendorCredit, or JournalEntry.
 
-        Returns a list of dicts with ``invoice_move_id`` (the bill) and
-        ``credit_memo_move_id`` (the vendor credit) for each pair.
+        Returns a list of dicts with ``invoice_move_id`` (the bill),
+        ``credit_memo_move_id`` (the vendor credit / JE), ``amount``,
+        and ``qbo_payment_id``.
         """
         qbo_id = bill_payment.get("Id")
-        bill_ids = []
-        vendor_credit_ids = []
+        bills = []    # (odoo_move_id, qbo_amount)
+        credits = []  # (odoo_move_id, qbo_amount)
 
         for line in bill_payment.get("Line", []):
+            amount = float(line.get("Amount", 0) or 0)
             for linked in line.get("LinkedTxn", []):
                 txn_id = str(linked.get("TxnId", ""))
                 txn_type = linked.get("TxnType")
                 if txn_type == "Bill" and txn_id in bill_map:
-                    bill_ids.append(bill_map[txn_id])
+                    bills.append((bill_map[txn_id], amount))
                 elif txn_type == "VendorCredit" and txn_id in vendor_credit_map:
-                    vendor_credit_ids.append(vendor_credit_map[txn_id])
+                    credits.append((vendor_credit_map[txn_id], amount))
+                elif txn_type == "JournalEntry" and txn_id in journal_entry_map:
+                    credits.append((journal_entry_map[txn_id], amount))
 
-        if not bill_ids or not vendor_credit_ids:
-            if bill_ids or vendor_credit_ids:
+        if not bills or not credits:
+            if bills or credits:
                 _logger.debug(
                     f"Vendor credit application QBO-BP#{qbo_id}: only partial "
-                    f"links (bills={len(bill_ids)}, "
-                    f"credits={len(vendor_credit_ids)})"
+                    f"links (bills={len(bills)}, credits={len(credits)})"
                 )
             return []
 
         pairs = []
-        for bill_id in bill_ids:
-            for vc_id in vendor_credit_ids:
+        for credit_id, credit_amount in credits:
+            for bill_id, _bill_amount in bills:
                 pairs.append({
                     "invoice_move_id": bill_id,
-                    "credit_memo_move_id": vc_id,
+                    "credit_memo_move_id": credit_id,
+                    "amount": credit_amount,
                     "qbo_payment_id": f"BP-{qbo_id}",
                 })
         return pairs
@@ -719,47 +738,9 @@ class QboPaymentImporter(models.AbstractModel):
                                     f"move#{linked_id} for {payment.name}"
                                 )
                                 continue
-                            pay_line = pay_line_open[0]
-                            inv_line = inv_line[0]
-                            # Residual amounts in the payment's currency
-                            # (amount_residual_currency for multi-currency,
-                            # amount_residual for same-currency)
-                            pay_curr = pay_line.currency_id
-                            inv_curr = inv_line.currency_id
-                            pay_open = abs(
-                                pay_line.amount_residual_currency
-                                if pay_curr and pay_curr != pay_line.company_currency_id
-                                else pay_line.amount_residual
+                            self._partial_reconcile(
+                                ctx, pay_line_open[0], inv_line[0], qbo_amount,
                             )
-                            inv_open = abs(
-                                inv_line.amount_residual_currency
-                                if inv_curr and inv_curr != inv_line.company_currency_id
-                                else inv_line.amount_residual
-                            )
-                            # If both sides have more open than the QBO amount,
-                            # we must limit to avoid over-applying.
-                            tol = 0.01
-                            if pay_open > qbo_amount + tol and inv_open > qbo_amount + tol:
-                                # Compute the CAD equivalent using the payment line's rate
-                                pay_cad = abs(pay_line.amount_residual)
-                                pay_foreign = abs(pay_line.amount_residual_currency) if pay_curr else pay_cad
-                                rate = pay_cad / pay_foreign if pay_foreign else 1.0
-                                cad_amount = qbo_amount * rate
-                                ctx.env["account.partial.reconcile"].create({
-                                    "debit_move_id": inv_line.id,
-                                    "credit_move_id": pay_line.id,
-                                    "amount": cad_amount,
-                                    "debit_amount_currency": qbo_amount,
-                                    "credit_amount_currency": qbo_amount,
-                                    "company_id": inv_line.company_id.id,
-                                })
-                                # Force recompute of residuals so the next
-                                # iteration sees the updated open balances.
-                                (inv_line + pay_line).invalidate_recordset(
-                                    ["amount_residual", "amount_residual_currency", "reconciled"]
-                                )
-                            else:
-                                (inv_line + pay_line).reconcile()
                             reconciled += 1
 
         _logger.info(f"Reconciled {reconciled} payment/invoice pairs")
@@ -767,8 +748,7 @@ class QboPaymentImporter(models.AbstractModel):
         # Phase 4: Apply credit/debit notes to invoices/bills.
         # These come from zero-amount QBO Payments (CreditMemos → Invoices)
         # and zero-amount BillPayments (VendorCredits → Bills).
-        # We reconcile the credit note's receivable/payable line against the
-        # invoice/bill's receivable/payable line.
+        # Each pair carries the QBO line Amount for exact partial reconciliation.
         if not credit_applications:
             return
 
@@ -780,6 +760,7 @@ class QboPaymentImporter(models.AbstractModel):
             qbo_id = app["qbo_payment_id"]
             inv_id = app["invoice_move_id"]
             cm_id = app["credit_memo_move_id"]
+            qbo_amount = float(app.get("amount", 0) or 0)
             with ctx.skippable(
                 f"credit apply QBO#{qbo_id}: move#{inv_id} <-> move#{cm_id}"
             ):
@@ -809,7 +790,71 @@ class QboPaymentImporter(models.AbstractModel):
                         f"(inv={len(inv_line)}, cm={len(cm_line)})"
                     )
                     continue
-                (inv_line + cm_line).reconcile()
+                self._partial_reconcile(
+                    ctx, cm_line[0], inv_line[0], qbo_amount,
+                )
                 applied += 1
 
         _logger.info(f"Applied {applied} credit/debit note applications")
+
+    @staticmethod
+    def _partial_reconcile(ctx, credit_line, debit_line, qbo_amount):
+        """Create an exact partial reconcile between two move lines.
+
+        Uses ``account.partial.reconcile`` directly to avoid the greedy
+        matching behaviour of ``reconcile()``.  The QBO line amount
+        determines how much to apply; if one side has less residual than
+        the QBO amount, we cap at the smaller residual so we don't
+        over-apply.
+
+        Args:
+            ctx: ETL context.
+            credit_line: The credit-side ``account.move.line`` (payment
+                or credit memo — has a negative balance / positive credit).
+            debit_line: The debit-side ``account.move.line`` (invoice or
+                bill — has a positive balance / positive debit).
+            qbo_amount: The amount to reconcile in the transaction
+                currency (from QBO Line.Amount).
+        """
+        # Ensure correct debit/credit orientation
+        if credit_line.balance > 0 and debit_line.balance < 0:
+            credit_line, debit_line = debit_line, credit_line
+
+        credit_curr = credit_line.currency_id
+        debit_curr = debit_line.currency_id
+        company_curr = credit_line.company_currency_id
+
+        credit_open = abs(
+            credit_line.amount_residual_currency
+            if credit_curr and credit_curr != company_curr
+            else credit_line.amount_residual
+        )
+        debit_open = abs(
+            debit_line.amount_residual_currency
+            if debit_curr and debit_curr != company_curr
+            else debit_line.amount_residual
+        )
+
+        # Cap at the smallest of: QBO amount, credit residual, debit residual
+        apply_amount = min(qbo_amount, credit_open, debit_open) if qbo_amount else min(credit_open, debit_open)
+        if apply_amount <= 0:
+            return
+
+        # Compute company-currency equivalent from the credit line's rate
+        credit_cad = abs(credit_line.amount_residual)
+        credit_foreign = abs(credit_line.amount_residual_currency) if credit_curr else credit_cad
+        rate = credit_cad / credit_foreign if credit_foreign else 1.0
+        company_amount = round(apply_amount * rate, 2)
+
+        ctx.env["account.partial.reconcile"].create({
+            "debit_move_id": debit_line.id,
+            "credit_move_id": credit_line.id,
+            "amount": company_amount,
+            "debit_amount_currency": apply_amount,
+            "credit_amount_currency": apply_amount,
+            "company_id": credit_line.company_id.id,
+        })
+        # Invalidate so the next iteration sees updated residuals
+        (credit_line + debit_line).invalidate_recordset(
+            ["amount_residual", "amount_residual_currency", "reconciled"]
+        )
