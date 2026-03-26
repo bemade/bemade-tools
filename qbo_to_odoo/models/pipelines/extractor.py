@@ -148,52 +148,74 @@ class QBOExtractor:
         self._undeposited_funds_id = account.id if account else None
         return self
 
-    def preload_tax_rate_account_map(self) -> "QBOExtractor":
+    def preload_tax_rate_account_map(
+        self, use_suspense: bool = False,
+    ) -> "QBOExtractor":
         """Build QBO tax rate ref → Odoo tax account map.
 
         Used by entry-style pipelines (expenses, JEs, deposits) to add
         explicit tax lines from QBO's TxnTaxDetail.
 
-        QBO routes entry-style taxes (expenses, JEs, deposits) through
-        the GlobalTaxSuspense account (2310), NOT the GlobalTaxPayable
-        account (2615) used by invoices/bills via ``tax_ids``.  We use
-        a single account for all tax rates since QBO doesn't distinguish
-        per-rate accounts on entries.
+        QBO routes taxes differently by transaction type:
+        - **Expenses/Cheques** → 2615 GST/HST-QST Payable (same as
+          invoices/bills).
+        - **JEs/Deposits** → 2310 GST/HST-QST Suspense.
+
+        Args:
+            use_suspense: If True, map to 2310 Suspense (for JEs and
+                deposits).  If False (default), map to 2615 Payable
+                via the tax repartition lines (for expenses).
         """
-        # Find the QBO tax suspense account (GlobalTaxSuspense = 2310)
-        suspense = self.env["account.account"].search(
-            [("code", "=", "2310"), ("company_ids", "in", [self._company_id])],
-            limit=1,
-        )
-        if not suspense:
-            suspense = self.env["account.account"].search(
-                [("name", "ilike", "Suspense"), ("name", "ilike", "GST"),
+        if use_suspense:
+            target = self.env["account.account"].search(
+                [("code", "=", "2310"),
                  ("company_ids", "in", [self._company_id])],
                 limit=1,
             )
+            if not target:
+                target = self.env["account.account"].search(
+                    [("name", "ilike", "Suspense"),
+                     ("name", "ilike", "GST"),
+                     ("company_ids", "in", [self._company_id])],
+                    limit=1,
+                )
+            if not target:
+                _logger.warning(
+                    "No GST/HST-QST Suspense (2310) account found"
+                )
+                self.extra["tax_rate_account_map"] = {}
+                return self
 
-        if not suspense:
-            _logger.warning(
-                "No GST/HST-QST Suspense (2310) account found — "
-                "tax lines on expenses/JEs/deposits will not be created"
-            )
-            self.extra["tax_rate_account_map"] = {}
-            return self
+            self.env.cr.execute("""
+                SELECT DISTINCT qbo_tax_rate_id
+                FROM account_tax
+                WHERE qbo_tax_rate_id IS NOT NULL
+                    AND qbo_tax_rate_id != ''
+            """)
+            tax_rate_account_map = {
+                str(row[0]): target.id for row in self.env.cr.fetchall()
+            }
+        else:
+            # Use repartition line accounts (2615 Payable)
+            self.env.cr.execute("""
+                SELECT t.qbo_tax_rate_id, arl.account_id
+                FROM account_tax t
+                JOIN account_tax_repartition_line arl
+                    ON arl.tax_id = t.id
+                WHERE t.qbo_tax_rate_id IS NOT NULL
+                    AND t.qbo_tax_rate_id != ''
+                    AND arl.repartition_type = 'tax'
+                    AND arl.account_id IS NOT NULL
+                ORDER BY t.qbo_tax_rate_id, arl.id
+            """)
+            tax_rate_account_map = {}
+            for rate_id, account_id in self.env.cr.fetchall():
+                tax_rate_account_map.setdefault(str(rate_id), account_id)
 
-        # Map all tax rates to the suspense account
-        self.env.cr.execute("""
-            SELECT DISTINCT qbo_tax_rate_id
-            FROM account_tax
-            WHERE qbo_tax_rate_id IS NOT NULL
-                AND qbo_tax_rate_id != ''
-        """)
-        tax_rate_account_map = {
-            str(row[0]): suspense.id for row in self.env.cr.fetchall()
-        }
         self.extra["tax_rate_account_map"] = tax_rate_account_map
         _logger.info(
-            f"Mapped {len(tax_rate_account_map)} tax rates to "
-            f"suspense account {suspense.code} ({suspense.name})"
+            f"Mapped {len(tax_rate_account_map)} tax rates "
+            f"({'suspense' if use_suspense else 'payable'})"
         )
         return self
 
