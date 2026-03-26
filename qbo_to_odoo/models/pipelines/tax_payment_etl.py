@@ -145,42 +145,43 @@ class QboTaxPaymentImporter(models.AbstractModel):
             txn_date = payment.get("PaymentDate")
             abs_amount = abs(amount)
 
-            # QBO: negative amount with Refund=true means money leaving
-            # the bank (paying the government).  Positive with Refund=false
-            # means money coming back (government refund to bank).
-            # Confusingly, QBO labels paying the government as "Refund".
+            # QBO TaxPayment sign convention:
+            #   Refund=true, negative amount → government refunding you
+            #       → money INTO bank (debit bank, credit suspense)
+            #   Refund=false, positive amount → you paying government
+            #       → money OUT of bank (debit suspense, credit bank)
             is_refund = payment.get("Refund", False)
 
             if is_refund:
-                # Money leaves bank → pays down tax liability
-                # Debit tax payable, Credit bank
+                # Government refund → money into bank
+                # Debit bank, Credit tax suspense
                 lines = [
                     (0, 0, {
-                        "account_id": tax_suspense_id,
-                        "name": f"Sales tax remittance QBO-TP-{qbo_id}",
+                        "account_id": bank_account_id,
+                        "name": f"Sales tax refund QBO-TP-{qbo_id}",
                         "debit": abs_amount,
                         "credit": 0,
                     }),
                     (0, 0, {
-                        "account_id": bank_account_id,
-                        "name": f"Sales tax remittance QBO-TP-{qbo_id}",
+                        "account_id": tax_suspense_id,
+                        "name": f"Sales tax refund QBO-TP-{qbo_id}",
                         "debit": 0,
                         "credit": abs_amount,
                     }),
                 ]
             else:
-                # Money enters bank → tax refund from government
-                # Debit bank, Credit tax payable
+                # Tax remittance → money out of bank
+                # Debit tax suspense, Credit bank
                 lines = [
                     (0, 0, {
-                        "account_id": bank_account_id,
-                        "name": f"Sales tax refund QBO-TP-{qbo_id}",
+                        "account_id": tax_suspense_id,
+                        "name": f"Sales tax remittance QBO-TP-{qbo_id}",
                         "debit": abs_amount,
                         "credit": 0,
                     }),
                     (0, 0, {
-                        "account_id": tax_suspense_id,
-                        "name": f"Sales tax refund QBO-TP-{qbo_id}",
+                        "account_id": bank_account_id,
+                        "name": f"Sales tax remittance QBO-TP-{qbo_id}",
                         "debit": 0,
                         "credit": abs_amount,
                     }),
