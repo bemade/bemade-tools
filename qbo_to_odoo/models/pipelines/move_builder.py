@@ -357,7 +357,8 @@ class QBOMoveBuilder:
         currency_id: int,
         exchange_rate: float,
         is_foreign: bool,
-    ) -> List[tuple]:
+        as_credit: bool = False,
+    ) -> Tuple[List[tuple], float]:
         """Build explicit journal entry lines from QBO TxnTaxDetail.
 
         Invoice and bill pipelines use Odoo's ``tax_ids`` field, which
@@ -368,8 +369,15 @@ class QBOMoveBuilder:
         explicit lines using the tax rate's account from the preloaded
         ``tax_rate_account_map``.
 
-        Returns a list of ``(0, 0, line_vals)`` tuples, plus the total
-        company-currency tax amount (positive = debit, negative = credit).
+        Args:
+            as_credit: If True, positive tax amounts become credits
+                (used for deposits where tax collected is a liability).
+                If False (default), positive amounts become debits
+                (used for expenses where tax paid is recoverable).
+
+        Returns a tuple of (line_tuples, total_tax_company) where
+        total_tax_company is positive for net debits, negative for
+        net credits.
         """
         tax_rate_account_map = self.get_extra("tax_rate_account_map") or {}
         tax_lines = entry.get("TxnTaxDetail", {}).get("TaxLine", [])
@@ -397,7 +405,10 @@ class QBOMoveBuilder:
                 abs_amount, exchange_rate, is_foreign
             )
 
-            if tax_amount < 0:
+            # Determine debit/credit based on sign and direction
+            is_credit_line = (tax_amount > 0 and as_credit) or (tax_amount < 0 and not as_credit)
+
+            if is_credit_line:
                 line_data = {
                     "account_id": tax_account_id,
                     "name": detail.get("TaxRateRef", {}).get("name", "Tax"),
@@ -417,7 +428,7 @@ class QBOMoveBuilder:
             if is_foreign:
                 line_data["currency_id"] = currency_id
                 line_data["amount_currency"] = (
-                    -abs_amount if tax_amount < 0 else abs_amount
+                    -abs_amount if is_credit_line else abs_amount
                 )
 
             result.append((0, 0, line_data))
