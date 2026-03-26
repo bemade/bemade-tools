@@ -322,13 +322,13 @@ class QboConnection(models.Model):
     last_bill_sync = fields.Datetime(string="Last Bill Sync")
     last_journal_entry_sync = fields.Datetime(string="Last Journal Entry Sync")
 
-    # General Ledger export for transactions not available via the API
+    # Journal export for transactions not available via the API
     # (Payroll Cheques, Sales Tax Adjustments, Inventory Starting Values)
     gl_export_file = fields.Binary(
-        string="General Ledger Export (XLSX)",
-        help="Upload the QBO General Ledger export (All Dates, Excel format) "
+        string="Journal Export (XLSX)",
+        help="Upload the QBO Journal export (All Dates, Excel format) "
         "to import Payroll Cheques and other transactions not available "
-        "via the QBO API.",
+        "via the QBO API. Supports both with and without Transaction ID column.",
     )
     gl_export_filename = fields.Char(string="GL Export Filename")
 
