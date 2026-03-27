@@ -68,6 +68,17 @@ class QboInvoiceImporter(models.AbstractModel):
         )
         extractor.preload_journals("sale")
 
+        # Resolve shipping account from QBO Preferences
+        api_client = get_api_client(ctx)
+        prefs = api_client.query("Preferences", max_results=1)
+        if prefs:
+            ship_qbo_id = (prefs[0] if isinstance(prefs, list) else prefs
+                           ).get("SalesFormsPrefs", {}).get("DefaultShippingAccount")
+            if ship_qbo_id:
+                extractor.extra["shipping_account_id"] = extractor.account_map.get(
+                    int(ship_qbo_id)
+                )
+
         # Pipeline-specific: estimate lookup for linking invoices to sale orders
         extractor.extra["estimate_map"] = extractor.qbo_id_map(
             "sale_order", "qbo_estimate_id"
@@ -104,7 +115,7 @@ class QboInvoiceImporter(models.AbstractModel):
                 journal_type="sale",
                 partner_type="customer",
                 qbo_id_field="qbo_invoice_id",
-                line_detail_types=("SalesItemLineDetail",),
+                line_detail_types=("SalesItemLineDetail", "DiscountLineDetail"),
                 tax_use="sale",
                 direction="income",
                 memo_field="CustomerMemo",
