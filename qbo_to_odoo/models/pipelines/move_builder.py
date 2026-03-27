@@ -454,6 +454,10 @@ class QBOMoveBuilder:
             return self._build_sales_item_invoice_line(
                 line, detail, entry, tax_use, direction, force_positive
             )
+        elif detail_type == "DiscountLineDetail":
+            return self._build_discount_invoice_line(
+                line, detail, entry, tax_use
+            )
         elif detail_type == "ItemBasedExpenseLineDetail":
             return self._build_item_expense_invoice_line(
                 line, detail, entry, tax_use, force_positive
@@ -467,8 +471,16 @@ class QBOMoveBuilder:
     def _build_sales_item_invoice_line(
         self, line, detail, entry, tax_use, direction, force_positive
     ) -> Optional[Dict]:
-        product_id = self.resolve_product(detail)
-        account_id = self.resolve_account(detail, product_id, direction)
+        item_ref = detail.get("ItemRef", {})
+        # QBO uses the magic value "SHIPPING_ITEM_ID" for shipping lines.
+        # These have no ItemAccountRef and can't resolve to a product.
+        # Look up the shipping account from QBO's Item.IncomeAccountRef.
+        is_shipping = item_ref.get("value") == "SHIPPING_ITEM_ID"
+        product_id = None if is_shipping else self.resolve_product(detail)
+        if is_shipping:
+            account_id = self.get_extra("shipping_account_id")
+        else:
+            account_id = self.resolve_account(detail, product_id, direction)
         qty = float(detail.get("Qty", 1) or 1)
         unit_price = float(detail.get("UnitPrice", 0) or 0)
         amount = float(line.get("Amount", 0) or 0)
@@ -477,7 +489,6 @@ class QBOMoveBuilder:
         if force_positive:
             unit_price = abs(unit_price)
         tax_ids = self.resolve_tax(detail, entry, tax_use)
-        item_ref = detail.get("ItemRef", {})
         line_vals = {
             "name": line.get("Description", "") or item_ref.get("name", "") or "/",
             "quantity": qty,
@@ -485,6 +496,40 @@ class QBOMoveBuilder:
         }
         if product_id:
             line_vals["product_id"] = product_id
+        if account_id:
+            line_vals["account_id"] = account_id
+        if tax_ids:
+            line_vals["tax_ids"] = [(6, 0, tax_ids)]
+        return line_vals
+
+    def _build_discount_invoice_line(
+        self, line, detail, entry, tax_use
+    ) -> Optional[Dict]:
+        """Build an invoice line for a QBO DiscountLineDetail.
+
+        QBO discounts have a DiscountAccountRef and may be percentage
+        or fixed amount.  They create a negative (contra-revenue) line.
+        """
+        amount = float(line.get("Amount", 0) or 0)
+        if amount == 0:
+            return None
+
+        # Resolve discount account from DiscountAccountRef
+        account_ref = detail.get("DiscountAccountRef", {})
+        account_id = None
+        if account_ref and account_ref.get("value"):
+            try:
+                account_id = self.account_map.get(int(account_ref["value"]))
+            except (ValueError, TypeError):
+                pass
+
+        tax_ids = self.resolve_tax(detail, entry, tax_use)
+
+        line_vals = {
+            "name": line.get("Description", "") or "Discount",
+            "quantity": 1,
+            "price_unit": -abs(amount),  # Negative for contra-revenue
+        }
         if account_id:
             line_vals["account_id"] = account_id
         if tax_ids:
