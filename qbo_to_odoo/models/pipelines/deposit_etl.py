@@ -245,10 +245,12 @@ class QboDepositImporter(models.AbstractModel):
         )
         line_ids.extend(tax_line_tuples)
 
-        # Debit line for bank account (DepositToAccountRef)
-        debit_company = builder.convert_to_company_currency(
-            total_amt, exchange_rate, is_foreign
-        )
+        # Debit line for bank account — computed from actual line totals
+        # rather than TotalAmt, which may include linked transactions
+        # (e.g. TaxPayment refunds) with no DepositLineDetail.
+        total_credits = sum(l[2].get("credit", 0) for l in line_ids)
+        total_debits = sum(l[2].get("debit", 0) for l in line_ids)
+        debit_company = total_credits - total_debits
         debit_line_vals = {
             "account_id": deposit_to_account_id,
             "name": f"Deposit to {deposit_to_ref.get('name', 'bank')}",
@@ -256,8 +258,17 @@ class QboDepositImporter(models.AbstractModel):
             "credit": 0,
         }
         if is_foreign:
+            # Compute foreign amount from lines rather than TotalAmt
+            fc_credits = sum(
+                abs(l[2].get("amount_currency", 0))
+                for l in line_ids if l[2].get("credit", 0) > 0
+            )
+            fc_debits = sum(
+                abs(l[2].get("amount_currency", 0))
+                for l in line_ids if l[2].get("debit", 0) > 0
+            )
             debit_line_vals["currency_id"] = currency_id
-            debit_line_vals["amount_currency"] = total_amt
+            debit_line_vals["amount_currency"] = fc_credits - fc_debits
 
         line_ids.append((0, 0, debit_line_vals))
         return line_ids
