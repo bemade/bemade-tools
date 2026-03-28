@@ -179,7 +179,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
                 exc_info=True,
             )
 
-        cache = {
+        ResPartnerCompanyImporter._lookup_cache = {
             "countries_dict": countries_dict,
             "states_dict": states_dict,
             "users_dict": users_dict,

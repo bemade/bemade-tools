@@ -268,54 +268,18 @@ class ProductPricelistItemImporter(models.AbstractModel):
         derived_pricelist_vals = data["derived_pricelist_vals"]
         customer_pricelist_vals = data["customer_pricelist_vals"]
 
+        # 1. Create base pricelists first (no items — uses Sales Price)
         Pricelist = ctx.env["product.pricelist"]
-
-        # Build existing pricelist maps for deduplication
-        existing_by_listnum = {}
-        existing_by_abs_id = {}
-        all_existing = Pricelist.with_context(active_test=False).search([
-            "|",
-            ("sap_listnum", "!=", False),
-            ("sap_abs_id", "!=", False),
-        ])
-        for pl in all_existing:
-            if pl.sap_listnum:
-                existing_by_listnum[pl.sap_listnum] = pl
-            if pl.sap_abs_id:
-                existing_by_abs_id[pl.sap_abs_id] = pl
-
-        # 1. Load base pricelists (upsert by sap_listnum)
-        for vals in base_pricelist_vals:
-            existing = existing_by_listnum.get(vals["sap_listnum"])
-            if existing:
-                write_vals = {k: v for k, v in vals.items() if k != "sap_listnum"}
-                # Clear old items before re-creating if transform added item_ids
-                if "item_ids" in write_vals:
-                    write_vals["item_ids"] = [Command.clear()] + write_vals["item_ids"]
-                existing.write(write_vals)
-            else:
-                new_pl = Pricelist.create(vals)
-                existing_by_listnum[vals["sap_listnum"]] = new_pl
-
-        created_base = sum(
-            1 for v in base_pricelist_vals
-            if v["sap_listnum"] not in {pl.sap_listnum for pl in all_existing}
-        )
-        _logger.info(
-            f"Loaded {len(base_pricelist_vals)} base pricelists "
-            f"({created_base} created, {len(base_pricelist_vals) - created_base} updated)."
-        )
+        if base_pricelist_vals:
+            Pricelist.create(base_pricelist_vals)
+            _logger.info(f"Created {len(base_pricelist_vals)} base pricelists.")
 
         # Build listnum → pricelist.id map for derived pricelists
-        # Re-fetch to include any newly created base pricelists
-        all_sap_pricelists = Pricelist.with_context(active_test=False).search([
-            ("sap_listnum", "!=", False),
-        ])
+        all_sap_pricelists = Pricelist.search([("sap_listnum", "!=", False)])
         listnum_to_id = {pl.sap_listnum: pl.id for pl in all_sap_pricelists}
 
-        # 2. Load derived pricelists with factor-based formula rules (upsert)
-        derived_created = 0
-        derived_updated = 0
+        # 2. Create derived pricelists with factor-based formula rules
+        valid_derived_vals = []
         for vals in derived_pricelist_vals:
             base_listnum = vals.pop("_base_listnum")
             factor = vals.pop("_factor")
@@ -330,33 +294,43 @@ class ProductPricelistItemImporter(models.AbstractModel):
             # Odoo formula: price = base - (base * discount / 100)
             # So discount = -(factor - 1) * 100  (negative = markup)
             discount = -(factor - 1.0) * 100.0
-            item_vals = {
-                "applied_on": "3_global",
-                "compute_price": "formula",
-                "base": "pricelist",
-                "base_pricelist_id": base_pl_id,
-                "price_discount": discount,
-            }
+            vals["item_ids"] = [
+                Command.create(
+                    {
+                        "applied_on": "3_global",
+                        "compute_price": "formula",
+                        "base": "pricelist",
+                        "base_pricelist_id": base_pl_id,
+                        "price_discount": discount,
+                    }
+                )
+            ]
+            valid_derived_vals.append(vals)
 
-            existing = existing_by_listnum.get(vals["sap_listnum"])
-            if existing:
-                # Replace existing items and update fields
-                vals["item_ids"] = [
-                    Command.clear(),
-                    Command.create(item_vals),
-                ]
-                existing.write(vals)
-                derived_updated += 1
-            else:
-                vals["item_ids"] = [Command.create(item_vals)]
-                new_pl = Pricelist.create(vals)
-                existing_by_listnum[vals["sap_listnum"]] = new_pl
-                derived_created += 1
+        if valid_derived_vals:
+            Pricelist.create(valid_derived_vals)
+            _logger.info(f"Created {len(valid_derived_vals)} derived pricelists.")
 
-        _logger.info(
-            f"Loaded derived pricelists "
-            f"({derived_created} created, {derived_updated} updated)."
-        )
+        # Load customer pricelists
+        if customer_pricelist_vals:
+            # Remove temporary fields
+            partner_mappings = []
+            for vals in customer_pricelist_vals:
+                partner_mappings.append(
+                    {
+                        "partner_id": vals.pop("_partner_id"),
+                        "is_active": vals.pop("_is_active"),
+                    }
+                )
+
+            pricelists = ctx.env["product.pricelist"].create(customer_pricelist_vals)
+            _logger.info(f"Created {len(pricelists)} customer pricelists.")
+
+            # Set partner default pricelists
+            now = datetime.now(utc)
+            default_pricelists = ctx.env["product.pricelist"].search(
+                [("name", "ilike", "Default")]
+            )
 
         # 3. Load customer pricelists (upsert by sap_abs_id)
         cust_created = 0
