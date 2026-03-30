@@ -361,7 +361,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
     target_model="account.move",
     importer_name="account.move.jdt1.enricher",
     sap_source="ojdt",
-    depends_on=["account.move.jdt1.importer"],
+    depends_on=["account.internal.reconciliation"],
     allow_multiprocessing=False,
 )
 class AccountMoveJDT1Enricher(models.AbstractModel):
@@ -532,8 +532,19 @@ class AccountMoveJDT1Enricher(models.AbstractModel):
 
             updated += 1
 
-        # Invalidate ORM cache so computed fields refresh
-        ctx.env.invalidate_all()
+        # Trigger recomputation of all stored fields that depend on
+        # move_type, journal_id, partner_id — modified() cascades through
+        # the full dependency graph.
+        if move_id_by_transid:
+            all_move_ids = list(move_id_by_transid.values())
+            ctx.env.invalidate_all()
+            moves = ctx.env["account.move"].browse(all_move_ids)
+            _logger.info(
+                "[Enricher] Triggering recomputation on %d moves...",
+                len(moves),
+            )
+            moves.modified(["move_type", "journal_id", "partner_id"])
+            ctx.env.flush_all()
 
         _logger.info(
             "[Enricher] Updated %d moves (move_type, journal, partner).",
