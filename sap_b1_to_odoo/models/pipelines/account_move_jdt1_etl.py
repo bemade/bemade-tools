@@ -78,6 +78,12 @@ class AccountMoveJDT1Importer(models.AbstractModel):
     def _get_order_line_link_vals(self, order_line_id):
         return {}
 
+    @api.model
+    def _get_cogs_line_vals(self, row, lookups):
+        """Skip COGS lines — JDT1 already includes inventory/COGS entries
+        as separate transactions (delivery/goods receipt JEs)."""
+        return []
+
     # ----------------------------------------------------------------
     # Extract
     # ----------------------------------------------------------------
@@ -240,7 +246,10 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         if not headers:
             return {"move_vals": [], "lookups": {}}
 
-        meta = extracted["extract_lookups"]
+        meta = extracted.get("extract_lookups") or {}
+        if not meta:
+            _logger.error("No lookups data — extract_lookups may have failed.")
+            return {"move_vals": [], "lookups": {}}
         partners_dict = meta["partners"]
         lookups = meta["lookups"]
         misc_journal_id = meta["misc_journal_id"]
