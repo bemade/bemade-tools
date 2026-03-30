@@ -36,9 +36,11 @@ _SRCOBJTYP_MAP = {
     importer_name="account.internal.reconciliation",
     sap_source="itr1",
     depends_on=[
-        "account.move.jdt1.importer",
+        "account.move.jdt1.enricher",
     ],
-    allow_multiprocessing=False,
+    multiprocessing_threshold=500,
+    chunk_size=200,
+    max_workers=8,
 )
 class AccountInternalReconciliation(models.AbstractModel):
     _name = "account.internal.reconciliation"
