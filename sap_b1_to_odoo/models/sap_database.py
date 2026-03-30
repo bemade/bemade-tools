@@ -408,6 +408,14 @@ class SapDatabase(models.Model):
 
         _logger.info("Successfully completed SAP record import.")
 
+        _logger.info("Running post-import migration validation report...")
+        report = self.env["sap.migration.report"].create({
+            "sap_database_id": self.id,
+            "cutoff_date": fields.Date.today(),
+        })
+        report.action_run()
+        _logger.info("Migration report created: %s", report.name)
+
     def _delete_all(self) -> None:
         """Internal method to delete all SAP-imported records.
 

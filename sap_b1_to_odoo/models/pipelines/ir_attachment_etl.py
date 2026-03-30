@@ -18,7 +18,7 @@ _logger = logging.getLogger(__name__)
     importer_name="ir.attachment.importer",
     sap_source="atc1",
     depends_on=[
-        "account.payment.reconciliation",
+        "account.move.jdt1.importer",
     ],
     multiprocessing_threshold=100,
     chunk_size=500,

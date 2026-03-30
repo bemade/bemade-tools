@@ -20,5 +20,7 @@ from . import account_tax
 from . import account_move
 from . import res_config_settings
 
+from . import sap_migration_report
+
 # ETL Pipelines
 from . import pipelines

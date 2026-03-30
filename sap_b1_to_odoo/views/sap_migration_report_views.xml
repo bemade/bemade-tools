@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <!-- Report form -->
+    <record id="sap_migration_report_view_form" model="ir.ui.view">
+        <field name="name">sap.migration.report.form</field>
+        <field name="model">sap.migration.report</field>
+        <field name="arch" type="xml">
+            <form>
+                <header>
+                    <button name="action_run" type="object"
+                            string="Run Validation" class="btn-primary"/>
+                    <button name="action_create_opening_balance" type="object"
+                            string="Create Opening Balance JE" class="btn-secondary"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1><field name="name" readonly="1"/></h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="sap_database_id"/>
+                            <field name="cutoff_date"/>
+                            <field name="tolerance"/>
+                            <field name="opening_balance_account_id"/>
+                        </group>
+                        <group>
+                            <field name="match_count"/>
+                            <field name="drift_count"/>
+                            <field name="sap_only_count"/>
+                            <field name="odoo_only_count"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Trial Balance" name="tb">
+                            <field name="tb_line_ids" nolabel="1">
+                                <list decoration-danger="status == 'drift'"
+                                      decoration-warning="status in ('sap_only', 'odoo_only')"
+                                      decoration-success="status == 'match'">
+                                    <field name="status" optional="show"/>
+                                    <field name="sap_acct_code"/>
+                                    <field name="sap_acct_name"/>
+                                    <field name="odoo_code" optional="hide"/>
+                                    <field name="odoo_acct_name" optional="hide"/>
+                                    <field name="sap_debit" sum="SAP Debit"/>
+                                    <field name="sap_credit" sum="SAP Credit"/>
+                                    <field name="sap_balance" sum="SAP Balance"/>
+                                    <field name="odoo_debit" sum="Odoo Debit"/>
+                                    <field name="odoo_credit" sum="Odoo Credit"/>
+                                    <field name="odoo_balance" sum="Odoo Balance"/>
+                                    <field name="balance_diff" sum="Difference"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Transaction Detail" name="txn">
+                            <field name="txn_line_ids" nolabel="1">
+                                <list decoration-danger="source == 'sap_only'"
+                                      decoration-info="source == 'odoo_only'">
+                                    <field name="source"/>
+                                    <field name="sap_acct_code"/>
+                                    <field name="date"/>
+                                    <field name="memo"/>
+                                    <field name="partner_code" optional="show"/>
+                                    <field name="sap_transid" optional="show"/>
+                                    <field name="sap_transtype" optional="show"/>
+                                    <field name="sap_debit" sum="SAP Debit"/>
+                                    <field name="sap_credit" sum="SAP Credit"/>
+                                    <field name="odoo_move_name" optional="show"/>
+                                    <field name="odoo_sap_docentry" optional="hide"/>
+                                    <field name="odoo_sap_table" optional="hide"/>
+                                    <field name="odoo_debit" sum="Odoo Debit"/>
+                                    <field name="odoo_credit" sum="Odoo Credit"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- Report list -->
+    <record id="sap_migration_report_view_list" model="ir.ui.view">
+        <field name="name">sap.migration.report.list</field>
+        <field name="model">sap.migration.report</field>
+        <field name="arch" type="xml">
+            <list>
+                <field name="name"/>
+                <field name="cutoff_date"/>
+                <field name="match_count"/>
+                <field name="drift_count"/>
+                <field name="sap_only_count"/>
+                <field name="odoo_only_count"/>
+                <field name="create_date"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- Action -->
+    <record id="sap_migration_report_action" model="ir.actions.act_window">
+        <field name="name">Migration Reports</field>
+        <field name="res_model">sap.migration.report</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- Menu under SAP Import -->
+    <menuitem id="sap_migration_report_menu"
+              name="Migration Reports"
+              parent="menu_sap_b1_to_odoo"
+              action="sap_migration_report_action"
+              sequence="90"/>
+
+</odoo>
