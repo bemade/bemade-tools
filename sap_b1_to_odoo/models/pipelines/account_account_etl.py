@@ -86,8 +86,10 @@ class AccountAccountImporter(models.AbstractModel):
         )
 
         # Only archive accounts that are NOT from SAP (no sap_acct_code)
+        # but preserve Odoo's unaffected earnings account (needed for closing)
         odoo_default_accounts = existing_accounts.filtered(
             lambda a: not a.sap_acct_code
+            and a.account_type != "equity_unaffected"
         )
 
         if odoo_default_accounts:

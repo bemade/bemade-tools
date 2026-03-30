@@ -42,6 +42,7 @@
         "purchase_delivery_carrier",
         "picking_policy_per_customer",
         "accountant",
+        "stock_account",
         "etl_framework",
     ],
     "data": [
@@ -52,6 +53,7 @@
         "views/sap_database_views.xml",
         "views/sap_field_views.xml",
         "views/mrp_views.xml",
+        "views/sap_migration_report_views.xml",
     ],
     "external_dependencies": {"python": ["fuzzywuzzy", "python-Levenshtein"]},
     "post_init_hook": "post_init_hook",
