@@ -30,7 +30,7 @@ from . import account_move_jdt1_etl
 # from . import account_move_credit_memo_etl
 # from . import account_payment_etl
 # from . import account_credit_memo_reconciliation_etl
-# from . import account_internal_reconciliation_etl
-# from . import account_force_paid_etl
+from . import account_internal_reconciliation_etl
+from . import account_force_paid_etl
 from . import account_journal_setup
 from . import res_company_etl

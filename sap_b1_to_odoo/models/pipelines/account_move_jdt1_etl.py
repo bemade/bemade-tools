@@ -1,12 +1,10 @@
 """Unified GL import pipeline: OJDT/JDT1 as single source of truth.
 
-Phase 1a: Import all SAP journal entries as account.move records.
-Every OJDT header becomes one account.move, every JDT1 line becomes
-one account.move.line. All moves are created as move_type='entry'
-to guarantee GL correctness.
-
-Future phases will add enrichment (invoices, bills, payments) and
-reconciliation.
+Imports all SAP journal entries as account.move records. For enrichable
+transaction types (invoices, bills, credit memos), builds proper typed
+moves with product lines, taxes, COGS, and currency handling. All other
+types (payments, manual JEs, inventory, period closes) are imported as
+generic journal entries from JDT1 lines.
 """
 
 import logging
@@ -20,15 +18,38 @@ from odoo.addons.sap_b1_to_odoo.tools import fix_tz
 
 _logger = logging.getLogger(__name__)
 
-# OJDT.transtype (text in PG dump) -> SAP source table and move metadata
+# OJDT.transtype (text in PG dump) -> config
+# Enrichable types get full product-line treatment; others stay as JDT1 entries.
 _TRANSTYPE_CONFIG = {
-    "13": {"sap_table": "oinv", "label": "A/R Invoice"},
-    "14": {"sap_table": "orin", "label": "A/R Credit Memo"},
-    "18": {"sap_table": "opch", "label": "A/P Invoice"},
-    "19": {"sap_table": "orpc", "label": "A/P Credit Memo"},
-    "24": {"sap_table": "orct", "label": "Incoming Payment"},
-    "46": {"sap_table": "ovpm", "label": "Outgoing Payment"},
+    "13": {
+        "sap_table": "oinv",
+        "line_table": "inv1",
+        "move_type": "out_invoice",
+        "refund_type": "out_refund",
+    },
+    "14": {
+        "sap_table": "orin",
+        "line_table": "rin1",
+        "move_type": "out_refund",
+        "refund_type": "out_invoice",
+    },
+    "18": {
+        "sap_table": "opch",
+        "line_table": "pch1",
+        "move_type": "in_invoice",
+        "refund_type": "in_refund",
+    },
+    "19": {
+        "sap_table": "orpc",
+        "line_table": "rpc1",
+        "move_type": "in_refund",
+        "refund_type": "in_invoice",
+    },
+    "24": {"sap_table": "orct"},
+    "46": {"sap_table": "ovpm"},
 }
+
+_ENRICHABLE_TYPES = {"13", "14", "18", "19"}
 
 
 @ETL.pipeline(
@@ -41,6 +62,7 @@ _TRANSTYPE_CONFIG = {
         "account.account.importer",
         "res.partner.company.importer",
         "res.users.importer",
+        "product.product.importer",
     ],
     multiprocessing_threshold=500,
     chunk_size=50,
@@ -49,6 +71,15 @@ _TRANSTYPE_CONFIG = {
 class AccountMoveJDT1Importer(models.AbstractModel):
     _name = "account.move.jdt1.importer"
     _description = "SAP Unified Journal Entry Importer (OJDT/JDT1)"
+    _inherit = "sap.account.move.importer.mixin"
+
+    # Satisfy mixin abstract methods — order line linking is not
+    # used during the JDT1 pipeline (order_lines_dict is always {}).
+    def _get_order_line_link_config(self):
+        return None
+
+    def _get_order_line_link_vals(self, order_line_id):
+        return {}
 
     # ----------------------------------------------------------------
     # Extract
@@ -56,12 +87,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
 
     @ETL.extract("ojdt")
     def extract_journal_entries(self, ctx: ETLContext) -> ChunkableData:
-        """Extract all OJDT headers with embedded JDT1 lines.
-
-        Skips already-imported entries and unbalanced transactions.
-        Sorts by partner (shortname) to minimize multiprocessing conflicts.
-        """
-        # Find already-imported OJDT transids
+        """Extract all OJDT headers with embedded JDT1 lines."""
         already_imported = self._get_already_imported(ctx)
 
         ctx.cr.execute(
@@ -106,8 +132,12 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         for header in headers:
             header["_lines"] = lines_by_transid.get(header["transid"], [])
 
-        # Sort by first partner in each transaction to reduce conflicts
-        headers.sort(key=lambda h: (h["_lines"][0]["shortname"] or "") if h["_lines"] else "")
+        # Sort by first partner to reduce multiprocessing conflicts
+        headers.sort(
+            key=lambda h: (h["_lines"][0]["shortname"] or "")
+            if h["_lines"]
+            else ""
+        )
 
         _logger.info(
             "Extracted %d journal entries (%d lines), skipped %d already imported.",
@@ -115,35 +145,22 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         )
         return ChunkableData(records=headers, context={})
 
-    @ETL.extract("oact")
-    def extract_lookups(self, ctx: ETLContext):
-        """Extract all lookup data needed by transform.
+    @ETL.extract("oinv")
+    def extract_enrichment(self, ctx: ETLContext):
+        """Extract all data needed by transform: lookups + source doc enrichment.
 
-        Partners, accounts, currencies — everything the transform needs
-        to map SAP codes to Odoo IDs without touching the database.
+        Pre-fetches source document headers and lines for enrichable types
+        (invoices, bills, credit memos) so the transform is a pure function.
         """
-        # Partners by SAP card code
+        # Partners
         partners = ctx.env["res.partner"].search_read(
             [("sap_card_code", "!=", False), ("active", "in", [True, False])],
             ["id", "sap_card_code"],
         )
         partners_dict = {p["sap_card_code"]: p["id"] for p in partners}
 
-        # Accounts by SAP format code -> (id, account_type)
-        accounts = ctx.env["account.account"].search_read(
-            [("sap_acct_code", "!=", False)],
-            ["id", "sap_acct_code", "account_type"],
-        )
-        accounts_dict = {
-            a["sap_acct_code"]: (a["id"], a["account_type"]) for a in accounts
-        }
-
-        # Currencies
-        currencies = ctx.env["res.currency"].search_read(
-            [("active", "in", [True, False])],
-            ["id", "name"],
-        )
-        currencies_dict = {c["name"]: c["id"] for c in currencies}
+        # Full lookups from mixin (products, users, currencies, accounts, taxes)
+        lookups = self._build_lookups()
 
         # Misc journal for generic entries
         misc_journal = ctx.env["account.journal"].search(
@@ -153,14 +170,37 @@ class AccountMoveJDT1Importer(models.AbstractModel):
             misc_journal = ctx.env["account.journal"].search(
                 [("type", "=", "general")], limit=1,
             )
-        misc_journal_id = misc_journal.id if misc_journal else False
+
+        # Pre-fetch source doc headers + lines for enrichable types
+        enrichment = {}
+        for transtype in _ENRICHABLE_TYPES:
+            config = _TRANSTYPE_CONFIG[transtype]
+            header_table = config["sap_table"]
+            line_table = config["line_table"]
+
+            ctx.cr.execute(f"SELECT * FROM {header_table}")
+            headers = ctx.cr.dictfetchall()
+
+            lines_by_doc = {}
+            if headers:
+                lines = self._get_lines(ctx.cr, line_table, headers)
+                for line in lines:
+                    lines_by_doc.setdefault(line["docentry"], []).append(line)
+
+            enrichment[transtype] = {
+                "headers": {h["docentry"]: h for h in headers},
+                "lines": lines_by_doc,
+            }
+            _logger.info(
+                "Pre-fetched %d %s headers, %d line groups for enrichment.",
+                len(headers), header_table, len(lines_by_doc),
+            )
 
         return {
             "partners": partners_dict,
-            "accounts": accounts_dict,
-            "currencies": currencies_dict,
-            "company_currency_id": ctx.env.company.currency_id.id,
-            "misc_journal_id": misc_journal_id,
+            "lookups": lookups,
+            "enrichment": enrichment,
+            "misc_journal_id": misc_journal.id if misc_journal else False,
         }
 
     # ----------------------------------------------------------------
@@ -171,82 +211,65 @@ class AccountMoveJDT1Importer(models.AbstractModel):
     def transform_journal_entries(self, ctx: ETLContext, extracted):
         """Transform OJDT headers + JDT1 lines into account.move create vals.
 
-        Pure function: uses only data from extract phase.
+        For enrichable types (13/14/18/19), builds typed moves with product
+        lines from source doc tables. Falls back to generic JDT1 lines if
+        the source doc is not found. All other types use JDT1 lines directly.
         """
         data = extracted["extract_journal_entries"]
         headers = data.records if hasattr(data, "records") else data.get("records", [])
 
         if not headers:
-            return {"move_vals": []}
+            return {"move_vals": [], "lookups": {}}
 
-        lookups = extracted["extract_lookups"]
-        partners_dict = lookups["partners"]
+        meta = extracted["extract_enrichment"]
+        partners_dict = meta["partners"]
+        lookups = meta["lookups"]
+        enrichment = meta["enrichment"]
+        misc_journal_id = meta["misc_journal_id"]
+
+        # Also need raw account/currency dicts for JDT1 fallback lines
         accounts_dict = lookups["accounts"]
         currencies_dict = lookups["currencies"]
         company_currency_id = lookups["company_currency_id"]
-        misc_journal_id = lookups["misc_journal_id"]
 
         move_vals_list = []
+        enriched_count = 0
+        generic_count = 0
+
         for header in headers:
             jdt1_lines = header.pop("_lines", [])
             if not jdt1_lines:
                 continue
 
-            # Phase 1a: all moves use ojdt/transid for tracing.
-            # Enrichment phases will switch typed transactions to
-            # source table + createdby for reconciliation compatibility.
-            sap_table = "ojdt"
-            sap_docentry = header["transid"]
+            transtype = header["transtype"]
+            config = _TRANSTYPE_CONFIG.get(transtype)
 
-            # Build move lines from JDT1
-            line_commands = []
-            partner_id = False
-            for jdt1 in jdt1_lines:
-                line_vals = self._build_jdt1_line_vals(
-                    jdt1, accounts_dict, partners_dict,
-                    currencies_dict, company_currency_id,
+            # Try enrichment for typed transactions
+            move_vals = None
+            if transtype in _ENRICHABLE_TYPES and config:
+                move_vals = self._build_enriched_vals(
+                    header, config, enrichment, partners_dict, lookups,
                 )
-                if line_vals:
-                    line_commands.append(Command.create(line_vals))
-                    # Use first partner encountered as the move partner
-                    if not partner_id and line_vals.get("partner_id"):
-                        partner_id = line_vals["partner_id"]
+                if move_vals:
+                    enriched_count += 1
 
-            if not line_commands:
-                continue
+            # Fall back to generic JDT1 entry
+            if not move_vals:
+                move_vals = self._build_generic_entry_vals(
+                    header, jdt1_lines, accounts_dict, partners_dict,
+                    currencies_dict, company_currency_id, misc_journal_id,
+                )
+                if move_vals:
+                    generic_count += 1
 
-            # Fix rounding imbalance (SAP allows sub-cent drift, Odoo doesn't)
-            # Adjust the largest line rather than adding a separate rounding line,
-            # so the correction stays on the correct account.
-            total_debit = sum(c[2].get("debit", 0) for c in line_commands)
-            total_credit = sum(c[2].get("credit", 0) for c in line_commands)
-            diff = round(total_debit - total_credit, 2)
-            if diff != 0 and abs(diff) <= 0.05:
-                # Find the largest line on the heavy side and adjust it
-                if diff > 0:  # debits too high
-                    target = max(line_commands, key=lambda c: c[2].get("debit", 0))
-                    target[2]["debit"] = round(target[2]["debit"] - diff, 2)
-                else:  # credits too high
-                    target = max(line_commands, key=lambda c: c[2].get("credit", 0))
-                    target[2]["credit"] = round(target[2]["credit"] + diff, 2)
+            if move_vals:
+                move_vals_list.append(move_vals)
 
-            move_vals = {
-                "move_type": "entry",
-                "date": fix_tz(header["refdate"]) if header["refdate"] else False,
-                "ref": header.get("memo") or "",
-                "journal_id": misc_journal_id,
-                "line_ids": line_commands,
-                "sap_docentry": sap_docentry,
-                "sap_docnum": header.get("docnum") or 0,
-                "sap_table": sap_table,
-            }
-            if partner_id:
-                move_vals["partner_id"] = partner_id
-
-            move_vals_list.append(move_vals)
-
-        _logger.info("Transformed %d journal entries.", len(move_vals_list))
-        return {"move_vals": move_vals_list}
+        _logger.info(
+            "Transformed %d journal entries (%d enriched, %d generic).",
+            len(move_vals_list), enriched_count, generic_count,
+        )
+        return {"move_vals": move_vals_list, "lookups": lookups}
 
     # ----------------------------------------------------------------
     # Load
@@ -257,13 +280,20 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         """Create and post account.move records."""
         data = transformed.get("transform_journal_entries", {})
         move_vals_list = data.get("move_vals", [])
+        lookups = data.get("lookups", {})
 
         if not move_vals_list:
             return
 
+        # Batch-create any pending currency rates from enriched moves
+        self._create_pending_currency_rates(lookups)
+
         moves = ctx.env["account.move"]
         for vals in move_vals_list:
-            ref = f"JE SAP transid={vals.get('sap_docentry', '?')} [{vals.get('sap_table', '')}]"
+            ref = (
+                f"{vals.get('sap_table', 'ojdt')}#"
+                f"{vals.get('sap_docentry', '?')}"
+            )
             with ctx.skippable(ref):
                 moves |= ctx.env["account.move"].create(vals)
 
@@ -279,30 +309,140 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         for journal_id, journal_moves in sorted(by_journal.items()):
             with post_lock(ctx.env.cr, journal_id):
                 for move in journal_moves:
-                    with ctx.skippable(f"post {move.sap_table}#{move.sap_docentry}"):
-                        move.action_post()
+                    with ctx.skippable(
+                        f"post {move.sap_table}#{move.sap_docentry}"
+                    ):
+                        move.with_context(
+                            skip_cogs_generation=True,
+                        ).action_post()
 
-        _logger.info("Created %d, posted %d journal entries.", len(move_vals_list), len(moves))
+        _logger.info(
+            "Created and posted %d journal entries.", len(moves),
+        )
 
     # ----------------------------------------------------------------
-    # Helpers
+    # Enrichment builder
+    # ----------------------------------------------------------------
+
+    def _build_enriched_vals(self, header, config, enrichment, partners_dict,
+                             lookups):
+        """Build enriched move vals from source doc tables.
+
+        Returns move vals dict or None if source doc not found (caller
+        should fall back to generic JDT1 entry).
+        """
+        transtype = header["transtype"]
+        type_data = enrichment.get(transtype, {})
+        source_headers = type_data.get("headers", {})
+        source_lines = type_data.get("lines", {})
+
+        # Look up source doc by OJDT.createdby (= source docentry)
+        doc = source_headers.get(header["createdby"])
+        if not doc:
+            _logger.debug(
+                "No %s doc for OJDT transid=%s createdby=%s, using JDT1.",
+                config["sap_table"], header["transid"], header["createdby"],
+            )
+            return None
+
+        partner_id = partners_dict.get(doc.get("cardcode"))
+        if not partner_id:
+            _logger.debug(
+                "No partner for cardcode=%s on %s docentry=%s, using JDT1.",
+                doc.get("cardcode"), config["sap_table"], doc["docentry"],
+            )
+            return None
+
+        # Use mixin's _get_move_vals for full enrichment
+        vals = self._get_move_vals(
+            doc,
+            partner_id,
+            source_lines,
+            config["sap_table"],
+            config["line_table"],
+            {},  # order_lines_dict — linking added in later phase
+            lookups,
+        )
+
+        if not vals.get("line_ids"):
+            _logger.debug(
+                "No line_ids for %s docentry=%s, using JDT1.",
+                config["sap_table"], doc["docentry"],
+            )
+            return None
+
+        # Set proper move_type, flipping sign if needed
+        self._normalize_move_type(vals, config["move_type"], config["refund_type"])
+
+        return vals
+
+    # ----------------------------------------------------------------
+    # Generic JDT1 builder
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _build_generic_entry_vals(header, jdt1_lines, accounts_dict,
+                                  partners_dict, currencies_dict,
+                                  company_currency_id, misc_journal_id):
+        """Build a generic move_type='entry' from JDT1 lines."""
+        line_commands = []
+        partner_id = False
+
+        for jdt1 in jdt1_lines:
+            line_vals = AccountMoveJDT1Importer._build_jdt1_line_vals(
+                jdt1, accounts_dict, partners_dict,
+                currencies_dict, company_currency_id,
+            )
+            if line_vals:
+                line_commands.append(Command.create(line_vals))
+                if not partner_id and line_vals.get("partner_id"):
+                    partner_id = line_vals["partner_id"]
+
+        if not line_commands:
+            return None
+
+        # Fix rounding imbalance (SAP allows sub-cent drift, Odoo doesn't).
+        # Adjust the largest line on the heavy side.
+        total_debit = sum(c[2].get("debit", 0) for c in line_commands)
+        total_credit = sum(c[2].get("credit", 0) for c in line_commands)
+        diff = round(total_debit - total_credit, 2)
+        if diff != 0 and abs(diff) <= 0.05:
+            if diff > 0:
+                target = max(line_commands, key=lambda c: c[2].get("debit", 0))
+                target[2]["debit"] = round(target[2]["debit"] - diff, 2)
+            else:
+                target = max(line_commands, key=lambda c: c[2].get("credit", 0))
+                target[2]["credit"] = round(target[2]["credit"] + diff, 2)
+
+        move_vals = {
+            "move_type": "entry",
+            "date": fix_tz(header["refdate"]) if header["refdate"] else False,
+            "ref": header.get("memo") or "",
+            "journal_id": misc_journal_id,
+            "line_ids": line_commands,
+            "sap_docentry": header["transid"],
+            "sap_docnum": header.get("docnum") or 0,
+            "sap_table": "ojdt",
+        }
+        if partner_id:
+            move_vals["partner_id"] = partner_id
+
+        return move_vals
+
+    # ----------------------------------------------------------------
+    # JDT1 line builder
     # ----------------------------------------------------------------
 
     @staticmethod
     def _build_jdt1_line_vals(jdt1, accounts_dict, partners_dict,
                               currencies_dict, company_currency_id):
-        """Build account.move.line vals from a single JDT1 row.
-
-        Pure function — no database access.
-        """
+        """Build account.move.line vals from a single JDT1 row."""
         debit = float(jdt1.get("debit") or 0)
         credit = float(jdt1.get("credit") or 0)
 
-        # Skip zero lines
         if debit == 0 and credit == 0:
             return None
 
-        # Account lookup
         acct_formatcode = (jdt1.get("acct_formatcode") or "").strip()
         account_info = accounts_dict.get(acct_formatcode)
         if not account_info:
@@ -313,11 +453,9 @@ class AccountMoveJDT1Importer(models.AbstractModel):
             return None
         account_id, _account_type = account_info
 
-        # Partner lookup (shortname is the BP code in JDT1)
         shortname = (jdt1.get("shortname") or "").strip()
         partner_id = partners_dict.get(shortname) if shortname else False
 
-        # Currency
         fc_currency = (jdt1.get("fccurrency") or "").strip()
         currency_id = False
         amount_currency = 0.0
@@ -349,13 +487,17 @@ class AccountMoveJDT1Importer(models.AbstractModel):
 
         return vals
 
+    # ----------------------------------------------------------------
+    # Already-imported detection
+    # ----------------------------------------------------------------
+
     @staticmethod
     def _get_already_imported(ctx):
         """Get set of OJDT transids already imported.
 
-        All JDT1-pipeline moves use sap_table='ojdt', sap_docentry=transid.
-        Also detects moves from the old per-doctype pipelines by reverse-
-        looking up their OJDT transid via createdby + transtype.
+        Detects both JDT1-pipeline moves (sap_table='ojdt') and enriched
+        moves (sap_table=source table) by reverse-looking up their OJDT
+        transid via createdby + transtype.
         """
         ctx.env.cr.execute(
             """
@@ -367,7 +509,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         )
         ojdt_transids = {row[0] for row in ctx.env.cr.fetchall()}
 
-        # Also detect old-pipeline moves (sap_table = oinv/opch/etc.)
+        # Enriched moves: sap_table = oinv/opch/etc., sap_docentry = createdby
         ctx.env.cr.execute(
             """
             SELECT DISTINCT sap_table, sap_docentry FROM account_move
@@ -386,7 +528,8 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 transtype = table_to_transtype.get(sap_table)
                 if transtype:
                     ctx.cr.execute(
-                        "SELECT transid FROM ojdt WHERE createdby = %s AND transtype = %s",
+                        "SELECT transid FROM ojdt"
+                        " WHERE createdby = %s AND transtype = %s",
                         (sap_docentry, transtype),
                     )
                     for row in ctx.cr.fetchall():

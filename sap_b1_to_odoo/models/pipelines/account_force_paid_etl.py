@@ -71,43 +71,15 @@ class AccountForcePaidReconciliation(models.AbstractModel):
         invoice_docentries = [p["docentry"] for p in paid_invoices]
         bill_docentries = [p["docentry"] for p in paid_bills]
 
-        # Map sap_docentry -> (move_id, amount_residual) for invoices not yet paid
-        invoices_map = {}
-        if invoice_docentries:
-            invoices = ctx.env["account.move"].search(
-                [
-                    ("sap_docentry", "in", invoice_docentries),
-                    ("sap_table", "=", "oinv"),
-                    ("state", "=", "posted"),
-                    ("payment_state", "in", ["not_paid", "partial"]),
-                ]
-            )
-            invoices_map = {
-                inv.sap_docentry: {
-                    "move_id": inv.id,
-                    "amount_residual": inv.amount_residual,
-                }
-                for inv in invoices
-            }
-
-        # Map sap_docentry -> (move_id, amount_residual) for bills not yet paid
-        bills_map = {}
-        if bill_docentries:
-            bills = ctx.env["account.move"].search(
-                [
-                    ("sap_docentry", "in", bill_docentries),
-                    ("sap_table", "=", "opch"),
-                    ("state", "=", "posted"),
-                    ("payment_state", "in", ["not_paid", "partial"]),
-                ]
-            )
-            bills_map = {
-                bill.sap_docentry: {
-                    "move_id": bill.id,
-                    "amount_residual": bill.amount_residual,
-                }
-                for bill in bills
-            }
+        # Map docentry -> (move_id, amount_residual) for unpaid invoices/bills.
+        # Searches enriched moves (sap_table=oinv/opch) first, then falls back
+        # to generic JDT1 moves (sap_table=ojdt) via OJDT transid reverse lookup.
+        invoices_map = self._find_unpaid_moves(
+            ctx, invoice_docentries, "oinv", "13",
+        )
+        bills_map = self._find_unpaid_moves(
+            ctx, bill_docentries, "opch", "18",
+        )
 
         _logger.info(
             f"[ForcePaidReconciliation] Found {len(invoices_map)} invoices and "
@@ -309,3 +281,62 @@ class AccountForcePaidReconciliation(models.AbstractModel):
             f"[ForcePaidReconciliation] Chunk complete: {reconciled_count} reconciled, "
             f"{skipped_no_line} no line to reconcile"
         )
+
+    def _find_unpaid_moves(self, ctx, docentries, sap_table, transtype):
+        """Find unpaid Odoo moves by SAP docentry.
+
+        Tries enriched moves (sap_table=oinv/opch) first, then falls back
+        to generic JDT1 moves (sap_table=ojdt) via OJDT transid lookup.
+
+        Returns: {docentry: {"move_id": int, "amount_residual": float}}
+        """
+        if not docentries:
+            return {}
+
+        result = {}
+        domain_base = [
+            ("state", "=", "posted"),
+            ("payment_state", "in", ["not_paid", "partial"]),
+        ]
+
+        # Try enriched moves first
+        moves = ctx.env["account.move"].search(
+            domain_base + [
+                ("sap_docentry", "in", docentries),
+                ("sap_table", "=", sap_table),
+            ]
+        )
+        for m in moves:
+            result[m.sap_docentry] = {
+                "move_id": m.id,
+                "amount_residual": m.amount_residual,
+            }
+
+        # Fall back to OJDT for any not found
+        missing = [d for d in docentries if d not in result]
+        if missing:
+            ctx.cr.execute(
+                "SELECT createdby, transid FROM ojdt"
+                " WHERE transtype = %s AND createdby IN %s",
+                (transtype, tuple(missing)),
+            )
+            ojdt_map = {row[0]: row[1] for row in ctx.cr.fetchall()}
+            transids = list(ojdt_map.values())
+
+            if transids:
+                ojdt_moves = ctx.env["account.move"].search(
+                    domain_base + [
+                        ("sap_docentry", "in", transids),
+                        ("sap_table", "=", "ojdt"),
+                    ]
+                )
+                transid_to_move = {m.sap_docentry: m for m in ojdt_moves}
+                for docentry, transid in ojdt_map.items():
+                    m = transid_to_move.get(transid)
+                    if m:
+                        result[docentry] = {
+                            "move_id": m.id,
+                            "amount_residual": m.amount_residual,
+                        }
+
+        return result
