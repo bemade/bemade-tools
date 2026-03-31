@@ -110,6 +110,9 @@ class AccountMoveGLCorrection(models.AbstractModel):
 
         # Build actual account-level balances from Odoo
         move_ids = list(expected_by_move.keys())
+        if not move_ids:
+            _logger.info("[GL Fix] No moves matched OJDT entries.")
+            return {"corrections": []}
         ctx.env.cr.execute(
             """
             SELECT move_id, account_id,
