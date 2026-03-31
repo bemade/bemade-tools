@@ -280,6 +280,19 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                     header, doc, doc_lines, config, partners_dict, lookups,
                 )
                 if move_vals:
+                    # Carry JDT1 account expectations for post-posting fix
+                    move_vals["_jdt1_accounts"] = [
+                        {
+                            "acct_formatcode": (
+                                jl.get("acct_formatcode") or ""
+                            ).strip(),
+                            "debit": float(jl.get("debit") or 0),
+                            "credit": float(jl.get("credit") or 0),
+                        }
+                        for jl in jdt1_lines
+                        if float(jl.get("debit") or 0)
+                        or float(jl.get("credit") or 0)
+                    ]
                     enriched_count += 1
 
             # Fall back to generic JDT1 entry
