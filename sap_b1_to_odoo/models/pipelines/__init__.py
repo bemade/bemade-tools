@@ -24,6 +24,7 @@ from . import account_account_etl
 from . import account_tax_etl
 from . import account_move_etl_common
 from . import account_move_jdt1_etl
+from . import account_move_gl_correction_etl
 # Disabled: replaced by JDT1-first unified GL pipeline
 # from . import account_move_etl
 # from . import account_move_bill_etl
