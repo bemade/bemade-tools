@@ -136,7 +136,8 @@ class AccountMoveGLCorrection(models.AbstractModel):
     @ETL.load()
     def load_gl_corrections(self, ctx: ETLContext, transformed):
         """Fix account assignments on posted moves to match JDT1."""
-        corrections = transformed.get("corrections", [])
+        data = transformed.get("transform_gl_corrections", {})
+        corrections = data.get("corrections", [])
         if not corrections:
             _logger.info("[GL Fix] No corrections to apply.")
             return
