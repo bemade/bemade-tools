@@ -43,6 +43,13 @@ class AccountMoveLine(models.Model):
         index="btree",
         copy=False,
     )
+    sap_acct_id = fields.Many2one(
+        "account.account",
+        string="SAP Account",
+        copy=False,
+        help="The account SAP posted this line to (from JDT1). "
+             "Used to correct Odoo's auto-computed account after creation.",
+    )
 
     _sap_line_type_check = models.Constraint(
         """CHECK(

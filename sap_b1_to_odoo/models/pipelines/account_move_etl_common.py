@@ -84,6 +84,8 @@ class AccountMoveCommon(models.AbstractModel):
             account_info = accounts_dict.get(acct_formatcode)
             if account_info:
                 account_id, account_type = account_info
+                # Always store the SAP account for post-create correction
+                vals["sap_acct_id"] = account_id
                 # Skip receivable/payable accounts on move lines
                 # (Odoo validation will fail — these are for payment terms)
                 if account_type not in [

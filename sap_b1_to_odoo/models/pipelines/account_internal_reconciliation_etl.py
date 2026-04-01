@@ -36,7 +36,7 @@ _SRCOBJTYP_MAP = {
     importer_name="account.internal.reconciliation",
     sap_source="itr1",
     depends_on=[
-        "account.move.gl.correction",
+        "account.move.jdt1.importer",
     ],
     multiprocessing_threshold=500,
     chunk_size=200,
