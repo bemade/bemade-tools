@@ -1,8 +1,12 @@
-"""Post-import GL correction: fix account assignments on enriched moves.
+"""Post-import GL correction: fix AR/AP and tax accounts on enriched moves.
 
-Compares each enriched move's account-level totals against JDT1 and
-corrects mismatches by reassigning lines to the correct accounts.
-Runs after the JDT1 importer, before reconciliation.
+Enriched invoices/bills have correct revenue/expense accounts from SAP
+but Odoo auto-generates AR/AP and tax lines using its own defaults.
+This pipeline corrects those accounts to match JDT1.
+
+Targets exactly:
+  1. The payment_term line (AR/AP) — one per move
+  2. Tax lines — one per tax group per move
 """
 
 import logging
@@ -23,12 +27,13 @@ _logger = logging.getLogger(__name__)
 )
 class AccountMoveGLCorrection(models.AbstractModel):
     _name = "account.move.gl.correction"
-    _description = "Fix enriched move accounts to match JDT1 GL truth"
+    _description = "Fix AR/AP and tax accounts on enriched moves to match JDT1"
 
     @ETL.extract("jdt1")
     def extract_gl_corrections(self, ctx: ETLContext):
-        """Build per-move expected vs actual account balances."""
-        # Get all enriched moves
+        """Build correction map: for each enriched move, find the JDT1
+        AR/AP and tax account assignments."""
+        # Get enriched moves
         ctx.env.cr.execute(
             """
             SELECT id, sap_docentry, sap_table
@@ -40,7 +45,7 @@ class AccountMoveGLCorrection(models.AbstractModel):
         enriched_moves = ctx.env.cr.fetchall()
 
         if not enriched_moves:
-            _logger.info("[GL Fix] No enriched moves to correct.")
+            _logger.info("[GL Fix] No enriched moves.")
             return {"corrections": []}
 
         move_id_map = {(row[2], row[1]): row[0] for row in enriched_moves}
@@ -49,7 +54,7 @@ class AccountMoveGLCorrection(models.AbstractModel):
             "oinv": "13", "orin": "14", "opch": "18", "orpc": "19",
         }
 
-        # Map enriched moves to OJDT transids
+        # Map enriched moves → OJDT transids
         transid_to_move_id = {}
         by_table = defaultdict(list)
         for _, docentry, table in enriched_moves:
@@ -68,97 +73,80 @@ class AccountMoveGLCorrection(models.AbstractModel):
                     transid_to_move_id[transid] = move_id
 
         if not transid_to_move_id:
-            _logger.info("[GL Fix] No OJDT matches found.")
+            _logger.info("[GL Fix] No OJDT matches.")
             return {"corrections": []}
 
-        # Build expected account-level balances from JDT1
+        # Account lookup: sap_acct_code → (account_id, account_type)
+        accounts = ctx.env["account.account"].search_read(
+            [("sap_acct_code", "!=", False)],
+            ["id", "sap_acct_code", "account_type"],
+        )
+        acct_by_code = {
+            a["sap_acct_code"]: (a["id"], a["account_type"])
+            for a in accounts
+        }
+
+        # Get JDT1 lines grouped by move, classified by account type
         ctx.cr.execute(
             """
-            SELECT j.transid,
-                   a.formatcode,
-                   SUM(j.debit) AS debit,
-                   SUM(j.credit) AS credit
+            SELECT j.transid, a.formatcode,
+                   SUM(j.debit) AS debit, SUM(j.credit) AS credit
               FROM jdt1 j
               JOIN oact a ON j.account = a.acctcode
              WHERE j.transid IN %s
+               AND (j.debit <> 0 OR j.credit <> 0)
              GROUP BY j.transid, a.formatcode
             """,
             (tuple(transid_to_move_id.keys()),),
         )
 
-        # account code -> account_id
-        accounts = ctx.env["account.account"].search_read(
-            [("sap_acct_code", "!=", False)], ["id", "sap_acct_code"],
-        )
-        account_by_code = {a["sap_acct_code"]: a["id"] for a in accounts}
-
-        # expected[move_id][account_id] = {"debit": x, "credit": y}
-        expected_by_move = defaultdict(lambda: defaultdict(
-            lambda: {"debit": 0.0, "credit": 0.0}
-        ))
-        for row in ctx.env.cr.dictfetchall():
+        # For each move, find the AR/AP account and tax accounts from JDT1
+        # AR/AP: the receivable or payable account
+        # Tax: accounts that are liability_current (typical for tax payable)
+        corrections = []
+        jdt1_by_move = defaultdict(list)
+        for row in ctx.cr.dictfetchall():
             move_id = transid_to_move_id[row["transid"]]
             code = row["formatcode"].strip()
-            acct_id = account_by_code.get(code)
-            if not acct_id:
-                continue
-            debit = round(float(row["debit"] or 0), 2)
-            credit = round(float(row["credit"] or 0), 2)
-            if debit or credit:
-                expected_by_move[move_id][acct_id]["debit"] += debit
-                expected_by_move[move_id][acct_id]["credit"] += credit
+            info = acct_by_code.get(code)
+            if info:
+                jdt1_by_move[move_id].append({
+                    "account_id": info[0],
+                    "account_type": info[1],
+                    "debit": float(row["debit"] or 0),
+                    "credit": float(row["credit"] or 0),
+                })
 
-        # Build actual account-level balances from Odoo
-        move_ids = list(expected_by_move.keys())
-        if not move_ids:
-            _logger.info("[GL Fix] No moves matched OJDT entries.")
-            return {"corrections": []}
-        ctx.env.cr.execute(
-            """
-            SELECT move_id, account_id,
-                   ROUND(SUM(debit)::numeric, 2) AS debit,
-                   ROUND(SUM(credit)::numeric, 2) AS credit
-              FROM account_move_line
-             WHERE move_id IN %s
-             GROUP BY move_id, account_id
-            """,
-            (tuple(move_ids),),
-        )
-        actual_by_move = defaultdict(lambda: defaultdict(
-            lambda: {"debit": 0.0, "credit": 0.0}
-        ))
-        for row in ctx.env.cr.dictfetchall():
-            actual_by_move[row["move_id"]][row["account_id"]]["debit"] = float(row["debit"])
-            actual_by_move[row["move_id"]][row["account_id"]]["credit"] = float(row["credit"])
+        for move_id, jdt1_lines in jdt1_by_move.items():
+            ar_ap_account = None
+            tax_accounts = []
 
-        # Find moves with mismatches
-        corrections = []
-        for move_id in move_ids:
-            expected = expected_by_move[move_id]
-            actual = actual_by_move[move_id]
-            all_accounts = set(expected) | set(actual)
-
-            has_diff = False
-            for acct_id in all_accounts:
-                e = expected.get(acct_id, {"debit": 0, "credit": 0})
-                a = actual.get(acct_id, {"debit": 0, "credit": 0})
-                if (
-                    abs(e["debit"] - a["debit"]) > 0.01
-                    or abs(e["credit"] - a["credit"]) > 0.01
+            for jl in jdt1_lines:
+                if jl["account_type"] in (
+                    "asset_receivable", "liability_payable",
                 ):
-                    has_diff = True
-                    break
+                    ar_ap_account = jl["account_id"]
+                elif jl["account_type"] == "liability_current":
+                    # Tax accounts are typically liability_current
+                    tax_accounts.append({
+                        "account_id": jl["account_id"],
+                        "debit": jl["debit"],
+                        "credit": jl["credit"],
+                    })
 
-            if has_diff:
+            if ar_ap_account or tax_accounts:
                 corrections.append({
                     "move_id": move_id,
-                    "expected": {k: dict(v) for k, v in expected.items()},
-                    "actual": {k: dict(v) for k, v in actual.items()},
+                    "ar_ap_account_id": ar_ap_account,
+                    "tax_accounts": tax_accounts,
                 })
 
         _logger.info(
-            "[GL Fix] %d of %d enriched moves need account corrections.",
-            len(corrections), len(move_ids),
+            "[GL Fix] Prepared corrections for %d moves "
+            "(%d with AR/AP, %d with tax).",
+            len(corrections),
+            sum(1 for c in corrections if c["ar_ap_account_id"]),
+            sum(1 for c in corrections if c["tax_accounts"]),
         )
         return {"corrections": corrections}
 
@@ -168,111 +156,67 @@ class AccountMoveGLCorrection(models.AbstractModel):
 
     @ETL.load()
     def load_gl_corrections(self, ctx: ETLContext, transformed):
-        """Fix accounts by reassigning lines from wrong accounts to right ones.
-
-        For each mismatched move, finds accounts with excess debit/credit
-        (in Odoo but not in JDT1) and accounts with deficit (in JDT1 but
-        not in Odoo), then moves lines from excess to deficit accounts.
-        """
+        """Fix AR/AP and tax line accounts on posted moves."""
         data = transformed.get("transform_gl_corrections", {})
         corrections = data.get("corrections", [])
         if not corrections:
             _logger.info("[GL Fix] No corrections to apply.")
             return
 
-        fixed_moves = 0
-        fixed_lines = 0
+        fixed_ar_ap = 0
+        fixed_tax = 0
 
         for correction in corrections:
             move_id = correction["move_id"]
-            expected = correction["expected"]
-            actual = correction["actual"]
 
-            # Compute per-account diffs: positive = Odoo has too much
-            all_accounts = set(expected) | set(actual)
-            debit_excess = {}   # account_id -> excess debit amount
-            credit_excess = {}  # account_id -> excess credit amount
+            # Fix AR/AP: update the payment_term line's account
+            if correction["ar_ap_account_id"]:
+                ctx.env.cr.execute(
+                    """
+                    UPDATE account_move_line
+                       SET account_id = %s
+                     WHERE move_id = %s
+                       AND display_type = 'payment_term'
+                    """,
+                    (correction["ar_ap_account_id"], move_id),
+                )
+                if ctx.env.cr.rowcount > 0:
+                    fixed_ar_ap += 1
 
-            for acct_id in all_accounts:
-                e = expected.get(acct_id, {"debit": 0, "credit": 0})
-                a = actual.get(acct_id, {"debit": 0, "credit": 0})
-                d_diff = round(a["debit"] - e["debit"], 2)
-                c_diff = round(a["credit"] - e["credit"], 2)
-                if abs(d_diff) > 0.01:
-                    debit_excess[acct_id] = d_diff
-                if abs(c_diff) > 0.01:
-                    credit_excess[acct_id] = c_diff
+            # Fix tax: match tax lines by amount to JDT1 tax accounts
+            for tax_acct in correction["tax_accounts"]:
+                # Match by amount — Odoo has one tax line per tax
+                if tax_acct["credit"] > 0:
+                    ctx.env.cr.execute(
+                        """
+                        UPDATE account_move_line
+                           SET account_id = %s
+                         WHERE move_id = %s
+                           AND display_type = 'tax'
+                           AND ABS(credit - %s) < 0.02
+                        """,
+                        (tax_acct["account_id"], move_id,
+                         tax_acct["credit"]),
+                    )
+                elif tax_acct["debit"] > 0:
+                    ctx.env.cr.execute(
+                        """
+                        UPDATE account_move_line
+                           SET account_id = %s
+                         WHERE move_id = %s
+                           AND display_type = 'tax'
+                           AND ABS(debit - %s) < 0.02
+                        """,
+                        (tax_acct["account_id"], move_id,
+                         tax_acct["debit"]),
+                    )
+                if ctx.env.cr.rowcount > 0:
+                    fixed_tax += 1
 
-            # Get individual lines for this move
-            ctx.env.cr.execute(
-                """
-                SELECT id, account_id, debit, credit
-                  FROM account_move_line
-                 WHERE move_id = %s
-                 ORDER BY id
-                """,
-                (move_id,),
-            )
-            lines = [
-                {"id": r[0], "account_id": r[1],
-                 "debit": float(r[2]), "credit": float(r[3])}
-                for r in ctx.env.cr.fetchall()
-            ]
-
-            move_fixed = False
-
-            # For each line on an account with excess, try to reassign it
-            # to an account with deficit of the same type (debit or credit)
-            for line in lines:
-                acct = line["account_id"]
-
-                # Check debit excess
-                if line["debit"] > 0 and acct in debit_excess and debit_excess[acct] > 0:
-                    # Find an account that needs more debit
-                    for target_acct, deficit in debit_excess.items():
-                        if deficit < 0 and abs(deficit) >= line["debit"] - 0.01:
-                            # Move this line to target account
-                            ctx.env.cr.execute(
-                                "UPDATE account_move_line"
-                                " SET account_id = %s WHERE id = %s",
-                                (target_acct, line["id"]),
-                            )
-                            debit_excess[acct] = round(
-                                debit_excess[acct] - line["debit"], 2,
-                            )
-                            debit_excess[target_acct] = round(
-                                deficit + line["debit"], 2,
-                            )
-                            fixed_lines += 1
-                            move_fixed = True
-                            break
-
-                # Check credit excess
-                if line["credit"] > 0 and acct in credit_excess and credit_excess[acct] > 0:
-                    for target_acct, deficit in credit_excess.items():
-                        if deficit < 0 and abs(deficit) >= line["credit"] - 0.01:
-                            ctx.env.cr.execute(
-                                "UPDATE account_move_line"
-                                " SET account_id = %s WHERE id = %s",
-                                (target_acct, line["id"]),
-                            )
-                            credit_excess[acct] = round(
-                                credit_excess[acct] - line["credit"], 2,
-                            )
-                            credit_excess[target_acct] = round(
-                                deficit + line["credit"], 2,
-                            )
-                            fixed_lines += 1
-                            move_fixed = True
-                            break
-
-            if move_fixed:
-                fixed_moves += 1
-
-        if fixed_lines:
+        if fixed_ar_ap or fixed_tax:
             ctx.env.invalidate_all()
 
         _logger.info(
-            "[GL Fix] Corrected %d lines across %d moves.",
-            fixed_lines, fixed_moves,
+            "[GL Fix] Fixed %d AR/AP lines, %d tax lines.",
+            fixed_ar_ap, fixed_tax,
         )

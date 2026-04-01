@@ -191,7 +191,7 @@ class AccountAccountImporter(models.AbstractModel):
         # Classify by SAP root account group (most reliable)
         if "asset" in root_name:
             # Assets - check receivable first (A/R may have finanse='Y')
-            if "receivable" in name or "a/r" in name:
+            if "receiv" in name or "a/r" in name:
                 return "asset_receivable"
             elif (
                 finanse == "Y" or "cash" in name or "bank" in name or "checking" in name
