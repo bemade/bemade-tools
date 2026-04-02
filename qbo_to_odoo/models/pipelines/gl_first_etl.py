@@ -555,6 +555,8 @@ class QboGlFirstImporter(models.AbstractModel):
                             vals, lines_data, code_map, account_type_map,
                             exchange_rate=fx_rate,
                         )
+                        if fx_rate != 1.0:
+                            vals["_exchange_rate"] = fx_rate
                         move_vals.append(vals)
                         enriched += 1
                         continue
@@ -633,6 +635,8 @@ class QboGlFirstImporter(models.AbstractModel):
                 truth["arap"] = vals.pop("_gl_arap_account_id")
             if "_tax_amounts" in vals:
                 truth["tax_amounts"] = vals.pop("_tax_amounts")
+            if "_exchange_rate" in vals:
+                vals.pop("_exchange_rate")  # Used only for annotation
             if truth:
                 gl_truth[i] = truth
 

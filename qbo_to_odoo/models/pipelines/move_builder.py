@@ -805,12 +805,17 @@ class QBOMoveBuilder:
         if tax_amounts:
             vals["_tax_amounts"] = tax_amounts
 
-        # Extract AP account from APAccountRef (bills/vendor credits).
-        ap_ref = entry.get("APAccountRef", {}).get("value")
-        if ap_ref:
-            ap_account_id = self._account_map.get(int(ap_ref))
-            if ap_account_id:
-                vals["_gl_arap_account_id"] = ap_account_id
+        # Extract AR/AP account from the API entity.
+        # Bills/vendor credits use APAccountRef; invoices with a deposit
+        # use DepositToAccountRef (receivable routed to deposit account).
+        arap_ref = (
+            entry.get("APAccountRef", {}).get("value")
+            or entry.get("DepositToAccountRef", {}).get("value")
+        )
+        if arap_ref:
+            arap_account_id = self._account_map.get(int(arap_ref))
+            if arap_account_id:
+                vals["_gl_arap_account_id"] = arap_account_id
 
         return vals
 
