@@ -332,6 +332,17 @@ class QboConnection(models.Model):
     )
     gl_export_filename = fields.Char(string="GL Export Filename")
 
+    use_gl_first = fields.Boolean(
+        string="Use GL-first import",
+        default=False,
+        help=(
+            "If enabled, the Import All action will run the GL-first pipeline "
+            "(Journal export as primary source) plus post-posting correction, "
+            "and will skip the original API-based move pipelines."
+        ),
+    )
+
+
     # Connection state
     state = fields.Selection(
         [
@@ -915,4 +926,40 @@ class QboConnection(models.Model):
 
     def action_import_all(self) -> dict:
         """Import all QBO data in the correct order."""
+        self.ensure_one()
+
+        if self.use_gl_first:
+            orchestrator = PipelineOrchestrator(
+                self.env,
+                source_config=self._get_source_config(),
+                module_filter="qbo_to_odoo",
+            )
+            orchestrator.execute_pipelines(
+                cr=None,
+                pipeline_names=[
+                    "qbo.gl.first.import",
+                    "qbo.gl.correction",
+                    "qbo.gl.first.reconciliation",
+                ],
+            )
+            return self._success_notification()
+
         return self._execute_all_pipelines()
+
+    def action_generate_validation_report(self) -> dict:
+        """Create and open a QBO migration validation report."""
+        self.ensure_one()
+        if not self.gl_export_file:
+            raise UserError(_("Please upload a Journal export (XLSX) first."))
+
+        report = self.env["qbo.migration.report"].create({
+            "qbo_connection_id": self.id,
+        })
+        report.action_run()
+
+        return {
+            "type": "ir.actions.act_window",
+            "res_model": "qbo.migration.report",
+            "res_id": report.id,
+            "views": [(False, "form")],
+        }

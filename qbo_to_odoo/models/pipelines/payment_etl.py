@@ -187,14 +187,24 @@ class QboPaymentImporter(models.AbstractModel):
 
             if result:
                 payment_data.append(result)
+                # Collect embedded credit/vendor credit applications
+                # from regular (non-zero) payments
+                credit_applications.extend(
+                    result.get("embedded_credit_apps", [])
+                )
             else:
                 skipped += 1
 
         with_links = sum(1 for p in payment_data if p.get("linked_moves"))
+        embedded = sum(
+            len(p.get("embedded_credit_apps", []))
+            for p in payment_data
+        )
         _logger.info(
             f"Transformed {len(payment_data)} payments, skipped {skipped}, "
             f"{with_links} linked to invoices/bills; "
-            f"{len(credit_applications)} credit/debit note applications"
+            f"{len(credit_applications)} credit/debit note applications "
+            f"({embedded} embedded on regular payments)"
         )
         return {
             "payments": payment_data,
@@ -244,14 +254,29 @@ class QboPaymentImporter(models.AbstractModel):
         invoice_recv_map = builder.get_extra("invoice_receivable_map") or {}
         partner_recv_map = builder.get_extra("partner_receivable_map") or {}
 
+        # Also collect embedded credit memo applications on this payment.
+        # QBO can apply CMs as lines on a regular (non-zero) payment.
+        credit_memo_map = builder.get_extra("credit_memo_map") or {}
+        journal_entry_map = builder.get_extra("journal_entry_map") or {}
+        embedded_cm_links = []  # (odoo_cm_move_id, qbo_amount)
+
         for line in payment.get("Line", []):
             line_amount = float(line.get("Amount", 0) or 0)
             for linked in line.get("LinkedTxn", []):
                 txn_id = str(linked.get("TxnId", ""))
-                if linked.get("TxnType") == "Invoice" and txn_id in invoice_map:
+                txn_type = linked.get("TxnType")
+                if txn_type == "Invoice" and txn_id in invoice_map:
                     linked_moves.append((invoice_map[txn_id], line_amount))
                     if not recv_account_id:
                         recv_account_id = invoice_recv_map.get(txn_id)
+                elif txn_type == "CreditMemo" and txn_id in credit_memo_map:
+                    embedded_cm_links.append(
+                        (credit_memo_map[txn_id], line_amount)
+                    )
+                elif txn_type == "JournalEntry" and txn_id in journal_entry_map:
+                    embedded_cm_links.append(
+                        (journal_entry_map[txn_id], line_amount)
+                    )
 
         if not recv_account_id:
             recv_account_id = partner_recv_map.get(partner_id)
@@ -285,10 +310,23 @@ class QboPaymentImporter(models.AbstractModel):
         if is_foreign:
             payment_vals["currency_id"] = currency_id
 
+        # Build credit application pairs for embedded CMs
+        embedded_apps = []
+        if embedded_cm_links and linked_moves:
+            for cm_id, cm_amount in embedded_cm_links:
+                for inv_id, _inv_amount in linked_moves:
+                    embedded_apps.append({
+                        "invoice_move_id": inv_id,
+                        "credit_memo_move_id": cm_id,
+                        "amount": cm_amount,
+                        "qbo_payment_id": qbo_payment_id,
+                    })
+
         return {
             "payment_vals": payment_vals,
             "linked_moves": linked_moves,
             "is_customer": True,
+            "embedded_credit_apps": embedded_apps,
         }
 
     @staticmethod
@@ -497,14 +535,28 @@ class QboPaymentImporter(models.AbstractModel):
         bill_payable_map = builder.get_extra("bill_payable_map") or {}
         partner_payable_map = builder.get_extra("partner_payable_map") or {}
 
+        # Also collect embedded vendor credit applications on this payment.
+        vendor_credit_map = builder.get_extra("vendor_credit_map") or {}
+        journal_entry_map = builder.get_extra("journal_entry_map") or {}
+        embedded_vc_links = []  # (odoo_vc_move_id, qbo_amount)
+
         for line in bp.get("Line", []):
             line_amount = float(line.get("Amount", 0) or 0)
             for linked in line.get("LinkedTxn", []):
                 txn_id = str(linked.get("TxnId", ""))
-                if linked.get("TxnType") == "Bill" and txn_id in bill_map:
+                txn_type = linked.get("TxnType")
+                if txn_type == "Bill" and txn_id in bill_map:
                     linked_moves.append((bill_map[txn_id], line_amount))
                     if not payable_account_id:
                         payable_account_id = bill_payable_map.get(txn_id)
+                elif txn_type == "VendorCredit" and txn_id in vendor_credit_map:
+                    embedded_vc_links.append(
+                        (vendor_credit_map[txn_id], line_amount)
+                    )
+                elif txn_type == "JournalEntry" and txn_id in journal_entry_map:
+                    embedded_vc_links.append(
+                        (journal_entry_map[txn_id], line_amount)
+                    )
 
         if not payable_account_id:
             payable_account_id = partner_payable_map.get(partner_id)
@@ -536,10 +588,23 @@ class QboPaymentImporter(models.AbstractModel):
         if is_foreign:
             payment_vals["currency_id"] = currency_id
 
+        # Build credit application pairs for embedded VCs
+        embedded_apps = []
+        if embedded_vc_links and linked_moves:
+            for vc_id, vc_amount in embedded_vc_links:
+                for bill_id, _bill_amount in linked_moves:
+                    embedded_apps.append({
+                        "invoice_move_id": bill_id,
+                        "credit_memo_move_id": vc_id,
+                        "amount": vc_amount,
+                        "qbo_payment_id": f"BP-{qbo_bill_payment_id}",
+                    })
+
         return {
             "payment_vals": payment_vals,
             "linked_moves": linked_moves,
             "is_customer": False,
+            "embedded_credit_apps": embedded_apps,
         }
 
     @staticmethod

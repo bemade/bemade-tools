@@ -64,26 +64,27 @@ class QboTaxImporter(models.AbstractModel):
         # Cache all tax codes for linking group children in load phase
         QboTaxImporter._tax_codes_cache = tax_codes
 
-        # Filter out already imported
+        # Filter out already imported.  Include inactive/hidden codes and
+        # rates so that historical transactions referencing them can still
+        # resolve via resolve_tax() during the GL-first import.
         new_tax_codes = [
             {"type": "tax_code", "data": tc}
             for tc in tax_codes
             if str(tc.get("Id")) not in existing_tax_ids
-            and tc.get("Active", True)
             and tc.get("Taxable", False)
         ]
 
         new_tax_rates = [
             {"type": "tax_rate", "data": tr}
             for tr in tax_rates
-            if str(tr.get("Id")) not in existing_rate_ids and tr.get("Active", True)
+            if str(tr.get("Id")) not in existing_rate_ids
         ]
 
         _logger.info(
-            f"Extracted {len(tax_codes)} tax codes, {len(new_tax_codes)} are new/active"
+            f"Extracted {len(tax_codes)} tax codes, {len(new_tax_codes)} new"
         )
         _logger.info(
-            f"Extracted {len(tax_rates)} tax rates, {len(new_tax_rates)} are new/active"
+            f"Extracted {len(tax_rates)} tax rates, {len(new_tax_rates)} new"
         )
 
         # Combine into single list - rates first, then codes (codes may reference rates)

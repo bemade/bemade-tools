@@ -61,6 +61,7 @@ Features:
         "data/qbo_connection_setup.xml",
         "views/qbo_oauth_templates.xml",
         "views/qbo_connection_views.xml",
+        "views/qbo_migration_report_views.xml",
     ],
     "external_dependencies": {
         "python": ["requests", "requests_oauthlib"],

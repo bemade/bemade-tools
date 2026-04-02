@@ -41,9 +41,11 @@ _QBO_ID_FIELDS = [
     "qbo_refund_receipt_id",
     "qbo_tax_payment_id",
     "qbo_cc_payment_id",
+    "qbo_payment_id",
+    "qbo_bill_payment_id",
 ]
 
-# account.payment QBO fields
+# account.payment QBO fields (legacy — kept for non-GL-first flow)
 _QBO_PAYMENT_FIELDS = [
     "qbo_payment_id",
     "qbo_bill_payment_id",
