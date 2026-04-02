@@ -8,6 +8,16 @@ class AccountMove(models.Model):
 
     _inherit = "account.move"
 
+    def _stock_account_prepare_realtime_out_lines_vals(self):
+        """Skip COGS generation when importing from QBO.
+
+        When context has 'skip_cogs_generation', the GL already contains
+        explicit COGS entries — Odoo must not auto-generate its own.
+        """
+        if self.env.context.get("skip_cogs_generation"):
+            return []
+        return super()._stock_account_prepare_realtime_out_lines_vals()
+
     qbo_journal_entry_id = fields.Integer(
         string="QBO Journal Entry ID",
         index=True,
@@ -91,4 +101,16 @@ class AccountMove(models.Model):
         index=True,
         copy=False,
         help="QuickBooks Online CreditCardPayment ID",
+    )
+
+
+class AccountMoveLine(models.Model):
+    _inherit = "account.move.line"
+
+    qbo_acct_id = fields.Many2one(
+        "account.account",
+        string="QBO GL Account",
+        copy=False,
+        help="The account from the QBO Journal export (GL truth). "
+        "Used to correct Odoo's auto-computed account after creation.",
     )

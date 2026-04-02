@@ -781,6 +781,37 @@ class QBOMoveBuilder:
         }
         if invoice_date_due:
             vals["invoice_date_due"] = invoice_date_due
+
+        # Extract exact tax amounts from QBO TxnTaxDetail for GL-first
+        # pre-posting correction (avoids percentage-of-line rounding drift).
+        tax_rate_map = (
+            self._sale_tax_rate_map if tax_use == "sale"
+            else self._purchase_tax_rate_map
+        )
+        tax_amounts = []
+        for tax_line in entry.get("TxnTaxDetail", {}).get("TaxLine", []):
+            tl_detail = tax_line.get("TaxLineDetail", {})
+            rate_ref = tl_detail.get("TaxRateRef", {}).get("value")
+            amount = float(tax_line.get("Amount", 0) or 0)
+            if rate_ref and amount:
+                odoo_tax_id = tax_rate_map.get(str(rate_ref))
+                if odoo_tax_id:
+                    tax_amounts.append({"tax_id": odoo_tax_id, "amount": amount})
+                else:
+                    _logger.warning(
+                        "TaxRateRef %s not mapped to Odoo tax in %s %s",
+                        rate_ref, qbo_id_field, qbo_id,
+                    )
+        if tax_amounts:
+            vals["_tax_amounts"] = tax_amounts
+
+        # Extract AP account from APAccountRef (bills/vendor credits).
+        ap_ref = entry.get("APAccountRef", {}).get("value")
+        if ap_ref:
+            ap_account_id = self._account_map.get(int(ap_ref))
+            if ap_account_id:
+                vals["_gl_arap_account_id"] = ap_account_id
+
         return vals
 
     def build_entry_move_vals(

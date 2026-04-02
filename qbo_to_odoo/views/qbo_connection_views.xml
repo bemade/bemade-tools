@@ -55,6 +55,12 @@
                             <field name="gl_export_file" filename="gl_export_filename"
                                    string="Journal Export (XLSX)"/>
                             <field name="gl_export_filename" invisible="1"/>
+                            <field name="use_gl_first"/>
+                            <button name="action_generate_validation_report"
+                                    string="Open Validation Report"
+                                    type="object"
+                                    class="btn-secondary"
+                                    help="Create a migration validation report comparing the Journal export against Odoo posted entries."/>
                         </group>
                         <group>
                             <p class="text-muted">

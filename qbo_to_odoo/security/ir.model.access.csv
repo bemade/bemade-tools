@@ -1,3 +1,6 @@
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_qbo_connection_manager,qbo.connection.manager,model_qbo_connection,account.group_account_manager,1,1,1,1
 access_qbo_connection_user,qbo.connection.user,model_qbo_connection,account.group_account_user,1,0,0,0
+access_qbo_migration_report,qbo.migration.report,model_qbo_migration_report,base.group_system,1,1,1,1
+access_qbo_migration_report_tb_line,qbo.migration.report.tb.line,model_qbo_migration_report_tb_line,base.group_system,1,1,1,1
+access_qbo_migration_report_txn_line,qbo.migration.report.txn.line,model_qbo_migration_report_txn_line,base.group_system,1,1,1,1
