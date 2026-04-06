@@ -5,7 +5,7 @@ using the ETL framework.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from odoo import models
 
@@ -141,17 +141,6 @@ class QboCustomerImporter(models.AbstractModel):
                 term_id = term_map.get(str(sales_term_ref.get("value")))
                 if term_id:
                     vals["property_payment_term_id"] = term_id
-
-            # Currency
-            currency_ref = customer.get("CurrencyRef", {})
-            if currency_ref:
-                currency_code = currency_ref.get("value")
-                if currency_code:
-                    currency = ctx.env["res.currency"].search(
-                        [("name", "=", currency_code)], limit=1
-                    )
-                    if currency:
-                        vals["property_purchase_currency_id"] = currency.id
 
             partner_vals.append(vals)
 
@@ -429,39 +418,55 @@ class QboCustomerLinker(models.AbstractModel):
         )
         partner_by_name = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
 
+        # Build payment term lookup
+        ctx.env.cr.execute(
+            "SELECT qbo_term_id, id FROM account_payment_term "
+            "WHERE qbo_term_id IS NOT NULL"
+        )
+        term_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
+
         link_updates = []
         for customer in customers:
             name = customer.get("DisplayName") or customer.get("CompanyName") or ""
             if name and name.lower() in partner_by_name:
-                link_updates.append(
-                    {
-                        "partner_id": partner_by_name[name.lower()],
-                        "qbo_customer_id": int(customer.get("Id")),
-                        "name": name,
-                    }
-                )
+                update = {
+                    "partner_id": partner_by_name[name.lower()],
+                    "qbo_customer_id": int(customer.get("Id")),
+                    "name": name,
+                }
+
+                # Payment terms
+                sales_term_ref = customer.get("SalesTermRef") or {}
+                if sales_term_ref:
+                    term_id = term_map.get(str(sales_term_ref.get("value")))
+                    if term_id:
+                        update["property_payment_term_id"] = term_id
+
+                link_updates.append(update)
 
         _logger.info(f"Found {len(link_updates)} partners to link as customers by name")
         return link_updates
 
     @ETL.load()
     def load_customer_links(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Update existing partners with QBO customer IDs."""
+        """Update existing partners with QBO customer IDs and payment terms."""
         link_updates = transformed.get("transform_customers_for_linking", [])
 
         if not link_updates:
             _logger.info("No partners to link as customers")
             return
 
+        Partner = ctx.env["res.partner"]
         for update in link_updates:
-            ctx.env.cr.execute(
-                """
-                UPDATE res_partner
-                SET qbo_customer_id = %s, customer_rank = GREATEST(customer_rank, 1)
-                WHERE id = %s
-                """,
-                (update["qbo_customer_id"], update["partner_id"]),
-            )
+            partner = Partner.browse(update["partner_id"])
+            vals = {
+                "qbo_customer_id": update["qbo_customer_id"],
+                "customer_rank": max(partner.customer_rank, 1),
+            }
+            if "property_payment_term_id" in update:
+                vals["property_payment_term_id"] = update["property_payment_term_id"]
+            partner.write(vals)
+
             _logger.debug(
                 f"Linked partner {update['partner_id']} (name={update['name']}) "
                 f"to QBO customer {update['qbo_customer_id']}"
@@ -512,39 +517,68 @@ class QboVendorLinker(models.AbstractModel):
         )
         partner_by_name = {row[1]: row[0] for row in ctx.env.cr.fetchall()}
 
+        # Build payment term lookup
+        ctx.env.cr.execute(
+            "SELECT qbo_term_id, id FROM account_payment_term "
+            "WHERE qbo_term_id IS NOT NULL"
+        )
+        term_map = {str(row[0]): row[1] for row in ctx.env.cr.fetchall()}
+
         link_updates = []
         for vendor in vendors:
             name = vendor.get("DisplayName") or vendor.get("CompanyName") or ""
             if name and name.lower() in partner_by_name:
-                link_updates.append(
-                    {
-                        "partner_id": partner_by_name[name.lower()],
-                        "qbo_vendor_id": int(vendor.get("Id")),
-                        "name": name,
-                    }
-                )
+                update = {
+                    "partner_id": partner_by_name[name.lower()],
+                    "qbo_vendor_id": int(vendor.get("Id")),
+                    "name": name,
+                }
+
+                # Payment terms
+                term_ref = vendor.get("TermRef") or {}
+                if term_ref:
+                    term_id = term_map.get(str(term_ref.get("value")))
+                    if term_id:
+                        update["property_supplier_payment_term_id"] = term_id
+
+                # Vendor currency
+                currency_ref = vendor.get("CurrencyRef") or {}
+                if currency_ref:
+                    currency_code = currency_ref.get("value")
+                    if currency_code:
+                        currency = ctx.env["res.currency"].search(
+                            [("name", "=", currency_code)], limit=1
+                        )
+                        if currency:
+                            update["property_purchase_currency_id"] = currency.id
+
+                link_updates.append(update)
 
         _logger.info(f"Found {len(link_updates)} partners to link as vendors by name")
         return link_updates
 
     @ETL.load()
     def load_vendor_links(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Update existing partners with QBO vendor IDs."""
+        """Update existing partners with QBO vendor IDs, payment terms, and currency."""
         link_updates = transformed.get("transform_vendors_for_linking", [])
 
         if not link_updates:
             _logger.info("No partners to link as vendors")
             return
 
+        Partner = ctx.env["res.partner"]
         for update in link_updates:
-            ctx.env.cr.execute(
-                """
-                UPDATE res_partner
-                SET qbo_vendor_id = %s, supplier_rank = GREATEST(supplier_rank, 1)
-                WHERE id = %s
-                """,
-                (update["qbo_vendor_id"], update["partner_id"]),
-            )
+            partner = Partner.browse(update["partner_id"])
+            vals = {
+                "qbo_vendor_id": update["qbo_vendor_id"],
+                "supplier_rank": max(partner.supplier_rank, 1),
+            }
+            if "property_supplier_payment_term_id" in update:
+                vals["property_supplier_payment_term_id"] = update["property_supplier_payment_term_id"]
+            if "property_purchase_currency_id" in update:
+                vals["property_purchase_currency_id"] = update["property_purchase_currency_id"]
+            partner.write(vals)
+
             _logger.debug(
                 f"Linked partner {update['partner_id']} (name={update['name']}) "
                 f"to QBO vendor {update['qbo_vendor_id']}"
