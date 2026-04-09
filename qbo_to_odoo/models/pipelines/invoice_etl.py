@@ -9,10 +9,11 @@ from typing import Dict, List
 
 from odoo import models
 
-from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData, post_lock
+from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
 
 from .extractor import QBOExtractor
 from .move_builder import QBOMoveBuilder
+from .move_posting_helpers import load_and_post_invoice_moves
 from .utils import get_api_client
 
 _logger = logging.getLogger(__name__)
@@ -140,30 +141,6 @@ class QboInvoiceImporter(models.AbstractModel):
 
     @ETL.load()
     def load_invoices(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Load invoices into Odoo."""
+        """Load invoices into Odoo with GL-accuracy fixes."""
         move_vals = transformed.get("transform_invoices", [])
-
-        if not move_vals:
-            _logger.info("No new invoices to create")
-            return
-
-        moves = ctx.env["account.move"]
-        for vals in move_vals:
-            with ctx.skippable(f"create invoice QBO#{vals.get('qbo_invoice_id', '?')}"):
-                moves |= ctx.env["account.move"].create(vals)
-
-        _logger.info(f"Created {len(moves)} invoices")
-
-        posted = 0
-        by_journal = {}
-        for move in moves:
-            by_journal.setdefault(move.journal_id.id, self.env["account.move"])
-            by_journal[move.journal_id.id] |= move
-        for journal_id, journal_moves in sorted(by_journal.items()):
-            with post_lock(ctx.env.cr, journal_id):
-                for move in journal_moves:
-                    with ctx.skippable(f"post invoice QBO#{move.qbo_invoice_id or '?'}"):
-                        move.action_post()
-                        posted += 1
-
-        _logger.info(f"Posted {posted} invoices")
+        load_and_post_invoice_moves(ctx, move_vals)

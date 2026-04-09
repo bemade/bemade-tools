@@ -20,7 +20,6 @@ from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData, post_lock
 
-from .exchange_rate_helper import ExchangeRateEnsurer
 from .extractor import QBOExtractor
 from .move_builder import QBOMoveBuilder
 from .utils import get_api_client
@@ -62,9 +61,6 @@ class QboTransferImporter(models.AbstractModel):
             f"Extracted {len(all_transfers)} transfers from QBO, "
             f"{len(new_transfers)} are new"
         )
-
-        # Ensure exchange rates exist for foreign-currency transfers
-        ExchangeRateEnsurer(ctx.env).ensure_rates(new_transfers)
 
         # Preload maps for transform (account_currency needed for
         # cross-currency detection; account_journal for bank journal routing)

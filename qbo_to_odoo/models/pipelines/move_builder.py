@@ -451,22 +451,30 @@ class QBOMoveBuilder:
     ) -> Optional[Dict]:
         """Build an invoice_line_ids vals dict from a QBO line."""
         if detail_type == "SalesItemLineDetail":
-            return self._build_sales_item_invoice_line(
+            result = self._build_sales_item_invoice_line(
                 line, detail, entry, tax_use, direction, force_positive
             )
         elif detail_type == "DiscountLineDetail":
-            return self._build_discount_invoice_line(
+            result = self._build_discount_invoice_line(
                 line, detail, entry, tax_use
             )
         elif detail_type == "ItemBasedExpenseLineDetail":
-            return self._build_item_expense_invoice_line(
+            result = self._build_item_expense_invoice_line(
                 line, detail, entry, tax_use, force_positive
             )
         elif detail_type == "AccountBasedExpenseLineDetail":
-            return self._build_account_expense_invoice_line(
+            result = self._build_account_expense_invoice_line(
                 line, detail, entry, tax_use, force_positive
             )
-        return None
+        else:
+            return None
+
+        # Annotate with the QBO-resolved account so restore_gl_accounts()
+        # can fix any Odoo overrides after create().
+        if result and result.get("account_id"):
+            result["qbo_acct_id"] = result["account_id"]
+
+        return result
 
     def _build_sales_item_invoice_line(
         self, line, detail, entry, tax_use, direction, force_positive
@@ -725,7 +733,7 @@ class QBOMoveBuilder:
 
         invoice_date = self.parse_date(entry.get("TxnDate"))
         invoice_date_due = self.parse_date(entry.get("DueDate"))
-        currency_id, _, _ = self.resolve_currency(entry)
+        currency_id, is_foreign, exchange_rate = self.resolve_currency(entry)
 
         force_positive = move_type in ("out_refund", "in_refund")
         line_vals = []
@@ -779,6 +787,17 @@ class QBOMoveBuilder:
             "invoice_line_ids": line_vals,
             qbo_id_field: int(qbo_id) if qbo_id else 0,
         }
+        # Set per-transaction exchange rate so Odoo uses the exact QBO rate
+        # for computing CAD amounts (instead of a daily rate from the global
+        # res.currency.rate table).
+        if is_foreign and exchange_rate and exchange_rate != 1.0:
+            from .exchange_rate_helper import qbo_rate_to_odoo
+            vals["invoice_currency_rate"] = qbo_rate_to_odoo(exchange_rate)
+            # Stash FX metadata for the load phase to upsert into the global
+            # rate table before posting (needed for reconcile() later).
+            currency_ref = entry.get("CurrencyRef", {})
+            vals["_fx_currency_code"] = currency_ref.get("value", "")
+            vals["_fx_qbo_rate"] = exchange_rate
         if invoice_date_due:
             vals["invoice_date_due"] = invoice_date_due
 
@@ -806,10 +825,11 @@ class QBOMoveBuilder:
             vals["_tax_amounts"] = tax_amounts
 
         # Extract AR/AP account from the API entity.
-        # Bills/vendor credits use APAccountRef; invoices with a deposit
-        # use DepositToAccountRef (receivable routed to deposit account).
+        # Invoices/credit memos use ARAccountRef; bills/vendor credits
+        # use APAccountRef; DepositToAccountRef overrides AR for deposits.
         arap_ref = (
-            entry.get("APAccountRef", {}).get("value")
+            entry.get("ARAccountRef", {}).get("value")
+            or entry.get("APAccountRef", {}).get("value")
             or entry.get("DepositToAccountRef", {}).get("value")
         )
         if arap_ref:

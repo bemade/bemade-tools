@@ -100,6 +100,14 @@ class QboJournalEntryImporter(models.AbstractModel):
                         vals["currency_id"] = currency_id
                 move_vals.append(vals)
             else:
+                _logger.warning(
+                    "Skipped JE QBO#%s: Adjustment=%s, "
+                    "lines=%d, line_amounts=%s",
+                    entry.get("Id"),
+                    entry.get("Adjustment", False),
+                    len(entry.get("Line", [])),
+                    [l.get("Amount") for l in entry.get("Line", [])[:5]],
+                )
                 skipped += 1
 
         _logger.info(f"Transformed {len(move_vals)} journal entries, skipped {skipped}")
