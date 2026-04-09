@@ -16,7 +16,6 @@ from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData, post_lock
 
-from .exchange_rate_helper import ExchangeRateEnsurer
 from .extractor import QBOExtractor
 from .move_builder import QBOMoveBuilder
 from .utils import get_api_client
@@ -61,9 +60,6 @@ class QboDepositImporter(models.AbstractModel):
             f"Extracted {len(all_deposits)} deposits from QBO, "
             f"{len(new_deposits)} are new"
         )
-
-        # Ensure exchange rates exist for foreign-currency deposits
-        ExchangeRateEnsurer(ctx.env).ensure_rates(new_deposits)
 
         # Preload maps for transform
         extractor.preload("account", "customer", "vendor", "currency")

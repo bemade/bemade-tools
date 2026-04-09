@@ -16,6 +16,7 @@ from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData, post_lock
 from .exchange_rate_helper import ExchangeRateEnsurer
 from .extractor import QBOExtractor
 from .move_builder import QBOMoveBuilder
+from .move_posting_helpers import reconcile_at_amount
 from .utils import get_api_client
 
 _logger = logging.getLogger(__name__)
@@ -83,10 +84,6 @@ class QboPaymentImporter(models.AbstractModel):
             f"{len(bill_payments)} bill payments, {len(new_bill_payments)} new"
         )
 
-        # Ensure exchange rates exist for all foreign-currency payments
-        all_raw_records = [p["data"] for p in new_payments + new_bill_payments]
-        ExchangeRateEnsurer(ctx.env).ensure_rates(all_raw_records)
-
         # Preload maps for transform
         extractor.preload("account", "customer", "vendor", "currency")
         extractor.preload_account_journal_map()
@@ -119,6 +116,9 @@ class QboPaymentImporter(models.AbstractModel):
         extractor.extra["journal_entry_map"] = extractor.qbo_id_map(
             "account_move", "qbo_journal_entry_id", where="state = 'posted'"
         )
+        extractor.extra["expense_map"] = extractor.qbo_id_map(
+            "account_move", "qbo_expense_id", where="state = 'posted'"
+        )
 
         # Pre-fetch receivable/payable accounts for destination_account_id
         extractor.extra["invoice_receivable_map"] = extractor.invoice_receivable_map()
@@ -148,6 +148,7 @@ class QboPaymentImporter(models.AbstractModel):
         credit_memo_map = builder.get_extra("credit_memo_map") or {}
         vendor_credit_map = builder.get_extra("vendor_credit_map") or {}
         journal_entry_map = builder.get_extra("journal_entry_map") or {}
+        expense_map = builder.get_extra("expense_map") or {}
         journal_bank_account_map = builder.get_extra("journal_bank_account_map") or {}
 
         payment_data = []
@@ -171,7 +172,7 @@ class QboPaymentImporter(models.AbstractModel):
                 else:
                     apps = self._transform_vendor_credit_application(
                         pmt_data, bill_map, vendor_credit_map,
-                        journal_entry_map,
+                        journal_entry_map, expense_map,
                     )
                 credit_applications.extend(apps)
                 continue
@@ -269,9 +270,19 @@ class QboPaymentImporter(models.AbstractModel):
                     linked_moves.append((invoice_map[txn_id], line_amount))
                     if not recv_account_id:
                         recv_account_id = invoice_recv_map.get(txn_id)
+                elif txn_type == "Invoice":
+                    _logger.warning(
+                        "Payment %s: Invoice %s not found in Odoo",
+                        qbo_payment_id, txn_id,
+                    )
                 elif txn_type == "CreditMemo" and txn_id in credit_memo_map:
                     embedded_cm_links.append(
                         (credit_memo_map[txn_id], line_amount)
+                    )
+                elif txn_type == "CreditMemo":
+                    _logger.warning(
+                        "Payment %s: CreditMemo %s not found in Odoo",
+                        qbo_payment_id, txn_id,
                     )
                 elif txn_type == "JournalEntry" and txn_id in journal_entry_map:
                     embedded_cm_links.append(
@@ -288,7 +299,7 @@ class QboPaymentImporter(models.AbstractModel):
             return None
 
         # Resolve currency
-        currency_id, is_foreign, _exchange_rate = builder.resolve_currency(payment)
+        currency_id, is_foreign, exchange_rate = builder.resolve_currency(payment)
 
         # Use journal's bank account as outstanding account (direct-to-bank,
         # no transit account) so the JE is: DR Bank / CR Receivable.
@@ -327,6 +338,11 @@ class QboPaymentImporter(models.AbstractModel):
             "linked_moves": linked_moves,
             "is_customer": True,
             "embedded_credit_apps": embedded_apps,
+            "currency_code": (
+                payment.get("CurrencyRef", {}).get("value")
+                if is_foreign else None
+            ),
+            "exchange_rate": exchange_rate if is_foreign else None,
         }
 
     @staticmethod
@@ -392,17 +408,20 @@ class QboPaymentImporter(models.AbstractModel):
         bill_map: Dict,
         vendor_credit_map: Dict,
         journal_entry_map: Dict,
+        expense_map: Optional[Dict] = None,
     ) -> List[Dict]:
         """Transform a zero-amount bill payment (vendor credit application).
 
         In QBO, applying vendor credits to bills creates a BillPayment with
         TotalAmt=0.  Each Line carries an Amount and a LinkedTxn pointing
-        to either a Bill, VendorCredit, or JournalEntry.
+        to a Bill, VendorCredit, JournalEntry, or Purchase (expense used
+        as vendor credit).
 
         Returns a list of dicts with ``invoice_move_id`` (the bill),
-        ``credit_memo_move_id`` (the vendor credit / JE), ``amount``,
-        and ``qbo_payment_id``.
+        ``credit_memo_move_id`` (the vendor credit / JE / expense),
+        ``amount``, and ``qbo_payment_id``.
         """
+        expense_map = expense_map or {}
         qbo_id = bill_payment.get("Id")
         bills = []    # (odoo_move_id, qbo_amount)
         credits = []  # (odoo_move_id, qbo_amount)
@@ -418,6 +437,8 @@ class QboPaymentImporter(models.AbstractModel):
                     credits.append((vendor_credit_map[txn_id], amount))
                 elif txn_type == "JournalEntry" and txn_id in journal_entry_map:
                     credits.append((journal_entry_map[txn_id], amount))
+                elif txn_type == "Purchase" and txn_id in expense_map:
+                    credits.append((expense_map[txn_id], amount))
 
         if not bills or not credits:
             if bills or credits:
@@ -549,9 +570,19 @@ class QboPaymentImporter(models.AbstractModel):
                     linked_moves.append((bill_map[txn_id], line_amount))
                     if not payable_account_id:
                         payable_account_id = bill_payable_map.get(txn_id)
+                elif txn_type == "Bill":
+                    _logger.warning(
+                        "BillPayment %s: Bill %s not found in Odoo",
+                        qbo_bill_payment_id, txn_id,
+                    )
                 elif txn_type == "VendorCredit" and txn_id in vendor_credit_map:
                     embedded_vc_links.append(
                         (vendor_credit_map[txn_id], line_amount)
+                    )
+                elif txn_type == "VendorCredit":
+                    _logger.warning(
+                        "BillPayment %s: VendorCredit %s not found in Odoo",
+                        qbo_bill_payment_id, txn_id,
                     )
                 elif txn_type == "JournalEntry" and txn_id in journal_entry_map:
                     embedded_vc_links.append(
@@ -568,7 +599,7 @@ class QboPaymentImporter(models.AbstractModel):
             return None
 
         # Resolve currency
-        currency_id, is_foreign, _exchange_rate = builder.resolve_currency(bp)
+        currency_id, is_foreign, exchange_rate = builder.resolve_currency(bp)
 
         outstanding_account_id = journal_bank_account_map.get(journal_id)
 
@@ -605,6 +636,11 @@ class QboPaymentImporter(models.AbstractModel):
             "linked_moves": linked_moves,
             "is_customer": False,
             "embedded_credit_apps": embedded_apps,
+            "currency_code": (
+                bp.get("CurrencyRef", {}).get("value")
+                if is_foreign else None
+            ),
+            "exchange_rate": exchange_rate if is_foreign else None,
         }
 
     @staticmethod
@@ -686,7 +722,7 @@ class QboPaymentImporter(models.AbstractModel):
         # outstanding_account_id is set to the journal's bank account in the
         # transform (direct-to-bank), so the JE goes straight to the bank
         # account without a transit/outstanding account.
-        payments = []  # (payment_record, linked_moves, is_customer)
+        payments = []  # (payment_record, linked_moves, is_customer, fx_info)
         for pmt in payment_data:
             pmt_vals = pmt["payment_vals"]
             qbo_id = (
@@ -699,27 +735,37 @@ class QboPaymentImporter(models.AbstractModel):
                 payment = ctx.env["account.payment"].create(pmt_vals)
                 if outstanding_id:
                     payment.outstanding_account_id = outstanding_id
+                fx_info = (pmt.get("currency_code"), pmt.get("exchange_rate"))
                 payments.append(
-                    (payment, pmt["linked_moves"], pmt["is_customer"])
+                    (payment, pmt["linked_moves"], pmt["is_customer"], fx_info)
                 )
 
         _logger.info(f"Created {len(payments)} payments")
 
         # Phase 2: Post payments, grouped by journal to minimize lock acquisitions
+        # For foreign-currency payments, upsert the QBO per-transaction rate
+        # into res.currency.rate immediately before posting so that Odoo's
+        # line computation picks up the exact rate.
+        rate_ensurer = ExchangeRateEnsurer(ctx.env)
         by_journal = {}
-        for payment, linked_moves, is_customer in payments:
+        for payment, linked_moves, is_customer, fx_info in payments:
             jid = payment.journal_id.id
             by_journal.setdefault(jid, []).append(
-                (payment, linked_moves, is_customer)
+                (payment, linked_moves, is_customer, fx_info)
             )
 
         posted = 0
         reconciliation_queue = []
         for journal_id, group in sorted(by_journal.items()):
             with post_lock(ctx.env.cr, journal_id):
-                for payment, linked_moves, is_customer in group:
+                for payment, linked_moves, is_customer, fx_info in group:
                     qbo_id = payment.qbo_payment_id or payment.qbo_bill_payment_id or "?"
                     with ctx.skippable(f"post payment QBO#{qbo_id}"):
+                        fx_code, fx_rate = fx_info
+                        if fx_code and fx_rate:
+                            rate_ensurer.set_rate(
+                                fx_code, str(payment.date), fx_rate,
+                            )
                         payment.action_post()
                         posted += 1
                         if linked_moves:
@@ -802,8 +848,11 @@ class QboPaymentImporter(models.AbstractModel):
                                 f"move#{linked_id} for {payment.name}"
                             )
                             continue
-                        self._partial_reconcile(
-                            ctx, pay_line_open[0], inv_line[0], qbo_amount,
+                        # Amount-constrained reconcile: apply exactly
+                        # the QBO line amount so partial payments don't
+                        # greedily consume the entire invoice.
+                        reconcile_at_amount(
+                            pay_line_open[0], inv_line[0], qbo_amount,
                         )
                         reconciled += 1
 
@@ -812,7 +861,6 @@ class QboPaymentImporter(models.AbstractModel):
         # Phase 4: Apply credit/debit notes to invoices/bills.
         # These come from zero-amount QBO Payments (CreditMemos → Invoices)
         # and zero-amount BillPayments (VendorCredits → Bills).
-        # Each pair carries the QBO line Amount for exact partial reconciliation.
         if not credit_applications:
             return
 
@@ -820,6 +868,7 @@ class QboPaymentImporter(models.AbstractModel):
             f"Processing {len(credit_applications)} credit/debit note applications"
         )
         applied = 0
+        retry_queue = []
         for app in credit_applications:
             qbo_id = app["qbo_payment_id"]
             inv_id = app["invoice_move_id"]
@@ -848,77 +897,20 @@ class QboPaymentImporter(models.AbstractModel):
                     )
                 )
                 if not inv_line or not cm_line:
-                    _logger.debug(
-                        f"Credit apply QBO#{qbo_id}: no unreconciled "
-                        f"{account_type} lines "
-                        f"(inv={len(inv_line)}, cm={len(cm_line)})"
+                    _logger.warning(
+                        "Credit apply QBO#%s: no unreconciled %s lines "
+                        "(inv=%d, cm=%d) — queued for retry",
+                        qbo_id, account_type, len(inv_line), len(cm_line),
                     )
+                    retry_queue.append(app)
                     continue
-                self._partial_reconcile(
-                    ctx, cm_line[0], inv_line[0], qbo_amount,
-                )
+                reconcile_at_amount(cm_line[0], inv_line[0], qbo_amount)
                 applied += 1
 
         _logger.info(f"Applied {applied} credit/debit note applications")
 
-    @staticmethod
-    def _partial_reconcile(ctx, credit_line, debit_line, qbo_amount):
-        """Create an exact partial reconcile between two move lines.
+        # NOTE: a post-pipeline reconciliation retry would help here but
+        # load_payments runs per-chunk with multiprocessing, so any retry
+        # within this method races with other chunks. The retry must run
+        # after all chunks complete — see account_etl.py finalizer.
 
-        Uses ``account.partial.reconcile`` directly to avoid the greedy
-        matching behaviour of ``reconcile()``.  The QBO line amount
-        determines how much to apply; if one side has less residual than
-        the QBO amount, we cap at the smaller residual so we don't
-        over-apply.
-
-        Args:
-            ctx: ETL context.
-            credit_line: The credit-side ``account.move.line`` (payment
-                or credit memo — has a negative balance / positive credit).
-            debit_line: The debit-side ``account.move.line`` (invoice or
-                bill — has a positive balance / positive debit).
-            qbo_amount: The amount to reconcile in the transaction
-                currency (from QBO Line.Amount).
-        """
-        # Ensure correct debit/credit orientation
-        if credit_line.balance > 0 and debit_line.balance < 0:
-            credit_line, debit_line = debit_line, credit_line
-
-        credit_curr = credit_line.currency_id
-        debit_curr = debit_line.currency_id
-        company_curr = credit_line.company_currency_id
-
-        credit_open = abs(
-            credit_line.amount_residual_currency
-            if credit_curr and credit_curr != company_curr
-            else credit_line.amount_residual
-        )
-        debit_open = abs(
-            debit_line.amount_residual_currency
-            if debit_curr and debit_curr != company_curr
-            else debit_line.amount_residual
-        )
-
-        # Cap at the smallest of: QBO amount, credit residual, debit residual
-        apply_amount = min(qbo_amount, credit_open, debit_open) if qbo_amount else min(credit_open, debit_open)
-        if apply_amount <= 0:
-            return
-
-        # Compute company-currency equivalent from the credit line's rate
-        credit_cad = abs(credit_line.amount_residual)
-        credit_foreign = abs(credit_line.amount_residual_currency) if credit_curr else credit_cad
-        rate = credit_cad / credit_foreign if credit_foreign else 1.0
-        company_amount = round(apply_amount * rate, 2)
-
-        ctx.env["account.partial.reconcile"].create({
-            "debit_move_id": debit_line.id,
-            "credit_move_id": credit_line.id,
-            "amount": company_amount,
-            "debit_amount_currency": apply_amount,
-            "credit_amount_currency": apply_amount,
-            "company_id": credit_line.company_id.id,
-        })
-        # Invalidate so the next iteration sees updated residuals
-        (credit_line + debit_line).invalidate_recordset(
-            ["amount_residual", "amount_residual_currency", "reconciled"]
-        )

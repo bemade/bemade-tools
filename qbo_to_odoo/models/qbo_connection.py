@@ -216,6 +216,39 @@ class QBOApiClient:
         _logger.info(f"Total {entity} records fetched: {len(all_results)}")
         return all_results
 
+    def get_report(
+        self,
+        report_name: str,
+        params: Optional[Dict[str, str]] = None,
+    ) -> Dict:
+        """Fetch a QBO report (e.g. JournalReport, TransactionList).
+
+        Args:
+            report_name: Report endpoint name.
+            params: Query parameters (e.g. date_macro, columns).
+
+        Returns:
+            The raw report JSON dict with ``Columns`` and ``Rows``.
+        """
+        self._ensure_token_valid()
+        self.rate_limiter.wait_if_needed()
+
+        url = f"{self.base_url}/reports/{report_name}"
+        _logger.debug(f"QBO Report: {report_name} params={params}")
+
+        response = requests.get(url, headers=self.headers, params=params or {})
+
+        if response.status_code == 401:
+            self.connection.refresh_access_token()
+            response = requests.get(url, headers=self.headers, params=params or {})
+
+        if response.status_code != 200:
+            raise UserError(
+                _(f"QBO Report Error: {response.status_code} - {response.text}")
+            )
+
+        return response.json()
+
     def get(self, entity: str, entity_id: str) -> Optional[Dict]:
         """Get a single entity by ID.
 
@@ -334,11 +367,12 @@ class QboConnection(models.Model):
 
     use_gl_first = fields.Boolean(
         string="Use GL-first import",
-        default=False,
+        default=True,
         help=(
-            "If enabled, the Import All action will run the GL-first pipeline "
-            "(Journal export as primary source) plus post-posting correction, "
-            "and will skip the original API-based move pipelines."
+            "If enabled, the Import All action uses the QBO JournalReport API "
+            "as the primary source for all postings, with enriched records for "
+            "invoices, bills, payments, and credit memos. Disabling falls back "
+            "to the original per-entity API import pipelines."
         ),
     )
 
@@ -925,25 +959,14 @@ class QboConnection(models.Model):
         return self._execute_pipeline("qbo.payment.reconciler")
 
     def action_import_all(self) -> dict:
-        """Import all QBO data in the correct order."""
+        """Import all QBO data in the correct order.
+
+        Runs all entity pipelines (invoices, bills, payments, etc.) via
+        the API, then the XLSX fallback pipeline for non-API types
+        (Payroll Cheque, Inventory Starting Value).  Reconciliation is
+        handled natively within ``payment_etl.py``.
+        """
         self.ensure_one()
-
-        if self.use_gl_first:
-            orchestrator = PipelineOrchestrator(
-                self.env,
-                source_config=self._get_source_config(),
-                module_filter="qbo_to_odoo",
-            )
-            orchestrator.execute_pipelines(
-                cr=None,
-                pipeline_names=[
-                    "qbo.gl.first.import",
-                    "qbo.gl.correction",
-                    "qbo.gl.first.reconciliation",
-                ],
-            )
-            return self._success_notification()
-
         return self._execute_all_pipelines()
 
     def action_generate_validation_report(self) -> dict:

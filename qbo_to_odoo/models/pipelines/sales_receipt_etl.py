@@ -16,7 +16,6 @@ from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData, post_lock
 
-from .exchange_rate_helper import ExchangeRateEnsurer
 from .extractor import QBOExtractor
 from .move_builder import QBOMoveBuilder
 from .utils import get_api_client
@@ -67,9 +66,6 @@ class QboSalesReceiptImporter(models.AbstractModel):
             f"Extracted {len(all_receipts)} sales receipts from QBO, "
             f"{len(new_receipts)} are new"
         )
-
-        # Ensure exchange rates exist for foreign-currency receipts
-        ExchangeRateEnsurer(ctx.env).ensure_rates(new_receipts)
 
         # Preload maps for transform
         extractor.preload(

@@ -1,32 +1,83 @@
-"""Inline exchange rate helper for QBO ETL pipelines.
+"""Exchange-rate helpers for QBO ETL pipelines.
 
-Ensures that res.currency.rate records exist for all foreign-currency
-transactions being imported, without requiring a separate full-scan
-exchange rate pipeline.
+Three mechanisms depending on the Odoo move type:
 
-Uses INSERT ... ON CONFLICT DO NOTHING to safely handle concurrent
-workers inserting rates for the same (currency, date) pair.
+* **Invoices / bills / credit-memos / receipts** — set
+  ``invoice_currency_rate`` directly on the ``account.move``.  Odoo uses
+  this per-move field for every line-amount computation.  The global rate
+  table is also seeded so that ``reconcile()`` can compute accurate
+  exchange differences later.
+
+* **Payments** (``account.payment``) — Odoo derives line amounts from the
+  global ``res.currency.rate`` table.  We upsert the QBO per-transaction
+  rate immediately before posting each payment.
+
+* **Journal entries** built through ``move_builder`` — debit / credit are
+  set explicitly at creation time, so no rate lookup is involved.
 """
 
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict
 
 _logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Convention helpers
+# ---------------------------------------------------------------------------
+
+def qbo_rate_to_odoo(qbo_rate: float) -> float:
+    """Convert a QBO exchange rate to Odoo convention.
+
+    QBO:  home (CAD) units per 1 foreign (USD) unit  → e.g. 1.40
+    Odoo ``res.currency.rate``:  foreign per 1 home   → e.g. 0.714
+    Odoo ``invoice_currency_rate``: same as res.currency.rate
+    """
+    return 1.0 / qbo_rate if qbo_rate else 1.0
+
+
+def qbo_rate_from_record(record: dict) -> float | None:
+    """Extract the QBO exchange rate from a raw API record.
+
+    Returns the rate in **QBO convention** (home per 1 foreign), or *None*
+    if the record has no foreign-currency info.
+    """
+    currency_ref = record.get("CurrencyRef", {})
+    code = currency_ref.get("value") if currency_ref else None
+    rate = record.get("ExchangeRate")
+    if not code or not rate:
+        return None
+    rate = float(rate)
+    return rate if rate != 1.0 else None
+
+
+# ---------------------------------------------------------------------------
+# Per-move rate setter  (invoices, bills, credit-memos, receipts)
+# ---------------------------------------------------------------------------
+
+def set_move_currency_rate(move, qbo_rate: float) -> None:
+    """Set ``invoice_currency_rate`` on *move* from a QBO rate.
+
+    Only effective for invoice-type moves (``is_invoice(True)``).  For
+    journal entries this is a no-op because Odoo ignores the field.
+
+    Call **after** ``create()`` and **before** ``action_post()``.
+    """
+    if not qbo_rate or qbo_rate == 1.0:
+        return
+    move.invoice_currency_rate = qbo_rate_to_odoo(qbo_rate)
+
+
+# ---------------------------------------------------------------------------
+# Global-rate upsert
+# ---------------------------------------------------------------------------
+
 class ExchangeRateEnsurer:
-    """Creates missing Odoo exchange rates from QBO transaction data.
+    """Upserts per-transaction exchange rates into ``res.currency.rate``.
 
-    Instead of running a dedicated exchange rate pipeline that queries every
-    transaction type from the API, this helper extracts rates from records
-    already fetched by the calling pipeline and upserts any that are missing.
-
-    Safe under concurrency: uses ON CONFLICT DO NOTHING so parallel workers
-    inserting the same (currency, date) pair won't conflict.
-
-    Usage::
-
-        ExchangeRateEnsurer(ctx.env).ensure_rates(qbo_records)
+    Call ``set_rate()`` immediately before posting each foreign-currency
+    move so that Odoo's line computation and later ``reconcile()`` calls
+    pick up the exact QBO per-transaction rate.
     """
 
     def __init__(self, env):
@@ -38,84 +89,53 @@ class ExchangeRateEnsurer:
         currencies = env["res.currency"].search([("active", "in", [True, False])])
         self._currency_map: Dict[str, int] = {c.name: c.id for c in currencies}
 
-    def ensure_rates(
+    def set_rate(
         self,
-        records: List[Dict],
-        date_field: str = "TxnDate",
-    ) -> int:
-        """Create missing exchange rates extracted from QBO records.
+        currency_code: str,
+        date: str,
+        qbo_rate: float,
+    ) -> None:
+        """Upsert a single exchange rate, overwriting any existing value.
+
+        Safe to call repeatedly for the same ``(currency, date)`` — each
+        call overwrites the previous value so the *last* caller wins.
 
         Args:
-            records: Raw QBO API records containing CurrencyRef,
-                ExchangeRate, and a date field.
-            date_field: Name of the date field on the QBO records.
-
-        Returns:
-            Number of rows inserted (excludes conflicts).
+            currency_code: ISO currency code (e.g. ``"USD"``).
+            date: Transaction date as ``"YYYY-MM-DD"``.
+            qbo_rate: QBO convention rate (home per 1 foreign).
         """
-        # Collect unique (currency_code, date) -> qbo_rate
-        needed: Dict[Tuple[str, str], float] = {}
+        currency_id = self._currency_map.get(currency_code)
+        if not currency_id or currency_id == self._company_currency_id:
+            return
+        if not qbo_rate or qbo_rate == 1.0:
+            return
 
-        for record in records:
-            currency_ref = record.get("CurrencyRef", {})
-            currency_code = currency_ref.get("value") if currency_ref else None
-            exchange_rate = record.get("ExchangeRate")
-            txn_date = record.get(date_field)
-
-            if not currency_code or not exchange_rate or not txn_date:
-                continue
-
-            rate = float(exchange_rate)
-            if rate == 1.0:
-                continue
-
-            key = (currency_code, txn_date)
-            if key not in needed:
-                needed[key] = rate
-
-        if not needed:
-            return 0
-
-        # Build rows for bulk insert
-        rows = []
-        for (currency_code, date_str), qbo_rate in needed.items():
-            currency_id = self._currency_map.get(currency_code)
-            if not currency_id or currency_id == self._company_currency_id:
-                continue
-
-            # QBO: home units per 1 foreign unit (e.g. 1.4 = 1 USD -> 1.4 CAD)
-            # Odoo: foreign units per 1 home unit (e.g. 0.714 = 1 CAD -> 0.714 USD)
-            odoo_rate = 1.0 / qbo_rate if qbo_rate else 1.0
-            rows.append((currency_id, date_str, odoo_rate, self._company.id))
-
-        if not rows:
-            return 0
-
-        # res.currency.rate has: UNIQUE (name, currency_id, company_id)
-        cr = self.env.cr
-        query = """
-            INSERT INTO res_currency_rate (currency_id, name, rate, company_id,
-                                           create_uid, create_date, write_uid, write_date)
-            VALUES %s
-            ON CONFLICT (name, currency_id, company_id) DO NOTHING
-        """
-        # Build VALUES clause with proper placeholders
-        values_template = "(%%s, %%s, %%s, %%s, %s, NOW() AT TIME ZONE 'UTC', %s, NOW() AT TIME ZONE 'UTC')"
+        odoo_rate = qbo_rate_to_odoo(qbo_rate)
         uid = self.env.uid
-        values_template = values_template % (uid, uid)
-        values_list = [
-            cr.mogrify(values_template, row).decode()
-            for row in rows
-        ]
-        cr.execute(query % ", ".join(values_list))
-        inserted = cr.rowcount
-
-        if inserted:
-            # Invalidate ORM cache so subsequent reads see the new rates
-            self.env.registry.clear_cache()
-            _logger.info(
-                f"Inserted {inserted} exchange rates "
-                f"({len(rows) - inserted} already existed)"
-            )
-
-        return inserted
+        self.env.cr.execute(
+            """
+            INSERT INTO res_currency_rate
+                   (currency_id, name, rate, company_id,
+                    create_uid, create_date, write_uid, write_date)
+            VALUES (%(cid)s, %(dt)s, %(rate)s, %(co)s,
+                    %(uid)s, NOW() AT TIME ZONE 'UTC',
+                    %(uid)s, NOW() AT TIME ZONE 'UTC')
+            ON CONFLICT (name, currency_id, company_id)
+            DO UPDATE SET rate      = EXCLUDED.rate,
+                          write_uid = EXCLUDED.write_uid,
+                          write_date = EXCLUDED.write_date
+            """,
+            {
+                "cid": currency_id,
+                "dt": date,
+                "rate": odoo_rate,
+                "co": self._company.id,
+                "uid": uid,
+            },
+        )
+        # Raw SQL bypasses the ORM, so we must manually invalidate the
+        # computed ``inverse_rate`` field on res.currency — otherwise
+        # ``currency._convert()`` will use a stale cached value.
+        self.env["res.currency"].invalidate_model(["inverse_rate"])
+        self.env.registry.clear_cache()

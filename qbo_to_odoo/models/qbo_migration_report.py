@@ -75,9 +75,6 @@ class QboMigrationReport(models.Model):
         """Run the full validation and populate lines."""
         self.ensure_one()
         conn = self.qbo_connection_id
-        if not conn.gl_export_file:
-            from odoo.exceptions import UserError
-            raise UserError(_("Upload a Journal export (XLSX) on the QBO connection first."))
 
         self.tb_line_ids.unlink()
         self.txn_line_ids.unlink()
@@ -247,11 +244,16 @@ class QboMigrationReport(models.Model):
         tb_dict: {account_code: {name, debit, credit}}
         txn_dict: {account_code: [list of transaction dicts]}
         """
-        from odoo.addons.qbo_to_odoo.models.pipelines.gl_import_etl import (
-            _parse_journal_export,
+        from odoo.addons.qbo_to_odoo.models.pipelines.gl_helpers import (
+            parse_journal_export as _parse_journal_export,
         )
 
-        file_content = base64.b64decode(self.qbo_connection_id.gl_export_file)
+        conn = self.qbo_connection_id
+        if not conn.gl_export_file:
+            from odoo.exceptions import UserError
+            raise UserError(_("Upload a Journal export (XLSX) on the QBO connection first."))
+
+        file_content = base64.b64decode(conn.gl_export_file)
         txns = _parse_journal_export(file_content)
 
         tb = {}
@@ -289,9 +291,12 @@ class QboMigrationReport(models.Model):
         return tb, txn_by_account
 
     def _get_odoo_trial_balance(self):
-        """Return (tb_dict, txn_dict) from Odoo posted moves.
+        """Return (tb_dict, txn_dict) from all posted Odoo moves.
 
-        Restricted to QBO-imported moves (JNL-* ref or any qbo_* id).
+        After a clean import (wiped DB), every posted move originates from
+        QBO so no source filter is needed.  Using all posted moves avoids
+        false negatives from enriched payments whose ``qbo_*_id`` lives on
+        ``account.payment`` rather than ``account.move``.
         """
         cr = self.env.cr
         cr.execute("""
@@ -304,23 +309,6 @@ class QboMigrationReport(models.Model):
               JOIN account_account aa ON aml.account_id = aa.id
               JOIN account_move am ON aml.move_id = am.id
              WHERE am.state = 'posted'
-               AND (
-                 am.ref LIKE 'JNL-%%'
-                 OR am.qbo_invoice_id IS NOT NULL
-                 OR am.qbo_bill_id IS NOT NULL
-                 OR am.qbo_credit_memo_id IS NOT NULL
-                 OR am.qbo_vendor_credit_id IS NOT NULL
-                 OR am.qbo_payment_id IS NOT NULL
-                 OR am.qbo_bill_payment_id IS NOT NULL
-                 OR am.qbo_expense_id IS NOT NULL
-                 OR am.qbo_transfer_id IS NOT NULL
-                 OR am.qbo_deposit_id IS NOT NULL
-                 OR am.qbo_journal_entry_id IS NOT NULL
-                 OR am.qbo_sales_receipt_id IS NOT NULL
-                 OR am.qbo_refund_receipt_id IS NOT NULL
-                 OR am.qbo_tax_payment_id IS NOT NULL
-                 OR am.qbo_cc_payment_id IS NOT NULL
-               )
              GROUP BY aa.id, code, acct_name
              ORDER BY code
         """)
@@ -349,23 +337,6 @@ class QboMigrationReport(models.Model):
               JOIN account_account aa ON aml.account_id = aa.id
               JOIN account_move am ON aml.move_id = am.id
              WHERE am.state = 'posted'
-               AND (
-                 am.ref LIKE 'JNL-%%'
-                 OR am.qbo_invoice_id IS NOT NULL
-                 OR am.qbo_bill_id IS NOT NULL
-                 OR am.qbo_credit_memo_id IS NOT NULL
-                 OR am.qbo_vendor_credit_id IS NOT NULL
-                 OR am.qbo_payment_id IS NOT NULL
-                 OR am.qbo_bill_payment_id IS NOT NULL
-                 OR am.qbo_expense_id IS NOT NULL
-                 OR am.qbo_transfer_id IS NOT NULL
-                 OR am.qbo_deposit_id IS NOT NULL
-                 OR am.qbo_journal_entry_id IS NOT NULL
-                 OR am.qbo_sales_receipt_id IS NOT NULL
-                 OR am.qbo_refund_receipt_id IS NOT NULL
-                 OR am.qbo_tax_payment_id IS NOT NULL
-                 OR am.qbo_cc_payment_id IS NOT NULL
-               )
              ORDER BY am.date, am.id
         """)
         txn_by_account = defaultdict(list)

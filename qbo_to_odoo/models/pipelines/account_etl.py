@@ -11,6 +11,7 @@ from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext
 
+from .move_posting_helpers import reconcile_at_amount
 from .utils import get_api_client
 
 _logger = logging.getLogger(__name__)
@@ -340,21 +341,62 @@ class QboAccountImporter(models.AbstractModel):
                 ir_default_field="property_stock_valuation_account_id",
             )
 
-        # --- Odoo account type-based defaults for bank journals ---
-        bank_accounts = qbo_accounts.filtered(
-            lambda a: a.account_type == "asset_cash"
-        ).sorted("code")
-        if bank_accounts:
-            bank_account = bank_accounts[0]
-            IrDefault.set("account.journal", "default_account_id", bank_account.id)
-            _logger.info(
-                f"Set default bank account: {bank_account.code} - {bank_account.name}"
+        # --- Default bank account for new journals ---
+        # Pick the active QBO Bank account with the highest balance
+        # (most likely the primary operating account).
+        if api_client:
+            bank_account = self._pick_primary_bank_account(
+                api_client, qbo_accounts,
             )
+            if bank_account:
+                IrDefault.set(
+                    "account.journal", "default_account_id", bank_account.id
+                )
+                _logger.info(
+                    f"Set default bank account: "
+                    f"{bank_account.code} - {bank_account.name}"
+                )
 
         # Trigger auto-detection of AR/AP accounts (this already exists in qbo_connection)
         connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
         if connection:
             connection._auto_detect_default_accounts()
+
+    @staticmethod
+    def _pick_primary_bank_account(api_client, qbo_accounts):
+        """Return the Odoo account for the QBO Bank with the highest balance.
+
+        Queries the QBO API for active Bank-type accounts (excludes Credit
+        Card, Undeposited Funds, etc.) and picks the one with the largest
+        absolute ``CurrentBalance``.  Returns ``None`` if no match.
+        """
+        qbo_banks = api_client.query_all(
+            entity="Account",
+            where="AccountType = 'Bank' AND Active = true",
+        )
+        if not qbo_banks:
+            _logger.warning("No active QBO Bank accounts found for default")
+            return None
+
+        # Sort by absolute balance descending
+        qbo_banks.sort(
+            key=lambda a: abs(float(a.get("CurrentBalance", 0) or 0)),
+            reverse=True,
+        )
+
+        # Find the first one that exists in Odoo
+        for qbo_bank in qbo_banks:
+            qbo_id = int(qbo_bank.get("Id", 0))
+            match = qbo_accounts.filtered(lambda a, qid=qbo_id: a.qbo_id == qid)
+            if match:
+                _logger.info(
+                    f"Primary bank account: QBO '{qbo_bank.get('Name')}' "
+                    f"(balance {qbo_bank.get('CurrentBalance')})"
+                )
+                return match[0]
+
+        _logger.warning("No QBO Bank accounts matched imported Odoo accounts")
+        return None
 
     def _set_account_from_qbo_subtype(
         self,
@@ -464,9 +506,8 @@ class QboAccountImporter(models.AbstractModel):
         "qbo.expense.importer",
         "qbo.sales.receipt.importer",
         "qbo.refund.receipt.importer",
-        "qbo.tax.payment.importer",
         "qbo.cc.payment.importer",
-        "qbo.gl.import",
+        "qbo.xlsx.fallback",
     ],
 )
 class QboAccountFinalizer(models.AbstractModel):
@@ -499,7 +540,14 @@ class QboAccountFinalizer(models.AbstractModel):
 
     @ETL.load()
     def load_archive_accounts(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Archive Odoo accounts whose QBO counterparts are inactive."""
+        """Retry failed credit applications, then archive inactive accounts."""
+        # ── Reconciliation retry ──
+        # Phase 4 credit applications run per-chunk during the payment
+        # pipeline. CMs partially consumed at one FX rate may leave
+        # residuals that prevent the next chunk from fully reconciling.
+        # Now that all chunks are committed, retry unmatched pairs.
+        self._retry_credit_reconciliation(ctx)
+
         inactive_qbo_ids = transformed.get("transform_inactive_accounts", [])
         if not inactive_qbo_ids:
             _logger.info("No inactive QBO accounts to archive")
@@ -533,3 +581,101 @@ class QboAccountFinalizer(models.AbstractModel):
                 f"Archived {len(to_archive)} QBO-imported accounts that are "
                 f"inactive in QBO: {', '.join(to_archive.mapped('code'))}"
             )
+
+    @staticmethod
+    def _retry_credit_reconciliation(ctx: ETLContext):
+        """Retry failed reconciliations after all payment chunks complete.
+
+        Handles two cases that fail during multiprocessing:
+        1. Credit notes/vendor credits partially consumed at different FX rates
+        2. Payment entries that raced with invoice chunks on the same partner
+
+        Runs single-threaded after all pipelines, so no chunk contention.
+        """
+        AML = ctx.env["account.move.line"]
+        grand_total = 0
+
+        # SQL to find unreconciled credit↔debit pairs by partner+account_type.
+        # Covers CM/VC (refunds) and payment entries with unreconciled lines.
+        _PAIRS_SQL = """
+            WITH open_credits AS (
+                SELECT aml.id AS line_id, aml.partner_id,
+                       aa.account_type
+                FROM account_move_line aml
+                JOIN account_account aa ON aa.id = aml.account_id
+                JOIN account_move am ON am.id = aml.move_id
+                WHERE aml.reconciled = false
+                  AND aml.amount_residual < 0
+                  AND aa.account_type IN ('asset_receivable', 'liability_payable')
+                  AND am.state = 'posted'
+                  AND aml.partner_id IS NOT NULL
+                  AND am.move_type IN ('out_refund', 'in_refund')
+            ),
+            open_debits AS (
+                SELECT aml.id AS line_id, aml.partner_id,
+                       aa.account_type
+                FROM account_move_line aml
+                JOIN account_account aa ON aa.id = aml.account_id
+                JOIN account_move am ON am.id = aml.move_id
+                WHERE aml.reconciled = false
+                  AND aml.amount_residual > 0
+                  AND aa.account_type IN ('asset_receivable', 'liability_payable')
+                  AND am.state = 'posted'
+                  AND am.move_type IN ('out_invoice', 'in_invoice')
+                  AND aml.partner_id IS NOT NULL
+            )
+            SELECT DISTINCT ON (oc.line_id)
+                   oc.line_id AS credit_line_id,
+                   od.line_id AS debit_line_id
+            FROM open_credits oc
+            JOIN open_debits od
+              ON od.account_type = oc.account_type
+             AND od.partner_id = oc.partner_id
+            ORDER BY oc.line_id, od.line_id
+        """
+
+        # Loop: each pass may free up new pairings as residuals change.
+        iteration = 0
+        while True:
+            iteration += 1
+            ctx.env.cr.execute(_PAIRS_SQL)
+            pairs = ctx.env.cr.fetchall()
+            if not pairs:
+                break
+
+            _logger.info(
+                "Reconciliation retry pass %d: %d pairs to try",
+                iteration, len(pairs),
+            )
+            reconciled = 0
+            for credit_id, debit_id in pairs:
+                with ctx.skippable(
+                    f"retry reconcile credit={credit_id} debit={debit_id}"
+                ):
+                    credit_line = AML.browse(credit_id)
+                    debit_line = AML.browse(debit_id)
+                    if credit_line.reconciled or debit_line.reconciled:
+                        continue
+                    cap = min(
+                        abs(credit_line.amount_residual_currency),
+                        abs(debit_line.amount_residual_currency),
+                    )
+                    if cap < 0.01:
+                        continue
+                    reconcile_at_amount(credit_line, debit_line, cap)
+                    reconciled += 1
+            _logger.info(
+                "Reconciliation retry pass %d: %d/%d resolved",
+                iteration, reconciled, len(pairs),
+            )
+            grand_total += reconciled
+            if reconciled == 0:
+                break  # no progress, stop
+
+        if grand_total:
+            _logger.info(
+                "Reconciliation retry: %d total reconciliations in %d passes",
+                grand_total, iteration,
+            )
+        else:
+            _logger.info("Reconciliation retry: no unmatched pairs found")
