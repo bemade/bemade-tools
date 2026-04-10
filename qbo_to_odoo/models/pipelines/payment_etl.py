@@ -22,6 +22,46 @@ from .utils import get_api_client
 _logger = logging.getLogger(__name__)
 
 
+def _pair_credits_to_invoices(credits, invoices, qbo_id):
+    """Pair credit applications to invoices via sequential consumption.
+
+    QBO lists credits and invoices as independent lines on a Payment
+    without explicit pairing.  Each credit is consumed against invoices
+    in order until its amount is exhausted, then the next credit
+    continues where the previous left off.
+
+    Args:
+        credits: list of (odoo_move_id, qbo_amount) for credit side
+        invoices: list of (odoo_move_id, qbo_amount) for invoice side
+        qbo_id: QBO payment ID (str) for logging/tracking
+
+    Returns:
+        list of dicts with invoice_move_id, credit_memo_move_id,
+        amount, and qbo_payment_id.
+    """
+    pairs = []
+    inv_remaining = [[mid, amt] for mid, amt in invoices]
+    inv_idx = 0
+    for credit_id, credit_amount in credits:
+        remaining = credit_amount
+        while remaining > 0.005 and inv_idx < len(inv_remaining):
+            inv_id = inv_remaining[inv_idx][0]
+            inv_avail = inv_remaining[inv_idx][1]
+            apply_amt = min(remaining, inv_avail)
+            if apply_amt > 0.005:
+                pairs.append({
+                    "invoice_move_id": inv_id,
+                    "credit_memo_move_id": credit_id,
+                    "amount": round(apply_amt, 2),
+                    "qbo_payment_id": qbo_id,
+                })
+                remaining = round(remaining - apply_amt, 2)
+                inv_remaining[inv_idx][1] = round(inv_avail - apply_amt, 2)
+            if inv_remaining[inv_idx][1] < 0.005:
+                inv_idx += 1
+    return pairs
+
+
 @ETL.pipeline(
     target_model="account.payment",
     importer_name="qbo.payment.importer",
@@ -134,11 +174,11 @@ class QboPaymentImporter(models.AbstractModel):
         )
 
     @ETL.transform()
-    def transform_payments(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
+    def transform_payments(self, ctx: ETLContext, extracted: Dict) -> Dict:
         """Transform QBO payments into account.payment values."""
         data = extracted.get("extract_payments")
         if not data:
-            return []
+            return {"payments": [], "credit_applications": []}
         all_payments = data.records if hasattr(data, "records") else data
         context = data.context if hasattr(data, "context") else {}
 
@@ -322,16 +362,9 @@ class QboPaymentImporter(models.AbstractModel):
             payment_vals["currency_id"] = currency_id
 
         # Build credit application pairs for embedded CMs
-        embedded_apps = []
-        if embedded_cm_links and linked_moves:
-            for cm_id, cm_amount in embedded_cm_links:
-                for inv_id, _inv_amount in linked_moves:
-                    embedded_apps.append({
-                        "invoice_move_id": inv_id,
-                        "credit_memo_move_id": cm_id,
-                        "amount": cm_amount,
-                        "qbo_payment_id": qbo_payment_id,
-                    })
+        embedded_apps = _pair_credits_to_invoices(
+            embedded_cm_links, linked_moves, qbo_payment_id,
+        ) if embedded_cm_links and linked_moves else []
 
         return {
             "payment_vals": payment_vals,
@@ -388,19 +421,7 @@ class QboPaymentImporter(models.AbstractModel):
                 )
             return []
 
-        # Pair credits to invoices using the credit's QBO amount.
-        # Each credit is applied for its stated amount.
-        pairs = []
-        for credit_id, credit_amount in credits:
-            for inv_id, _inv_amount in invoices:
-                pairs.append({
-                    "invoice_move_id": inv_id,
-                    "credit_memo_move_id": credit_id,
-                    "amount": credit_amount,
-                    "qbo_payment_id": qbo_id,
-                })
-
-        return pairs
+        return _pair_credits_to_invoices(credits, invoices, qbo_id)
 
     @staticmethod
     def _transform_vendor_credit_application(
@@ -448,16 +469,7 @@ class QboPaymentImporter(models.AbstractModel):
                 )
             return []
 
-        pairs = []
-        for credit_id, credit_amount in credits:
-            for bill_id, _bill_amount in bills:
-                pairs.append({
-                    "invoice_move_id": bill_id,
-                    "credit_memo_move_id": credit_id,
-                    "amount": credit_amount,
-                    "qbo_payment_id": f"BP-{qbo_id}",
-                })
-        return pairs
+        return _pair_credits_to_invoices(credits, bills, f"BP-{qbo_id}")
 
     def _get_bank_journal(
         self, payment: Dict, builder: QBOMoveBuilder
@@ -620,16 +632,9 @@ class QboPaymentImporter(models.AbstractModel):
             payment_vals["currency_id"] = currency_id
 
         # Build credit application pairs for embedded VCs
-        embedded_apps = []
-        if embedded_vc_links and linked_moves:
-            for vc_id, vc_amount in embedded_vc_links:
-                for bill_id, _bill_amount in linked_moves:
-                    embedded_apps.append({
-                        "invoice_move_id": bill_id,
-                        "credit_memo_move_id": vc_id,
-                        "amount": vc_amount,
-                        "qbo_payment_id": f"BP-{qbo_bill_payment_id}",
-                    })
+        embedded_apps = _pair_credits_to_invoices(
+            embedded_vc_links, linked_moves, f"BP-{qbo_bill_payment_id}",
+        ) if embedded_vc_links and linked_moves else []
 
         return {
             "payment_vals": payment_vals,

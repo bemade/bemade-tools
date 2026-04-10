@@ -239,7 +239,151 @@ class QboMigrationReport(models.Model):
     # -- QBO Journal export queries --
 
     def _get_qbo_trial_balance(self):
-        """Parse Journal export and return (tb_dict, txn_dict).
+        """Fetch JournalReport from QBO API and return (tb_dict, txn_dict).
+
+        Fetches the report in 2-year date chunks to avoid QBO's row
+        truncation limit.  Falls back to the XLSX export if no API
+        connection is available.
+
+        tb_dict: {account_code: {name, debit, credit}}
+        txn_dict: {account_code: [list of transaction dicts]}
+        """
+        conn = self.qbo_connection_id
+        try:
+            api_client = conn.get_api_client()
+        except Exception:
+            api_client = None
+
+        if not api_client:
+            return self._get_qbo_trial_balance_xlsx()
+
+        # Fetch JournalReport in 2-year chunks to avoid truncation
+        date_ranges = [
+            ("2014-01-01", "2015-12-31"),
+            ("2016-01-01", "2017-12-31"),
+            ("2018-01-01", "2019-12-31"),
+            ("2020-01-01", "2021-12-31"),
+            ("2022-01-01", "2023-12-31"),
+            ("2024-01-01", "2024-12-31"),
+            ("2025-01-01", "2025-12-31"),
+            ("2026-01-01", "2026-12-31"),
+        ]
+
+        tb = {}
+        txn_by_account = defaultdict(list)
+        total_rows = 0
+
+        for start_date, end_date in date_ranges:
+            data = api_client.get_report("JournalReport", {
+                "start_date": start_date,
+                "end_date": end_date,
+                "minorversion": "75",
+            })
+            rows = data.get("Rows", {}).get("Row", [])
+
+            # Detect column positions from header
+            columns = data.get("Columns", {}).get("Column", [])
+            col_keys = [
+                next(
+                    (m["Value"] for m in c.get("MetaData", [])
+                     if m.get("Name") == "ColKey"),
+                    "",
+                )
+                for c in columns
+            ]
+            idx_date = col_keys.index("tx_date") if "tx_date" in col_keys else 0
+            idx_type = col_keys.index("txn_type") if "txn_type" in col_keys else 1
+            idx_num = col_keys.index("doc_num") if "doc_num" in col_keys else 2
+            idx_name = col_keys.index("name") if "name" in col_keys else 3
+            idx_memo = col_keys.index("memo") if "memo" in col_keys else 4
+            idx_code = (
+                col_keys.index("acct_num_with_extn")
+                if "acct_num_with_extn" in col_keys
+                else 5
+            )
+            idx_acct = (
+                col_keys.index("account_name")
+                if "account_name" in col_keys
+                else 6
+            )
+            idx_debit = (
+                col_keys.index("debt_home_amt")
+                if "debt_home_amt" in col_keys
+                else 7
+            )
+            idx_credit = (
+                col_keys.index("credit_home_amt")
+                if "credit_home_amt" in col_keys
+                else 8
+            )
+
+            # Track current transaction header for grouping
+            cur_date = ""
+            cur_type = ""
+            cur_num = ""
+            cur_name = ""
+
+            for row in rows:
+                if row.get("type") != "Data":
+                    continue
+                vals = [c.get("value", "") for c in row.get("ColData", [])]
+                if not vals:
+                    continue
+
+                # Header rows carry date/type/name; continuation rows
+                # have empty date and repeat the prior header values.
+                if vals[idx_date] and vals[idx_date] != "0-00-00":
+                    cur_date = vals[idx_date]
+                    cur_type = vals[idx_type]
+                    cur_num = vals[idx_num]
+                    cur_name = vals[idx_name]
+
+                raw_code = vals[idx_code] if idx_code < len(vals) else ""
+                if not raw_code:
+                    continue
+
+                # Strip trailing zeroes after decimal
+                # (acct_num_with_extn pads e.g. "2020.10" → "2020.1")
+                code = raw_code.rstrip("0").rstrip(".") if "." in raw_code else raw_code
+
+                acct_name = vals[idx_acct] if idx_acct < len(vals) else ""
+                debit_str = vals[idx_debit] if idx_debit < len(vals) else ""
+                credit_str = vals[idx_credit] if idx_credit < len(vals) else ""
+                d = float(debit_str) if debit_str else 0.0
+                c = float(credit_str) if credit_str else 0.0
+
+                if code not in tb:
+                    tb[code] = {
+                        "name": acct_name,
+                        "debit": 0.0,
+                        "credit": 0.0,
+                    }
+                tb[code]["debit"] += d
+                tb[code]["credit"] += c
+
+                memo = vals[idx_memo] if idx_memo < len(vals) else ""
+                txn_by_account[code].append({
+                    "qbo_id": "",
+                    "type": cur_type,
+                    "num": cur_num,
+                    "date": cur_date,
+                    "name": cur_name,
+                    "memo": memo,
+                    "debit": d,
+                    "credit": c,
+                })
+                total_rows += 1
+
+        _logger.info(
+            "QBO JournalReport API: %d data rows, %d accounts",
+            total_rows, len(tb),
+        )
+        return tb, txn_by_account
+
+    def _get_qbo_trial_balance_xlsx(self):
+        """Parse Journal XLSX export and return (tb_dict, txn_dict).
+
+        Fallback when the QBO API is unavailable.
 
         tb_dict: {account_code: {name, debit, credit}}
         txn_dict: {account_code: [list of transaction dicts]}
