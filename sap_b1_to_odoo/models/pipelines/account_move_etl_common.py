@@ -25,25 +25,44 @@ class AccountMoveCommon(models.AbstractModel):
                 - unit_uom_id: ID of uom.product_uom_unit
         """
         # Handle text lines from INV10/PCH10
-        if "linetext" in row:  # This is a text line
+        if row.get("line_type") == "text":
             vals = {
                 "display_type": "line_note",
                 "name": row["linetext"] or " ",
                 "quantity": 0.0,
                 "price_unit": 0.0,
-                "sap_line_num": 0,  # Text lines don't have a line_num, use 0 as null
-                "sap_aftlinenum": (row["aftlinenum"] or 0)
-                + 2,  # Increment by 2 to avoid 0
-                "sap_lineseq": (row["lineseq"] or 0) + 2,  # Increment by 2 to avoid 0
-                "sap_table": sap_table.replace(
-                    "1", "10"
-                ),  # Use INV10/PCH10 for text lines
+                "sap_line_num": 0,
+                "sap_aftlinenum": (row["aftlinenum"] or 0) + 2,
+                "sap_lineseq": (row["lineseq"] or 0) + 2,
+                "sap_table": sap_table.replace("1", "10"),
                 "sequence": (
                     row["aftlinenum"] * 100 + row["lineseq"]
                     if row["aftlinenum"] and row["lineseq"]
                     else 0
                 ),
             }
+            return vals
+
+        # Handle expense lines from INV3/PCH3/RIN3/RPC3
+        if row.get("line_type") == "expense":
+            accounts_dict = lookups.get("accounts", {})
+            acct_info = accounts_dict.get(row.get("acct_formatcode"))
+            if not acct_info:
+                return None
+            account_id = acct_info[0]
+            vals = {
+                "name": row.get("expnsname") or "Document expense",
+                "quantity": 1,
+                "price_unit": row.get("linetotal", 0),
+                "account_id": account_id,
+                "sap_acct_id": account_id,
+                "display_type": "product",
+                "sap_table": sap_table.replace("1", "3"),
+            }
+            # Map SAP tax code (vatgroup) to Odoo tax
+            tax_id = self._lookup_tax(row, sap_table, lookups.get("taxes", {}))
+            if tax_id:
+                vals["tax_ids"] = [Command.set([tax_id])]
             return vals
 
         # Handle product lines
@@ -84,10 +103,10 @@ class AccountMoveCommon(models.AbstractModel):
             account_info = accounts_dict.get(acct_formatcode)
             if account_info:
                 account_id, account_type = account_info
-                # Always store the SAP account for post-create correction
+                # Always store SAP's GL account for post-create SQL correction
                 vals["sap_acct_id"] = account_id
-                # Skip receivable/payable accounts on move lines
-                # (Odoo validation will fail — these are for payment terms)
+                # Skip receivable/payable on account_id — Odoo rejects
+                # these on product lines at create() time
                 if account_type not in [
                     "asset_receivable",
                     "liability_payable",
@@ -248,6 +267,11 @@ class AccountMoveCommon(models.AbstractModel):
 
         return False
 
+    # Display types that don't contribute to the invoice/bill total
+    _NON_AMOUNT_DISPLAY_TYPES = (
+        "line_note", "line_section", "line_subsection", "cogs",
+    )
+
     @staticmethod
     def _compute_move_line_total(line_commands):
         """Estimate the untaxed total based on prepared line commands."""
@@ -257,7 +281,9 @@ class AccountMoveCommon(models.AbstractModel):
             if command[0] != 0:
                 continue
             line_vals = command[2]
-            if line_vals.get("display_type"):
+            if line_vals.get("display_type") in (
+                AccountMoveCommon._NON_AMOUNT_DISPLAY_TYPES
+            ):
                 continue
             qty = line_vals.get("quantity") or 0.0
             price = line_vals.get("price_unit") or 0.0
@@ -276,7 +302,9 @@ class AccountMoveCommon(models.AbstractModel):
             if command[0] != 0:
                 continue
             line_vals = command[2]
-            if line_vals.get("display_type"):
+            if line_vals.get("display_type") in (
+                AccountMoveCommon._NON_AMOUNT_DISPLAY_TYPES
+            ):
                 continue
             if "quantity" in line_vals and line_vals["quantity"]:
                 line_vals["quantity"] = -line_vals["quantity"]
@@ -479,11 +507,11 @@ class AccountMoveCommon(models.AbstractModel):
         )  # Convert INV1->INV10 or PCH1->PCH10
         query = SQL(
             """
-            SELECT *, 'text' as line_type 
-            FROM %s 
-            WHERE docentry in %s 
-                AND linetext IS NOT NULL 
-                AND linetext <> '' 
+            SELECT *, 'text' as line_type
+            FROM %s
+            WHERE docentry in %s
+                AND linetext IS NOT NULL
+                AND linetext <> ''
             ORDER BY aftlinenum, lineseq
             """,
             SQL.identifier(text_table),
@@ -492,8 +520,30 @@ class AccountMoveCommon(models.AbstractModel):
         cr.execute(query)
         text_lines = cr.dictfetchall()
 
+        # Get document-level expense lines from INV3/PCH3/RIN3/RPC3
+        expense_table = lines_table.replace("1", "3")
+        cr.execute(
+            SQL(
+                """
+                SELECT e.docentry, e.expnscode, e.linetotal, e.vatgroup,
+                       e.vatsum, x.expnsname,
+                       a.formatcode AS acct_formatcode,
+                       'expense' AS line_type
+                  FROM %s e
+                  JOIN oexd x ON e.expnscode = x.expnscode
+                  JOIN oact a ON x.expnsacct = a.acctcode
+                 WHERE e.docentry IN %s
+                   AND e.linetotal <> 0
+                 ORDER BY e.docentry, e.expnscode
+                """,
+                SQL.identifier(expense_table),
+                tuple(docentries),
+            )
+        )
+        expense_lines = cr.dictfetchall()
+
         # Merge and return all lines
-        return product_lines + text_lines
+        return product_lines + text_lines + expense_lines
 
     @api.model
     def _get_move_vals(
@@ -526,21 +576,41 @@ class AccountMoveCommon(models.AbstractModel):
                 - company_currency_id: ID of company currency
         """
         if order["docentry"] in lines:
+            doc_lines = lines[order["docentry"]]
+
+            # Compute document-level discount factor.  SAP's discsum is
+            # distributed proportionally across product line totals.
+            discsum = float(order.get("discsum") or 0)
+            product_total = sum(
+                float(l.get("linetotal") or 0)
+                for l in doc_lines
+                if l.get("line_type") == "product"
+            )
+            if discsum and product_total:
+                discount_factor = 1.0 - discsum / product_total
+            else:
+                discount_factor = 1.0
+
             move_lines = []
-            for line in lines[order["docentry"]]:
-                # Add revenue/expense line
-                move_lines.append(
-                    Command.create(
-                        self._get_row_vals(
-                            line,
-                            sap_line_table,
-                            order_lines_dict,
-                            lookups,
-                        )
-                    )
+            for line in doc_lines:
+                row_vals = self._get_row_vals(
+                    line, sap_line_table, order_lines_dict, lookups,
                 )
-                # Add COGS lines for sales documents (invoices and credit memos)
-                if sap_line_table.lower() in ("inv1", "rin1"):
+                if row_vals is None:
+                    continue
+
+                # Apply document discount to product lines
+                if (discount_factor != 1.0
+                        and line.get("line_type") == "product"):
+                    row_vals["price_unit"] = round(
+                        row_vals["price_unit"] * discount_factor, 2,
+                    )
+
+                move_lines.append(Command.create(row_vals))
+
+                # Add COGS lines for sales documents
+                if (line.get("line_type") == "product"
+                        and sap_line_table.lower() in ("inv1", "rin1")):
                     cogs_lines = self._get_cogs_line_vals(line, lookups)
                     for cogs_vals in cogs_lines:
                         move_lines.append(Command.create(cogs_vals))

@@ -30,7 +30,7 @@ _RETRYABLE_ERROR_TYPES = frozenset(
     }
 )
 
-_MAX_RETRIES = 5
+_MAX_RETRIES = 10
 
 
 @dataclass
@@ -145,7 +145,7 @@ class ChunkDispatcher:
 
             error_type = body.get("error_type", "")
             if error_type in _RETRYABLE_ERROR_TYPES and attempt < _MAX_RETRIES - 1:
-                wait_time = 2**attempt
+                wait_time = min(2**attempt, 30)
                 _logger.warning(
                     "%s: %s (retrying in %ds, attempt %d/%d)",
                     tag,

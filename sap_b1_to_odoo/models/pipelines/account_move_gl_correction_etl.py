@@ -54,8 +54,9 @@ class AccountMoveGLCorrection(models.AbstractModel):
             "oinv": "13", "orin": "14", "opch": "18", "orpc": "19",
         }
 
-        # Map enriched moves → OJDT transids
+        # Map enriched moves → OJDT transids, tracking sap_table per move
         transid_to_move_id = {}
+        move_id_to_table = {}
         by_table = defaultdict(list)
         for _, docentry, table in enriched_moves:
             by_table[table].append(docentry)
@@ -71,6 +72,7 @@ class AccountMoveGLCorrection(models.AbstractModel):
                 move_id = move_id_map.get((sap_table, createdby))
                 if move_id:
                     transid_to_move_id[transid] = move_id
+                    move_id_to_table[move_id] = sap_table
 
         if not transid_to_move_id:
             _logger.info("[GL Fix] No OJDT matches.")
@@ -120,12 +122,19 @@ class AccountMoveGLCorrection(models.AbstractModel):
         for move_id, jdt1_lines in jdt1_by_move.items():
             ar_ap_account = None
             tax_accounts = []
+            sap_table = move_id_to_table.get(move_id, "")
+            is_purchase = sap_table in ("opch", "orpc")
 
             for jl in jdt1_lines:
                 if jl["account_type"] in (
                     "asset_receivable", "liability_payable",
                 ):
-                    ar_ap_account = jl["account_id"]
+                    # Pick the AR/AP line that matches the payment_term side:
+                    # bills/refunds: credit side; invoices/credit memos: debit side
+                    if is_purchase and jl["credit"] > 0:
+                        ar_ap_account = jl["account_id"]
+                    elif not is_purchase and jl["debit"] > 0:
+                        ar_ap_account = jl["account_id"]
                 elif jl["account_type"] == "liability_current":
                     # Tax accounts are typically liability_current
                     tax_accounts.append({

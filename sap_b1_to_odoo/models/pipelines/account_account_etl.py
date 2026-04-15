@@ -215,8 +215,18 @@ class AccountAccountImporter(models.AbstractModel):
                 return "asset_current"  # Default for assets
 
         elif "liabilit" in root_name:
-            # Liabilities - classify by name
-            if "payable" in name or "a/p" in name:
+            # Only accounts that actually receive payments should be
+            # liability_payable (reconcilable).  Accrual accounts like
+            # profit sharing, IRA, notes payable have "payable" in the
+            # name but no payment activity — mark them as regular
+            # liabilities so they don't pollute the payment widget.
+            _PAYABLE_CODES = {
+                "21010.000",  # AP Module — main control account
+                "21020.000",  # Accrued AP — GRPO ↔ Bill matching
+                "21040.000",  # Payroll Payables — payroll payments
+                "21060.000",  # Dividends Payable — dividend payments
+            }
+            if code in _PAYABLE_CODES:
                 return "liability_payable"
             elif "credit card" in name:
                 return "liability_credit_card"
