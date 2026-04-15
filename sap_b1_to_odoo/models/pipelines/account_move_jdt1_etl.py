@@ -5,11 +5,16 @@ transaction types (invoices, bills, credit memos), builds proper typed
 moves with product lines, taxes, and currency handling. All other types
 are imported as generic journal entries from JDT1 lines.
 
-After posting, a GL correction pipeline fixes AR/AP and tax accounts
-to match the JDT1 truth (Odoo auto-generates these from defaults).
+For enriched moves, three GL-correction mechanisms ensure accuracy:
+1. Companion entries: move_type='entry' for JDT1 lines not representable
+   on typed moves (COGS, inventory, freight, price variance).
+2. Pre-posting tax fix: correct Odoo's percentage-computed tax amounts
+   to match JDT1 exact amounts, rebalance payment_term.
+3. Post-posting AR/AP fix: correct payment_term account from JDT1.
 """
 
 import logging
+from collections import defaultdict
 
 from odoo import api, models
 from odoo.fields import Command
@@ -50,6 +55,193 @@ _TRANSTYPE_CONFIG = {
 }
 
 _ENRICHABLE_TYPES = {"13", "14", "18", "19"}
+
+
+def _fix_taxes_pre_posting_sap(cr, moves_tax_data, tax_account_ids=None):
+    """Fix tax line amounts on draft enriched moves to match JDT1 truth.
+
+    Odoo computes tax from percentage * subtotal, which may differ from
+    SAP's exact JDT1 amounts. Corrects the difference and rebalances
+    the payment_term line to keep the move balanced.
+
+    When computing what's already on a tax account, includes ALL display
+    types (tax, product, etc.) — not just tax lines. This prevents
+    doubling when a product line already posts to a tax account (e.g.,
+    tax payment bills).
+
+    Args:
+        cr: Database cursor.
+        moves_tax_data: {move_id: {"tax_amounts": [{account_id, debit, credit}],
+            "move_type": str}}
+        tax_account_ids: Set of account IDs used on tax repartition lines.
+    Returns:
+        (tax_lines_fixed, payment_term_rebalanced) counts.
+    """
+    if not moves_tax_data:
+        return 0, 0
+    if tax_account_ids is None:
+        tax_account_ids = set()
+
+    move_ids = tuple(moves_tax_data.keys())
+
+    cr.execute(
+        """
+        SELECT id, move_id, display_type, account_id,
+               debit, credit, amount_currency, company_id, currency_id,
+               journal_id, date
+          FROM account_move_line
+         WHERE move_id IN %s
+           AND display_type IN ('tax', 'payment_term', 'product')
+        """,
+        (move_ids,),
+    )
+    rows = cr.fetchall()
+
+    # Group by move_id and type.
+    # Tax accounts: include ALL display types (tax + product) so we see
+    # the true total and don't double amounts already on product lines.
+    tax_lines_by_move = defaultdict(lambda: defaultdict(list))
+    pt_lines_by_move = defaultdict(list)
+    move_meta = {}  # {move_id: {company_id, currency_id, journal_id, date}}
+    for (line_id, move_id, dtype, account_id, debit, credit, ac,
+         company_id, currency_id, journal_id, date) in rows:
+        if move_id not in move_meta:
+            move_meta[move_id] = {
+                "company_id": company_id,
+                "currency_id": currency_id,
+                "journal_id": journal_id,
+                "date": date,
+            }
+        if dtype == "tax":
+            tax_lines_by_move[move_id][account_id].append({
+                "id": line_id,
+                "debit": debit,
+                "credit": credit,
+                "balance": round(debit - credit, 2),
+                "amount_currency": ac or 0.0,
+            })
+        elif dtype == "product" and account_id in tax_account_ids:
+            tax_lines_by_move[move_id][account_id].append({
+                "id": line_id,
+                "debit": debit,
+                "credit": credit,
+                "balance": round(debit - credit, 2),
+                "amount_currency": ac or 0.0,
+            })
+        elif dtype == "payment_term":
+            pt_lines_by_move[move_id].append({
+                "id": line_id,
+                "debit": debit,
+                "credit": credit,
+                "balance": round(debit - credit, 2),
+                "amount_currency": ac or 0.0,
+            })
+
+    fixed_tax = 0
+    fixed_pt = 0
+    updates = []
+    inserts = []
+
+    for move_id, data in moves_tax_data.items():
+        tax_amounts = data["tax_amounts"]
+        move_type = data.get("move_type", "entry")
+        move_tax_lines = tax_lines_by_move.get(move_id, {})
+
+        total_delta_balance = 0.0
+
+        # Compute JDT1 target per account.
+        jdt1_tax_by_acct = defaultdict(lambda: [0.0, 0.0])
+        for ta in tax_amounts:
+            jdt1_tax_by_acct[ta["account_id"]][0] += ta["debit"]
+            jdt1_tax_by_acct[ta["account_id"]][1] += ta["credit"]
+
+        # Check all tax accounts — JDT1 targets and Odoo-generated.
+        all_tax_accounts = set(jdt1_tax_by_acct) | set(move_tax_lines)
+
+        for acct_id in all_tax_accounts:
+            jdt1_dr, jdt1_cr = jdt1_tax_by_acct.get(acct_id, [0.0, 0.0])
+            target_balance = round(jdt1_dr - jdt1_cr, 2)
+
+            group = move_tax_lines.get(acct_id, [])
+            current_balance = sum(l["balance"] for l in group)
+            delta = round(target_balance - current_balance, 2)
+
+            if abs(delta) < 0.005:
+                continue
+
+            if group:
+                # Adjust existing tax line.
+                first = group[0]
+                new_balance = round(first["balance"] + delta, 2)
+                new_debit = round(max(new_balance, 0.0), 2)
+                new_credit = round(max(-new_balance, 0.0), 2)
+                new_ac = round(first["amount_currency"] + delta, 2)
+                updates.append((
+                    new_debit, new_credit, new_balance,
+                    new_ac, first["id"],
+                ))
+                first["balance"] = new_balance
+                first["amount_currency"] = new_ac
+                fixed_tax += 1
+            elif target_balance != 0:
+                # Insert a new tax line for this account.
+                new_debit = round(max(target_balance, 0.0), 2)
+                new_credit = round(max(-target_balance, 0.0), 2)
+                meta = move_meta.get(move_id, {})
+                inserts.append((
+                    move_id, acct_id, new_debit, new_credit,
+                    target_balance, target_balance,
+                    meta.get("company_id"), meta.get("currency_id"),
+                    meta.get("journal_id"), meta.get("date"),
+                ))
+                fixed_tax += 1
+
+            total_delta_balance += delta
+
+        # Rebalance payment_term.
+        if abs(total_delta_balance) > 0.001:
+            pt_list = pt_lines_by_move.get(move_id, [])
+            if pt_list:
+                pt = pt_list[0]
+                new_pt_bal = round(pt["balance"] - total_delta_balance, 2)
+                new_pt_debit = round(max(new_pt_bal, 0.0), 2)
+                new_pt_credit = round(max(-new_pt_bal, 0.0), 2)
+                new_pt_ac = round(
+                    pt["amount_currency"] - total_delta_balance, 2,
+                )
+                updates.append((
+                    new_pt_debit, new_pt_credit, new_pt_bal,
+                    new_pt_ac, pt["id"],
+                ))
+                fixed_pt += 1
+            else:
+                _logger.warning(
+                    "Move %s: tax delta %.2f but no payment_term line",
+                    move_id, total_delta_balance,
+                )
+
+    if updates:
+        cr.executemany(
+            """UPDATE account_move_line
+                  SET debit = %s, credit = %s, balance = %s,
+                      amount_currency = %s
+                WHERE id = %s""",
+            updates,
+        )
+
+    if inserts:
+        cr.executemany(
+            """INSERT INTO account_move_line
+                  (move_id, account_id, debit, credit, balance,
+                   amount_currency, company_id, currency_id,
+                   journal_id, date, display_type, name)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                       'tax', 'SAP tax (JDT1)')""",
+            inserts,
+        )
+        _logger.info("Inserted %d missing tax lines.", len(inserts))
+
+    return fixed_tax, fixed_pt
 
 
 @ETL.pipeline(
@@ -173,10 +365,17 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 [("type", "=", "general")], limit=1,
             )
 
+        # Tax accounts: accounts used on tax repartition lines.
+        rep_lines = ctx.env["account.tax.repartition.line"].search_read(
+            [("account_id", "!=", False)], ["account_id"],
+        )
+        tax_account_ids = {r["account_id"][0] for r in rep_lines}
+
         return {
             "partners": partners_dict,
             "lookups": lookups,
             "misc_journal_id": misc_journal.id if misc_journal else False,
+            "tax_account_ids": tax_account_ids,
         }
 
     def _embed_enrichment(self, sap_cr, enrichable_headers):
@@ -237,6 +436,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         partners_dict = meta["partners"]
         lookups = meta["lookups"]
         misc_journal_id = meta["misc_journal_id"]
+        tax_account_ids = meta["tax_account_ids"]
 
         accounts_dict = lookups["accounts"]
         currencies_dict = lookups["currencies"]
@@ -244,43 +444,85 @@ class AccountMoveJDT1Importer(models.AbstractModel):
 
         move_vals_list = []
         enriched_count = 0
+        companion_count = 0
         generic_count = 0
 
         for header in headers:
-            jdt1_lines = header.pop("_lines", [])
-            doc = header.pop("_doc", None)
-            doc_lines = header.pop("_doc_lines", [])
+            ref = f"ojdt#{header.get('transid')}"
+            with ctx.skippable(ref):
+                jdt1_lines = header.pop("_lines", [])
+                doc = header.pop("_doc", None)
+                doc_lines = header.pop("_doc_lines", [])
+                if not jdt1_lines:
+                    raise ValueError("No JDT1 lines found")
 
-            if not jdt1_lines:
-                continue
+                transtype = header["transtype"]
+                config = _TRANSTYPE_CONFIG.get(transtype)
 
-            transtype = header["transtype"]
-            config = _TRANSTYPE_CONFIG.get(transtype)
+                move_vals = None
+                if transtype in _ENRICHABLE_TYPES and config and doc:
+                    move_vals = self._build_enriched_vals(
+                        header, doc, doc_lines, config,
+                        partners_dict, lookups,
+                    )
+                    if move_vals:
+                        enriched_count += 1
+                        self._extract_jdt1_metadata(
+                            move_vals, jdt1_lines, accounts_dict,
+                            tax_account_ids,
+                        )
+                        cogs_appended = self._append_jdt1_residuals(
+                            header, jdt1_lines, move_vals, accounts_dict,
+                            tax_account_ids,
+                        )
+                        if cogs_appended:
+                            companion_count += 1
+                    else:
+                        _logger.info(
+                            "Enriched build returned None for transid=%s "
+                            "transtype=%s createdby=%s (doc_lines=%d, "
+                            "partner=%s). Falling through to generic.",
+                            header.get("transid"), transtype,
+                            header.get("createdby"), len(doc_lines),
+                            doc.get("cardcode") if doc else "N/A",
+                        )
+                elif transtype in _ENRICHABLE_TYPES:
+                    _logger.info(
+                        "Enrichable transid=%s transtype=%s but no doc "
+                        "(config=%s, doc=%s). Falling through to generic.",
+                        header.get("transid"), transtype,
+                        bool(config), bool(doc),
+                    )
 
-            move_vals = None
-            if transtype in _ENRICHABLE_TYPES and config and doc:
-                move_vals = self._build_enriched_vals(
-                    header, doc, doc_lines, config, partners_dict, lookups,
-                )
-                if move_vals:
-                    enriched_count += 1
+                if not move_vals:
+                    move_vals = self._build_generic_entry_vals(
+                        header, jdt1_lines, accounts_dict, partners_dict,
+                        currencies_dict, company_currency_id,
+                        misc_journal_id,
+                    )
 
-            if not move_vals:
-                move_vals = self._build_generic_entry_vals(
-                    header, jdt1_lines, accounts_dict, partners_dict,
-                    currencies_dict, company_currency_id, misc_journal_id,
-                )
-                if move_vals:
+                if not move_vals:
+                    raise ValueError(
+                        f"Both enriched and generic returned None "
+                        f"(transtype={transtype}, "
+                        f"createdby={header.get('createdby')})"
+                    )
+
+                if move_vals.get("sap_table") == "ojdt":
                     generic_count += 1
-
-            if move_vals:
                 move_vals_list.append(move_vals)
 
         _logger.info(
-            "Transformed %d journal entries (%d enriched, %d generic).",
-            len(move_vals_list), enriched_count, generic_count,
+            "Transformed %d journal entries "
+            "(%d enriched, %d with cogs, %d generic).",
+            len(move_vals_list), enriched_count,
+            companion_count, generic_count,
         )
-        return {"move_vals": move_vals_list, "lookups": lookups}
+        return {
+            "move_vals": move_vals_list,
+            "lookups": lookups,
+            "tax_account_ids": tax_account_ids,
+        }
 
     # ----------------------------------------------------------------
     # Load
@@ -292,40 +534,72 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         data = transformed.get("transform_journal_entries", {})
         move_vals_list = data.get("move_vals", [])
         lookups = data.get("lookups", {})
+        tax_account_ids = data.get("tax_account_ids", set())
 
         if not move_vals_list:
             return
 
         self._create_pending_currency_rates(lookups)
 
+        # Strip GL metadata (not real fields) before create().
+        gl_truth = {}
+        for i, vals in enumerate(move_vals_list):
+            truth = {}
+            if "_jdt1_arap_account_id" in vals:
+                truth["arap_account_id"] = vals.pop("_jdt1_arap_account_id")
+            if "_jdt1_tax_amounts" in vals:
+                truth["tax_amounts"] = vals.pop("_jdt1_tax_amounts")
+            if "_sap_doctotal" in vals:
+                truth["doctotal"] = vals.pop("_sap_doctotal")
+            if truth:
+                truth["move_type"] = vals.get("move_type", "entry")
+                gl_truth[i] = truth
+
         moves = ctx.env["account.move"]
-        for vals in move_vals_list:
+        move_index = {}  # move.id -> index in move_vals_list
+        for i, vals in enumerate(move_vals_list):
             ref = (
                 f"{vals.get('sap_table', 'ojdt')}#"
                 f"{vals.get('sap_docentry', '?')}"
             )
             with ctx.skippable(ref):
-                moves |= ctx.env["account.move"].create(vals)
+                move = ctx.env["account.move"].create(vals)
+
+                # Immediately fix this move's accounts and taxes
+                # while still inside the skippable savepoint.
+                ctx.env.cr.execute(
+                    """
+                    UPDATE account_move_line
+                       SET account_id = sap_acct_id
+                     WHERE sap_acct_id IS NOT NULL
+                       AND account_id <> sap_acct_id
+                       AND move_id = %s
+                    """,
+                    (move.id,),
+                )
+
+                truth = gl_truth.get(i)
+                if truth and "tax_amounts" in truth:
+                    _fix_taxes_pre_posting_sap(ctx.env.cr, {
+                        move.id: {
+                            "tax_amounts": truth["tax_amounts"],
+                            "move_type": truth.get("move_type", "entry"),
+                        },
+                    }, tax_account_ids=tax_account_ids)
+
+                ctx.env.invalidate_all()
+                moves |= move
+                move_index[move.id] = i
 
         if not moves:
             return
 
-        # Restore SAP accounts on all lines where Odoo's compute overwrote them
-        ctx.env.cr.execute(
-            """
-            UPDATE account_move_line
-               SET account_id = sap_acct_id
-             WHERE sap_acct_id IS NOT NULL
-               AND account_id <> sap_acct_id
-               AND move_id IN %s
-            """,
-            (tuple(moves.ids),),
-        )
-        fixed = ctx.env.cr.rowcount
-        if fixed:
-            _logger.info("Restored SAP accounts on %d lines.", fixed)
-            ctx.env.invalidate_all()
+        # Filter out phantom records from savepoint rollbacks
+        moves = moves.exists()
+        if not moves:
+            return
 
+        # ── Post moves, grouped by journal ──
         by_journal = {}
         for move in moves:
             by_journal.setdefault(move.journal_id.id, ctx.env["account.move"])
@@ -340,6 +614,55 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                         move.with_context(
                             skip_cogs_generation=True,
                         ).action_post()
+
+        # ── Post-posting: fix AR/AP account on payment_term lines ──
+        corrected_arap = 0
+        for move in moves:
+            idx = move_index.get(move.id)
+            if idx is None or idx not in gl_truth:
+                continue
+            arap_id = gl_truth[idx].get("arap_account_id")
+            if arap_id:
+                ctx.env.cr.execute(
+                    """
+                    UPDATE account_move_line
+                       SET account_id = %s
+                     WHERE move_id = %s
+                       AND display_type = 'payment_term'
+                       AND account_id <> %s
+                    """,
+                    (arap_id, move.id, arap_id),
+                )
+                corrected_arap += ctx.env.cr.rowcount
+
+        if corrected_arap:
+            ctx.env.invalidate_all()
+            _logger.info(
+                "Post-posting: corrected %d AR/AP accounts.", corrected_arap,
+            )
+
+        # ── Verify: Odoo amount_total matches SAP DocTotal ──
+        mismatched = 0
+        for move in moves:
+            idx = move_index.get(move.id)
+            if idx is None:
+                continue
+            truth = gl_truth.get(idx, {})
+            doctotal = truth.get("doctotal")
+            if doctotal and abs(move.amount_total - doctotal) > 1.0:
+                _logger.warning(
+                    "amount_total %.2f != SAP DocTotal %.2f (diff=%.2f) "
+                    "for %s #%s",
+                    move.amount_total, doctotal,
+                    move.amount_total - doctotal,
+                    move.sap_table, move.sap_docentry,
+                )
+                mismatched += 1
+        if mismatched:
+            _logger.warning(
+                "%d enriched moves have amount_total != SAP DocTotal.",
+                mismatched,
+            )
 
         _logger.info("Created and posted %d journal entries.", len(moves))
 
@@ -368,7 +691,180 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         self._normalize_move_type(
             vals, config["move_type"], config["refund_type"],
         )
+
+        vals["_sap_doctotal"] = float(doc.get("doctotal") or 0)
+
         return vals
+
+    # ----------------------------------------------------------------
+    # JDT1 metadata extraction (for tax + AR/AP corrections)
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _extract_jdt1_metadata(
+        enriched_vals, jdt1_lines, accounts_dict, tax_account_ids,
+    ):
+        """Extract GL truth from JDT1 for pre/post-posting corrections.
+
+        Stores on enriched_vals (stripped before create):
+        - _jdt1_arap_account_id: AR/AP account from JDT1
+        - _jdt1_tax_amounts: [{account_id, debit, credit}] for tax lines
+        """
+        arap_account_id = None
+        tax_amounts = []
+
+        for jdt1 in jdt1_lines:
+            debit = float(jdt1.get("debit") or 0)
+            credit = float(jdt1.get("credit") or 0)
+
+            acct_code = (jdt1.get("acct_formatcode") or "").strip()
+            account_info = accounts_dict.get(acct_code)
+            if not account_info:
+                continue
+            account_id, account_type = account_info
+
+            # AR/AP is always line_id=0 in SAP B1 enrichable docs
+            if jdt1.get("line_id") == 0:
+                arap_account_id = account_id
+            elif account_id in tax_account_ids:
+                if debit != 0 or credit != 0:
+                    tax_amounts.append({
+                        "account_id": account_id,
+                        "debit": debit,
+                        "credit": credit,
+                    })
+
+        if arap_account_id:
+            enriched_vals["_jdt1_arap_account_id"] = arap_account_id
+        # Always set tax_amounts (even empty) so the pre-posting fix
+        # runs for all enriched moves — zeroing out Odoo-generated tax
+        # lines when JDT1 has no tax (e.g., exempt invoices).
+        enriched_vals["_jdt1_tax_amounts"] = tax_amounts
+
+    # ----------------------------------------------------------------
+    # JDT1 residual lines (COGS, inventory, variance)
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _append_jdt1_residuals(
+        header, jdt1_lines, enriched_vals, accounts_dict,
+        tax_account_ids,
+    ):
+        """Append residual JDT1 lines to the enriched move as cogs lines.
+
+        Computes per-account residuals (JDT1 total − enriched total) and
+        appends them with ``display_type='cogs'`` so they don't affect
+        ``invoice_line_ids`` or the invoice total.  This replaces the
+        former companion entry approach.
+
+        Returns the number of residual lines appended.
+        """
+        move_type = enriched_vals.get("move_type", "entry")
+
+        # Build set of payable/receivable account IDs for date_maturity
+        payable_receivable_ids = {
+            aid for aid, atype in accounts_dict.values()
+            if atype in ("asset_receivable", "liability_payable")
+        }
+
+        primary_arap_id = enriched_vals.get("_jdt1_arap_account_id")
+        skip_ids = set(tax_account_ids) | payable_receivable_ids
+        if primary_arap_id:
+            skip_ids.add(primary_arap_id)
+
+        # 1. Sum enriched move amounts by account (skip AR/AP + tax).
+        enriched_by_acct = defaultdict(lambda: [0.0, 0.0])
+        for cmd in enriched_vals.get("line_ids", []):
+            if not (isinstance(cmd, (list, tuple)) and cmd[0] == 0):
+                continue
+            lv = cmd[2]
+            if lv.get("display_type") in (
+                "line_note", "line_section", "line_subsection",
+            ):
+                continue
+            acct_id = lv.get("sap_acct_id") or lv.get("account_id")
+            if not acct_id or acct_id in skip_ids:
+                continue
+            qty = float(lv.get("quantity", 0) or 0)
+            price = float(lv.get("price_unit", 0) or 0)
+            signed = round(qty * price, 2)
+            if signed == 0:
+                continue
+            if move_type in ("out_invoice", "in_refund"):
+                if signed > 0:
+                    enriched_by_acct[acct_id][1] += signed
+                else:
+                    enriched_by_acct[acct_id][0] += -signed
+            else:
+                if signed > 0:
+                    enriched_by_acct[acct_id][0] += signed
+                else:
+                    enriched_by_acct[acct_id][1] += -signed
+
+        # 2. Sum JDT1 amounts by account, skipping AR/AP and tax.
+        jdt1_by_acct = defaultdict(lambda: [0.0, 0.0])
+        for jdt1 in jdt1_lines:
+            debit = float(jdt1.get("debit") or 0)
+            credit = float(jdt1.get("credit") or 0)
+            if debit == 0 and credit == 0:
+                continue
+            acct_code = (jdt1.get("acct_formatcode") or "").strip()
+            account_info = accounts_dict.get(acct_code)
+            if not account_info:
+                continue
+            account_id = account_info[0]
+            if account_id in skip_ids:
+                continue
+            jdt1_by_acct[account_id][0] += debit
+            jdt1_by_acct[account_id][1] += credit
+
+        # 3. Compute residuals and append as display_type='cogs'.
+        appended = 0
+        for acct_id in set(jdt1_by_acct) | set(enriched_by_acct):
+            jdr, jcr = jdt1_by_acct.get(acct_id, [0.0, 0.0])
+            edr, ecr = enriched_by_acct.get(acct_id, [0.0, 0.0])
+            res_debit = round(jdr - edr, 2)
+            res_credit = round(jcr - ecr, 2)
+
+            if abs(res_debit) <= 0.01 and abs(res_credit) <= 0.01:
+                continue
+
+            if res_debit < 0:
+                res_credit = round(res_credit - res_debit, 2)
+                res_debit = 0.0
+            if res_credit < 0:
+                res_debit = round(res_debit - res_credit, 2)
+                res_credit = 0.0
+
+            if res_debit == 0 and res_credit == 0:
+                continue
+
+            # Use display_type='product' so the line participates in
+            # Odoo's payment_term auto-balance.  Signed as price_unit so
+            # Odoo computes debit/credit from the move_type direction.
+            if move_type in ("out_invoice", "in_refund"):
+                # Credits are positive, debits are negative
+                price = round(res_credit - res_debit, 2)
+            else:
+                # Debits are positive, credits are negative
+                price = round(res_debit - res_credit, 2)
+
+            line_vals = {
+                "display_type": "product",
+                "account_id": acct_id,
+                "sap_acct_id": acct_id,
+                "quantity": 1,
+                "price_unit": price,
+                "name": header.get("memo") or "JDT1 GL residual",
+                "sap_table": "jdt1",
+            }
+            # Payable/receivable accounts require date_maturity
+            if acct_id in payable_receivable_ids:
+                line_vals["date_maturity"] = enriched_vals.get("date")
+            enriched_vals["line_ids"].append(Command.create(line_vals))
+            appended += 1
+
+        return appended
 
     # ----------------------------------------------------------------
     # Generic JDT1 builder

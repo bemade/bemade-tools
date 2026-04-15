@@ -182,13 +182,36 @@ class MultiprocessingConfig:
     def should_use_multiprocessing(self, record_count: int) -> bool:
         """Determine if multiprocessing should be used based on record count.
 
+        Also verifies that the local HTTP server is reachable (required for
+        chunk dispatch).  Falls back to sequential mode when running in
+        environments without an HTTP server (e.g. ``odoo-bin shell``).
+
         Args:
             record_count: Number of records extracted.
 
         Returns:
             True if multiprocessing should be used, False otherwise.
         """
-        return self.enabled and record_count >= self.threshold
+        if not self.enabled or record_count < self.threshold:
+            return False
+        # Verify the HTTP server is actually reachable before committing to
+        # parallel dispatch.  In shell mode, Odoo does not start an HTTP
+        # server, so all chunk POSTs would fail with Connection Refused.
+        from odoo.tools import config
+        import socket
+        http_interface = config.get("http_interface", "localhost") or "localhost"
+        http_port = int(config.get("http_port", 8069))
+        try:
+            with socket.create_connection((http_interface, http_port), timeout=2):
+                return True
+        except OSError:
+            _logger.warning(
+                "HTTP server not reachable at %s:%s — falling back to "
+                "sequential mode. Parallel dispatch requires a running "
+                "HTTP server.",
+                http_interface, http_port,
+            )
+            return False
 
     def get_workers(self) -> int:
         """Get the number of concurrent HTTP workers to dispatch to.

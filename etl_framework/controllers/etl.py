@@ -7,6 +7,7 @@ from odoo import http
 from odoo.http import request
 
 from ..framework import ETLContext, ETLPhase
+from ..reporter import ReportLogHandler
 
 _logger = logging.getLogger(__name__)
 
@@ -56,22 +57,29 @@ class ETLController(http.Controller):
             chunk = pickle.loads(base64.b64decode(chunk))
             ctx = ETLContext(cr=None, env=env, source_config=source_config)
 
+            # Install log handler to capture WARNING+ messages in worker
+            log_handler = ReportLogHandler(ctx.report)
+            logging.getLogger().addHandler(log_handler)
+
             transform_methods = _discover_etl_methods(
                 importer_class, ETLPhase.TRANSFORM
             )
             load_methods = _discover_etl_methods(importer_class, ETLPhase.LOAD)
 
-            # Run transform
-            transformed_data = {}
-            for method_name in transform_methods:
-                bound = getattr(importer, method_name)
-                result = bound(ctx, chunk)
-                transformed_data[method_name] = result
+            try:
+                # Run transform
+                transformed_data = {}
+                for method_name in transform_methods:
+                    bound = getattr(importer, method_name)
+                    result = bound(ctx, chunk)
+                    transformed_data[method_name] = result
 
-            # Run load
-            for method_name in load_methods:
-                bound = getattr(importer, method_name)
-                bound(ctx, transformed_data)
+                # Run load
+                for method_name in load_methods:
+                    bound = getattr(importer, method_name)
+                    bound(ctx, transformed_data)
+            finally:
+                logging.getLogger().removeHandler(log_handler)
 
             # Collect report details from the detached PipelineReport
             report = ctx.report
