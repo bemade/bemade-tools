@@ -773,7 +773,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         if primary_arap_id:
             skip_ids.add(primary_arap_id)
 
-        # 1. Sum enriched move amounts by account (skip AR/AP + tax).
+        # 1. Sum enriched move amounts by account.
         enriched_by_acct = defaultdict(lambda: [0.0, 0.0])
         for cmd in enriched_vals.get("line_ids", []):
             if not (isinstance(cmd, (list, tuple)) and cmd[0] == 0):
@@ -802,7 +802,8 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 else:
                     enriched_by_acct[acct_id][1] += -signed
 
-        # 2. Sum JDT1 amounts by account, skipping AR/AP and tax.
+        # 2. Sum JDT1 amounts by account, skipping tax + primary AR/AP +
+        #    payable/receivable (same skip set as enriched).
         jdt1_by_acct = defaultdict(lambda: [0.0, 0.0])
         for jdt1 in jdt1_lines:
             debit = float(jdt1.get("debit") or 0)
@@ -819,7 +820,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
             jdt1_by_acct[account_id][0] += debit
             jdt1_by_acct[account_id][1] += credit
 
-        # 3. Compute residuals and append as display_type='cogs'.
+        # 3. Compute residuals.
         appended = 0
         for acct_id in set(jdt1_by_acct) | set(enriched_by_acct):
             jdr, jcr = jdt1_by_acct.get(acct_id, [0.0, 0.0])
@@ -859,9 +860,6 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 "name": header.get("memo") or "JDT1 GL residual",
                 "sap_table": "jdt1",
             }
-            # Payable/receivable accounts require date_maturity
-            if acct_id in payable_receivable_ids:
-                line_vals["date_maturity"] = enriched_vals.get("date")
             enriched_vals["line_ids"].append(Command.create(line_vals))
             appended += 1
 

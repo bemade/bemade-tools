@@ -222,9 +222,7 @@ class AccountAccountImporter(models.AbstractModel):
             # liabilities so they don't pollute the payment widget.
             _PAYABLE_CODES = {
                 "21010.000",  # AP Module — main control account
-                "21020.000",  # Accrued AP — GRPO ↔ Bill matching
                 "21040.000",  # Payroll Payables — payroll payments
-                "21060.000",  # Dividends Payable — dividend payments
             }
             if code in _PAYABLE_CODES:
                 return "liability_payable"
