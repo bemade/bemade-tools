@@ -1,20 +1,20 @@
-"""QBO XLSX Fallback Pipeline.
+"""QBO Journal Fallback Pipeline.
 
-Imports transaction types that have no QBO API endpoint:
+Imports transaction types that have no dedicated QBO API endpoint:
 
 - **Payroll Cheque** — payroll transactions (always CAD)
 - **Inventory Starting Value** — opening inventory balances (always CAD)
+- **Tax Payment / Sales Tax Payment / Sales Tax Adjustment**
 
 These are imported as generic journal entries (``move_type='entry'``)
-from the QBO Journal XLSX export file.  Since all fallback types are
-CAD-only, no FX handling or tax corrections are needed — just a simple
-create-then-post flow.
+from the cached QBO JournalReport (``qbo.journal.cache``).  Since all
+fallback types are CAD-only, no FX handling or tax corrections are
+needed — just a simple create-then-post flow.
 
 Runs after all entity pipelines so ``get_imported_qbo_ids()`` correctly
 excludes transactions already imported via the API.
 """
 
-import base64
 import logging
 from collections import defaultdict
 from typing import Dict, List
@@ -28,12 +28,11 @@ from .gl_helpers import (
     build_code_maps,
     get_imported_qbo_ids,
     journal_entry_vals_from_export,
-    parse_journal_export,
 )
 
 _logger = logging.getLogger(__name__)
 
-# Only these QBO transaction types are imported from the XLSX.
+# Only these QBO transaction types are imported from the JournalReport.
 # Everything else comes from the API entity pipelines.
 #
 # NOTE: "Payment" and "Bill Payment (Cheque)" are FX realization entries
@@ -52,7 +51,7 @@ _ALLOWED_TYPES = frozenset({
 
 @ETL.pipeline(
     target_model="account.move",
-    importer_name="qbo.xlsx.fallback",
+    importer_name="qbo.journal.fallback",
     sap_source="GLExport",
     depends_on=[
         "qbo.account.importer",
@@ -71,87 +70,74 @@ _ALLOWED_TYPES = frozenset({
     ],
     chunk_size=200,
 )
-class QboXlsxFallbackImporter(models.AbstractModel):
-    """Imports non-API QBO transaction types from the Journal XLSX export."""
+class QboJournalFallbackImporter(models.AbstractModel):
+    """Imports non-API QBO transaction types from the JournalReport cache."""
 
-    _name = "qbo.xlsx.fallback"
-    _description = "QBO XLSX Fallback Importer"
+    _name = "qbo.journal.fallback"
+    _description = "QBO Journal Fallback Importer"
 
     @ETL.extract("GLExport")
     def extract_fallback_transactions(self, ctx: ETLContext) -> ChunkableData:
-        """Parse Journal XLSX, filter to allowed types, exclude imported."""
+        """Read cached JournalReport, filter to allowed types, exclude imported."""
         extractor = QBOExtractor(ctx)
 
         connection = ctx.env["qbo.connection"].browse(
             ctx.get_config("source_id")
         )
-        if not connection.gl_export_file:
-            _logger.info(
-                "No Journal export file uploaded — skipping XLSX fallback"
-            )
-            return ChunkableData(records=[], context={})
+        cache = connection._ensure_journal_cache()
 
-        file_content = base64.b64decode(connection.gl_export_file)
-        transactions = parse_journal_export(file_content)
-        _logger.info(
-            "Parsed %d transactions from Journal export", len(transactions)
-        )
-
-        # Filter to allowed types only
-        allowed = []
-        for txn in transactions:
-            if not txn.get("lines"):
-                continue
-            txn_type = txn["lines"][0].get("type", "")
-            if txn_type in _ALLOWED_TYPES:
-                allowed.append(txn)
-
-        type_counts: Dict[str, int] = defaultdict(int)
-        for txn in allowed:
-            type_counts[txn["lines"][0]["type"]] += 1
-        _logger.info(
-            "Allowed fallback types: %d transactions (%s)",
-            len(allowed),
-            ", ".join(f"{t}: {c}" for t, c in sorted(type_counts.items())),
-        )
-
-        # Log transaction types NOT in our allowed list and NOT imported
+        # Collect IDs already imported by entity pipelines
         imported_ids = get_imported_qbo_ids(ctx)
+
+        # Query the cache for allowed types, excluding imported
+        transactions = cache.get_transactions_for_import(
+            _ALLOWED_TYPES, imported_ids
+        )
+        _logger.info(
+            "Journal cache returned %d fallback transactions "
+            "(after excluding %d imported IDs)",
+            len(transactions),
+            len(imported_ids),
+        )
+
+        # Log type breakdown
+        type_counts: Dict[str, int] = defaultdict(int)
+        for txn in transactions:
+            if txn.get("lines"):
+                type_counts[txn["lines"][0]["type"]] += 1
+        if type_counts:
+            _logger.info(
+                "Fallback types: %s",
+                ", ".join(f"{t}: {c}" for t, c in sorted(type_counts.items())),
+            )
+
+        # Log unimported types from the full cache for drift investigation
+        all_cache_txns = cache.transaction_ids
         skipped_types: Dict[str, int] = defaultdict(int)
         skipped_details: List[str] = []
-        for txn in transactions:
-            if not txn.get("lines"):
-                continue
-            txn_type = txn["lines"][0].get("type", "")
-            if txn_type not in _ALLOWED_TYPES and str(txn["id"]) not in imported_ids:
-                skipped_types[txn_type] += 1
-                # Collect account-level detail for drift investigation
-                total_d = sum(l.get("debit", 0) for l in txn["lines"])
-                total_c = sum(l.get("credit", 0) for l in txn["lines"])
-                accts = sorted({
-                    l.get("account_code", "?") for l in txn["lines"]
-                })
+        for txn in all_cache_txns:
+            if (
+                txn.txn_type not in _ALLOWED_TYPES
+                and (txn.qbo_txn_id or "") not in imported_ids
+            ):
+                skipped_types[txn.txn_type or "Unknown"] += 1
+                total_d = sum(l.debit for l in txn.line_ids)
+                total_c = sum(l.credit for l in txn.line_ids)
+                accts = sorted({l.account_code or "?" for l in txn.line_ids})
                 skipped_details.append(
-                    f"  QBO#{txn['id']} {txn_type} "
+                    f"  QBO#{txn.qbo_txn_id or '?'} {txn.txn_type} "
                     f"D={total_d:,.2f} C={total_c:,.2f} "
                     f"accts=[{', '.join(accts)}]"
                 )
         if skipped_types:
             _logger.warning(
-                "Unimported XLSX types (not API, not fallback): %s",
+                "Unimported cache types (not API, not fallback): %s",
                 ", ".join(f"{t}: {c}" for t, c in sorted(skipped_types.items())),
             )
             _logger.warning(
-                "Unimported XLSX transaction details:\n%s",
+                "Unimported cache transaction details:\n%s",
                 "\n".join(skipped_details),
             )
-
-        # Exclude transactions already imported by entity pipelines
-        new_txns = [t for t in allowed if str(t["id"]) not in imported_ids]
-        _logger.info(
-            "After excluding %d imported IDs: %d new fallback transactions",
-            len(imported_ids), len(new_txns),
-        )
 
         # Build code maps for account resolution
         maps = build_code_maps(ctx)
@@ -160,7 +146,7 @@ class QboXlsxFallbackImporter(models.AbstractModel):
         extractor.preload_journals("general")
 
         return ChunkableData(
-            records=new_txns,
+            records=transactions,
             context={
                 "code_map": maps["code_map"],
                 "account_currency_map": maps["account_currency_map"],
@@ -172,7 +158,7 @@ class QboXlsxFallbackImporter(models.AbstractModel):
 
     @ETL.transform()
     def transform_fallback(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
-        """Build journal entry vals from XLSX export lines."""
+        """Build journal entry vals from cached JournalReport lines."""
         data = extracted.get("extract_fallback_transactions")
         if not data:
             return []

@@ -23,15 +23,5 @@ from . import expense_etl
 from . import deposit_etl
 from . import sales_receipt_etl
 from . import refund_receipt_etl
-# tax_payment_etl disabled — QBO TaxPayment API lacks line-level detail
-# (e.g. payroll remittances touch 2400 but API only gives total + bank).
-# Imported via XLSX fallback instead.
-# from . import tax_payment_etl
 from . import cc_payment_etl
-from . import xlsx_fallback_etl
-# GL-first pipelines are deprecated — kept on disk for reference but no
-# longer registered.  All imports now use entity pipelines + XLSX fallback.
-# from . import gl_import_etl
-# from . import gl_first_etl
-# from . import gl_correction_etl
-# from . import gl_first_reconciliation_etl
+from . import journal_fallback_etl
