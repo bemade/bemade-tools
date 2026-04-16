@@ -391,7 +391,8 @@ class AccountMoveJDT1Importer(models.AbstractModel):
 
             docentries = tuple(h["createdby"] for h in type_headers)
             sap_cr.execute(
-                f"SELECT * FROM {header_table} WHERE docentry IN %s",
+                f"SELECT * FROM {header_table} WHERE docentry IN %s"
+                " AND COALESCE(canceled, 'N') != 'C'",
                 (docentries,),
             )
             doc_headers = {
