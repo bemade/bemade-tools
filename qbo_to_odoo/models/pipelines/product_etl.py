@@ -77,6 +77,23 @@ class QboItemImporter(models.AbstractModel):
         existing_ids = {str(row[0]) for row in ctx.env.cr.fetchall()}
         _logger.info(f"Found {len(existing_ids)} existing items in Odoo")
 
+
+        # Fetch all items from QBO
+        items = api_client.query_all(
+            entity="Item", where="Active IN (true, false)", order_by="Id"
+        )
+        # Filter out already imported by QBO ID
+        new_items = [item for item in items if str(item.get("Id")) not in existing_ids]
+        deduped_items = self._dedup_items(ctx, new_items)
+
+        _logger.info(
+            f"Extracted {len(items)} items from QBO, {len(new_items)} new by ID, "
+            f"{len(deduped_items)} after deduplication by SKU"
+        )
+        return deduped_items
+
+
+    def _dedup_items(self, ctx: ETLContext, items) -> List[Dict]:
         # Get existing default_codes for deduplication (cross-system matching)
         ctx.env.cr.execute(
             "SELECT default_code FROM product_product WHERE default_code IS NOT NULL AND default_code != ''"
@@ -86,25 +103,13 @@ class QboItemImporter(models.AbstractModel):
             f"Found {len(existing_default_codes)} existing products by default_code for deduplication"
         )
 
-        # Fetch all items from QBO
-        items = api_client.query_all(
-            entity="Item", where="Active IN (true, false)", order_by="Id"
-        )
-
-        # Filter out already imported by QBO ID
-        new_items = [item for item in items if str(item.get("Id")) not in existing_ids]
 
         # Filter out items that match existing products by SKU (deduplication)
         deduped_items = [
             item
-            for item in new_items
+            for item in items
             if not item.get("Sku") or item.get("Sku") not in existing_default_codes
         ]
-
-        _logger.info(
-            f"Extracted {len(items)} items from QBO, {len(new_items)} new by ID, "
-            f"{len(deduped_items)} after deduplication by SKU"
-        )
         return deduped_items
 
     @ETL.transform()

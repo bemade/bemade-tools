@@ -4,11 +4,11 @@ Stores results in persistent models viewable in the Odoo UI.
 Can be triggered from the QBO connection form or created manually.
 """
 
-import base64
 import logging
 from collections import defaultdict
 
 from odoo import _, api, fields, models
+from odoo.exceptions import UserError
 from odoo.fields import Command
 
 _logger = logging.getLogger(__name__)
@@ -52,13 +52,17 @@ class QboMigrationReport(models.Model):
         "account.account",
         string="Opening Balance Offset Account",
         help="Account for the offsetting entry when creating opening balances "
-             "from QBO-only accounts (typically retained earnings / equity).",
+        "from QBO-only accounts (typically retained earnings / equity).",
     )
     tb_line_ids = fields.One2many(
-        "qbo.migration.report.tb.line", "report_id", string="Trial Balance",
+        "qbo.migration.report.tb.line",
+        "report_id",
+        string="Trial Balance",
     )
     txn_line_ids = fields.One2many(
-        "qbo.migration.report.txn.line", "report_id", string="Transactions",
+        "qbo.migration.report.txn.line",
+        "report_id",
+        string="Transactions",
     )
     match_count = fields.Integer(readonly=True)
     drift_count = fields.Integer(readonly=True)
@@ -68,13 +72,16 @@ class QboMigrationReport(models.Model):
     @api.depends("create_date")
     def _compute_name(self):
         for rec in self:
-            ts = rec.create_date.strftime("%Y-%m-%d %H:%M") if rec.create_date else "draft"
+            ts = (
+                rec.create_date.strftime("%Y-%m-%d %H:%M")
+                if rec.create_date
+                else "draft"
+            )
             rec.name = f"QBO Migration Report ({ts})"
 
     def action_run(self):
         """Run the full validation and populate lines."""
         self.ensure_one()
-        conn = self.qbo_connection_id
 
         self.tb_line_ids.unlink()
         self.txn_line_ids.unlink()
@@ -103,49 +110,63 @@ class QboMigrationReport(models.Model):
                 status = "drift"
 
             stats[status] += 1
-            tb_vals.append(Command.create({
-                "account_code": code,
-                "qbo_acct_name": qbo.get("name", ""),
-                "odoo_acct_name": odoo.get("name", ""),
-                "qbo_debit": round(qbo.get("debit", 0), 2),
-                "qbo_credit": round(qbo.get("credit", 0), 2),
-                "qbo_balance": round(qbo_bal, 2),
-                "odoo_debit": round(odoo.get("debit", 0), 2),
-                "odoo_credit": round(odoo.get("credit", 0), 2),
-                "odoo_balance": round(odoo_bal, 2),
-                "balance_diff": bal_diff,
-                "status": status,
-            }))
+            tb_vals.append(
+                Command.create(
+                    {
+                        "account_code": code,
+                        "qbo_acct_name": qbo.get("name", ""),
+                        "odoo_acct_name": odoo.get("name", ""),
+                        "qbo_debit": round(qbo.get("debit", 0), 2),
+                        "qbo_credit": round(qbo.get("credit", 0), 2),
+                        "qbo_balance": round(qbo_bal, 2),
+                        "odoo_debit": round(odoo.get("debit", 0), 2),
+                        "odoo_credit": round(odoo.get("credit", 0), 2),
+                        "odoo_balance": round(odoo_bal, 2),
+                        "balance_diff": bal_diff,
+                        "status": status,
+                    }
+                )
+            )
 
         # Transaction-level detail for drifted / qbo-only accounts
         drift_codes = [
-            code for code in all_codes
-            if code in qbo_tb and (
+            code
+            for code in all_codes
+            if code in qbo_tb
+            and (
                 (code not in odoo_tb)
                 or abs(
                     round(
                         (qbo_tb[code].get("debit", 0) - qbo_tb[code].get("credit", 0))
-                        - (odoo_tb.get(code, {}).get("debit", 0)
-                           - odoo_tb.get(code, {}).get("credit", 0)),
+                        - (
+                            odoo_tb.get(code, {}).get("debit", 0)
+                            - odoo_tb.get(code, {}).get("credit", 0)
+                        ),
                         2,
                     )
-                ) > self.tolerance
+                )
+                > self.tolerance
             )
         ]
         txn_vals = self._build_transaction_lines(drift_codes, qbo_txns, odoo_txns)
 
-        self.write({
-            "tb_line_ids": tb_vals,
-            "txn_line_ids": txn_vals,
-            "match_count": stats.get("match", 0),
-            "drift_count": stats.get("drift", 0),
-            "qbo_only_count": stats.get("qbo_only", 0),
-            "odoo_only_count": stats.get("odoo_only", 0),
-        })
+        self.write(
+            {
+                "tb_line_ids": tb_vals,
+                "txn_line_ids": txn_vals,
+                "match_count": stats.get("match", 0),
+                "drift_count": stats.get("drift", 0),
+                "qbo_only_count": stats.get("qbo_only", 0),
+                "odoo_only_count": stats.get("odoo_only", 0),
+            }
+        )
         _logger.info(
             "QBO migration report %s: %d match, %d drift, %d qbo_only, %d odoo_only",
-            self.name, stats["match"], stats["drift"],
-            stats["qbo_only"], stats["odoo_only"],
+            self.name,
+            stats["match"],
+            stats["drift"],
+            stats["qbo_only"],
+            stats["odoo_only"],
         )
 
     def action_create_opening_balance(self):
@@ -163,12 +184,14 @@ class QboMigrationReport(models.Model):
 
         for tb_line in qbo_only_lines:
             account = Account.search(
-                [("qbo_id", "=", tb_line.account_code)], limit=1,
+                [("qbo_id", "=", tb_line.account_code)],
+                limit=1,
             )
             if not account:
                 # Try matching by code
                 account = Account.search(
-                    [("code", "=", tb_line.account_code)], limit=1,
+                    [("code", "=", tb_line.account_code)],
+                    limit=1,
                 )
             if not account:
                 _logger.warning(
@@ -182,12 +205,16 @@ class QboMigrationReport(models.Model):
             credit = -balance if balance < 0 else 0.0
             total_offset += balance
 
-            line_commands.append(Command.create({
-                "account_id": account.id,
-                "name": f"Opening balance: {tb_line.qbo_acct_name}",
-                "debit": debit,
-                "credit": credit,
-            }))
+            line_commands.append(
+                Command.create(
+                    {
+                        "account_id": account.id,
+                        "name": f"Opening balance: {tb_line.qbo_acct_name}",
+                        "debit": debit,
+                        "credit": credit,
+                    }
+                )
+            )
 
         if not line_commands:
             return
@@ -195,39 +222,51 @@ class QboMigrationReport(models.Model):
         offset_account = self.opening_balance_account_id
         if not offset_account:
             from odoo.exceptions import UserError
-            raise UserError(_(
-                "Set an Opening Balance Offset Account before creating entries."
-            ))
+
+            raise UserError(
+                _("Set an Opening Balance Offset Account before creating entries.")
+            )
 
         offset_debit = -total_offset if total_offset < 0 else 0.0
         offset_credit = total_offset if total_offset > 0 else 0.0
-        line_commands.append(Command.create({
-            "account_id": offset_account.id,
-            "name": "Opening balance offset (pre-migration equity)",
-            "debit": offset_debit,
-            "credit": offset_credit,
-        }))
+        line_commands.append(
+            Command.create(
+                {
+                    "account_id": offset_account.id,
+                    "name": "Opening balance offset (pre-migration equity)",
+                    "debit": offset_debit,
+                    "credit": offset_credit,
+                }
+            )
+        )
 
         journal = self.env["account.journal"].search(
-            [("type", "=", "general"), ("code", "=", "MISC")], limit=1,
+            [("type", "=", "general"), ("code", "=", "MISC")],
+            limit=1,
         )
         if not journal:
             journal = self.env["account.journal"].search(
-                [("type", "=", "general")], limit=1,
+                [("type", "=", "general")],
+                limit=1,
             )
 
-        move = self.env["account.move"].create({
-            "move_type": "entry",
-            "journal_id": journal.id,
-            "date": fields.Date.today(),
-            "ref": f"QBO pre-migration opening balances ({self.name})",
-            "line_ids": line_commands,
-        })
+        move = self.env["account.move"].create(
+            {
+                "move_type": "entry",
+                "journal_id": journal.id,
+                "date": fields.Date.today(),
+                "ref": f"QBO pre-migration opening balances ({self.name})",
+                "line_ids": line_commands,
+            }
+        )
         move.action_post()
 
         _logger.info(
             "Created opening balance JE %s with %d lines (offset %.2f on %s).",
-            move.name, len(line_commands), total_offset, offset_account.code,
+            move.name,
+            len(line_commands),
+            total_offset,
+            offset_account.code,
         )
         return {
             "type": "ir.actions.act_window",
@@ -239,200 +278,17 @@ class QboMigrationReport(models.Model):
     # -- QBO Journal export queries --
 
     def _get_qbo_trial_balance(self):
-        """Fetch JournalReport from QBO API and return (tb_dict, txn_dict).
+        """Return (tb_dict, txn_by_account) from the JournalReport cache.
 
-        Fetches the report in 2-year date chunks to avoid QBO's row
-        truncation limit.  Falls back to the XLSX export if no API
-        connection is available.
+        Delegates to ``qbo.journal.cache.get_trial_balance()``.  The
+        cache is auto-created and refreshed on first access.
 
         tb_dict: {account_code: {name, debit, credit}}
         txn_dict: {account_code: [list of transaction dicts]}
         """
         conn = self.qbo_connection_id
-        try:
-            api_client = conn.get_api_client()
-        except Exception:
-            api_client = None
-
-        if not api_client:
-            return self._get_qbo_trial_balance_xlsx()
-
-        # Fetch JournalReport in 2-year chunks to avoid truncation
-        date_ranges = [
-            ("2014-01-01", "2015-12-31"),
-            ("2016-01-01", "2017-12-31"),
-            ("2018-01-01", "2019-12-31"),
-            ("2020-01-01", "2021-12-31"),
-            ("2022-01-01", "2023-12-31"),
-            ("2024-01-01", "2024-12-31"),
-            ("2025-01-01", "2025-12-31"),
-            ("2026-01-01", "2026-12-31"),
-        ]
-
-        tb = {}
-        txn_by_account = defaultdict(list)
-        total_rows = 0
-
-        for start_date, end_date in date_ranges:
-            data = api_client.get_report("JournalReport", {
-                "start_date": start_date,
-                "end_date": end_date,
-                "minorversion": "75",
-            })
-            rows = data.get("Rows", {}).get("Row", [])
-
-            # Detect column positions from header
-            columns = data.get("Columns", {}).get("Column", [])
-            col_keys = [
-                next(
-                    (m["Value"] for m in c.get("MetaData", [])
-                     if m.get("Name") == "ColKey"),
-                    "",
-                )
-                for c in columns
-            ]
-            idx_date = col_keys.index("tx_date") if "tx_date" in col_keys else 0
-            idx_type = col_keys.index("txn_type") if "txn_type" in col_keys else 1
-            idx_num = col_keys.index("doc_num") if "doc_num" in col_keys else 2
-            idx_name = col_keys.index("name") if "name" in col_keys else 3
-            idx_memo = col_keys.index("memo") if "memo" in col_keys else 4
-            idx_code = (
-                col_keys.index("acct_num_with_extn")
-                if "acct_num_with_extn" in col_keys
-                else 5
-            )
-            idx_acct = (
-                col_keys.index("account_name")
-                if "account_name" in col_keys
-                else 6
-            )
-            idx_debit = (
-                col_keys.index("debt_home_amt")
-                if "debt_home_amt" in col_keys
-                else 7
-            )
-            idx_credit = (
-                col_keys.index("credit_home_amt")
-                if "credit_home_amt" in col_keys
-                else 8
-            )
-
-            # Track current transaction header for grouping
-            cur_date = ""
-            cur_type = ""
-            cur_num = ""
-            cur_name = ""
-
-            for row in rows:
-                if row.get("type") != "Data":
-                    continue
-                vals = [c.get("value", "") for c in row.get("ColData", [])]
-                if not vals:
-                    continue
-
-                # Header rows carry date/type/name; continuation rows
-                # have empty date and repeat the prior header values.
-                if vals[idx_date] and vals[idx_date] != "0-00-00":
-                    cur_date = vals[idx_date]
-                    cur_type = vals[idx_type]
-                    cur_num = vals[idx_num]
-                    cur_name = vals[idx_name]
-
-                raw_code = vals[idx_code] if idx_code < len(vals) else ""
-                if not raw_code:
-                    continue
-
-                # Strip trailing zeroes after decimal
-                # (acct_num_with_extn pads e.g. "2020.10" → "2020.1")
-                code = raw_code.rstrip("0").rstrip(".") if "." in raw_code else raw_code
-
-                acct_name = vals[idx_acct] if idx_acct < len(vals) else ""
-                debit_str = vals[idx_debit] if idx_debit < len(vals) else ""
-                credit_str = vals[idx_credit] if idx_credit < len(vals) else ""
-                d = float(debit_str) if debit_str else 0.0
-                c = float(credit_str) if credit_str else 0.0
-
-                if code not in tb:
-                    tb[code] = {
-                        "name": acct_name,
-                        "debit": 0.0,
-                        "credit": 0.0,
-                    }
-                tb[code]["debit"] += d
-                tb[code]["credit"] += c
-
-                memo = vals[idx_memo] if idx_memo < len(vals) else ""
-                txn_by_account[code].append({
-                    "qbo_id": "",
-                    "type": cur_type,
-                    "num": cur_num,
-                    "date": cur_date,
-                    "name": cur_name,
-                    "memo": memo,
-                    "debit": d,
-                    "credit": c,
-                })
-                total_rows += 1
-
-        _logger.info(
-            "QBO JournalReport API: %d data rows, %d accounts",
-            total_rows, len(tb),
-        )
-        return tb, txn_by_account
-
-    def _get_qbo_trial_balance_xlsx(self):
-        """Parse Journal XLSX export and return (tb_dict, txn_dict).
-
-        Fallback when the QBO API is unavailable.
-
-        tb_dict: {account_code: {name, debit, credit}}
-        txn_dict: {account_code: [list of transaction dicts]}
-        """
-        from odoo.addons.qbo_to_odoo.models.pipelines.gl_helpers import (
-            parse_journal_export as _parse_journal_export,
-        )
-
-        conn = self.qbo_connection_id
-        if not conn.gl_export_file:
-            from odoo.exceptions import UserError
-            raise UserError(_("Upload a Journal export (XLSX) on the QBO connection first."))
-
-        file_content = base64.b64decode(conn.gl_export_file)
-        txns = _parse_journal_export(file_content)
-
-        tb = {}
-        txn_by_account = defaultdict(list)
-
-        for t in txns:
-            qbo_id = t.get("id", "")
-            for line in t.get("lines") or []:
-                code = str(line.get("account_code") or "").strip()
-                if not code:
-                    continue
-                d = float(line.get("debit") or 0.0)
-                c = float(line.get("credit") or 0.0)
-
-                if code not in tb:
-                    tb[code] = {
-                        "name": line.get("account_name", ""),
-                        "debit": 0.0,
-                        "credit": 0.0,
-                    }
-                tb[code]["debit"] += d
-                tb[code]["credit"] += c
-
-                txn_by_account[code].append({
-                    "qbo_id": qbo_id,
-                    "type": line.get("type", ""),
-                    "num": line.get("num", ""),
-                    "date": line.get("date", ""),
-                    "name": line.get("name", ""),
-                    "memo": line.get("memo", ""),
-                    "debit": d,
-                    "credit": c,
-                })
-
-        return tb, txn_by_account
+        cache = conn._ensure_journal_cache()
+        return cache.get_trial_balance()
 
     def _get_odoo_trial_balance(self):
         """Return (tb_dict, txn_dict) from all posted Odoo moves.
@@ -443,7 +299,8 @@ class QboMigrationReport(models.Model):
         ``account.payment`` rather than ``account.move``.
         """
         cr = self.env.cr
-        cr.execute("""
+        cr.execute(
+            """
             SELECT aa.id as account_id,
                    aa.code_store::jsonb->>jsonb_object_keys(aa.code_store::jsonb) as code,
                    aa.name ->> 'en_US' AS acct_name,
@@ -455,7 +312,8 @@ class QboMigrationReport(models.Model):
              WHERE am.state = 'posted'
              GROUP BY aa.id, code, acct_name
              ORDER BY code
-        """)
+        """
+        )
         tb = {}
         for row in cr.dictfetchall():
             code = row["code"]
@@ -468,7 +326,8 @@ class QboMigrationReport(models.Model):
             }
 
         # Transaction-level detail
-        cr.execute("""
+        cr.execute(
+            """
             SELECT aa.code_store::jsonb->>jsonb_object_keys(aa.code_store::jsonb) as code,
                    am.id as move_id,
                    am.name as move_name,
@@ -482,20 +341,23 @@ class QboMigrationReport(models.Model):
               JOIN account_move am ON aml.move_id = am.id
              WHERE am.state = 'posted'
              ORDER BY am.date, am.id
-        """)
+        """
+        )
         txn_by_account = defaultdict(list)
         for row in cr.dictfetchall():
             code = row["code"]
             if not code:
                 continue
-            txn_by_account[code].append({
-                "move_name": row["move_name"] or "",
-                "ref": row["ref"] or "",
-                "date": str(row["date"])[:10] if row["date"] else "",
-                "debit": float(row["debit"]),
-                "credit": float(row["credit"]),
-                "label": row["line_label"] or "",
-            })
+            txn_by_account[code].append(
+                {
+                    "move_name": row["move_name"] or "",
+                    "ref": row["ref"] or "",
+                    "date": str(row["date"])[:10] if row["date"] else "",
+                    "debit": float(row["debit"]),
+                    "credit": float(row["credit"]),
+                    "label": row["line_label"] or "",
+                }
+            )
 
         return tb, txn_by_account
 
@@ -516,31 +378,40 @@ class QboMigrationReport(models.Model):
                     odoo_by_ref[txn["ref"]].append(txn)
 
             for txn in qbo_lines:
-                txn_vals.append(Command.create({
-                    "account_code": code,
-                    "source": "qbo",
-                    "qbo_id": str(txn.get("qbo_id", "")),
-                    "qbo_type": _QBO_TYPE_LABELS.get(
-                        txn.get("type", ""), txn.get("type", ""),
-                    ),
-                    "date": txn.get("date") or False,
-                    "qbo_debit": txn.get("debit", 0),
-                    "qbo_credit": txn.get("credit", 0),
-                    "memo": txn.get("memo", ""),
-                    "partner_name": txn.get("name", ""),
-                }))
+                txn_vals.append(
+                    Command.create(
+                        {
+                            "account_code": code,
+                            "source": "qbo",
+                            "qbo_id": str(txn.get("qbo_id", "")),
+                            "qbo_type": _QBO_TYPE_LABELS.get(
+                                txn.get("type", ""),
+                                txn.get("type", ""),
+                            ),
+                            "date": txn.get("date") or False,
+                            "qbo_debit": txn.get("debit", 0),
+                            "qbo_credit": txn.get("credit", 0),
+                            "memo": txn.get("memo", ""),
+                            "partner_name": txn.get("name", ""),
+                        }
+                    )
+                )
 
             for txn in odoo_lines:
-                txn_vals.append(Command.create({
-                    "account_code": code,
-                    "source": "odoo",
-                    "odoo_move_name": txn.get("move_name", ""),
-                    "odoo_ref": txn.get("ref", ""),
-                    "date": txn.get("date") or False,
-                    "odoo_debit": txn.get("debit", 0),
-                    "odoo_credit": txn.get("credit", 0),
-                    "memo": txn.get("label", ""),
-                }))
+                txn_vals.append(
+                    Command.create(
+                        {
+                            "account_code": code,
+                            "source": "odoo",
+                            "odoo_move_name": txn.get("move_name", ""),
+                            "odoo_ref": txn.get("ref", ""),
+                            "date": txn.get("date") or False,
+                            "odoo_debit": txn.get("debit", 0),
+                            "odoo_credit": txn.get("credit", 0),
+                            "memo": txn.get("label", ""),
+                        }
+                    )
+                )
 
         return txn_vals
 
@@ -551,7 +422,9 @@ class QboMigrationReportTBLine(models.Model):
     _order = "status desc, balance_diff desc"
 
     report_id = fields.Many2one(
-        "qbo.migration.report", required=True, ondelete="cascade",
+        "qbo.migration.report",
+        required=True,
+        ondelete="cascade",
     )
     account_code = fields.Char("Account Code")
     qbo_acct_name = fields.Char("QBO Name")
@@ -563,12 +436,14 @@ class QboMigrationReportTBLine(models.Model):
     odoo_credit = fields.Float("Odoo Credit", digits=(16, 2))
     odoo_balance = fields.Float("Odoo Balance", digits=(16, 2))
     balance_diff = fields.Float("Difference", digits=(16, 2))
-    status = fields.Selection([
-        ("match", "Match"),
-        ("drift", "Drift"),
-        ("qbo_only", "QBO Only"),
-        ("odoo_only", "Odoo Only"),
-    ])
+    status = fields.Selection(
+        [
+            ("match", "Match"),
+            ("drift", "Drift"),
+            ("qbo_only", "QBO Only"),
+            ("odoo_only", "Odoo Only"),
+        ]
+    )
 
 
 class QboMigrationReportTxnLine(models.Model):
@@ -577,13 +452,17 @@ class QboMigrationReportTxnLine(models.Model):
     _order = "account_code, date, source"
 
     report_id = fields.Many2one(
-        "qbo.migration.report", required=True, ondelete="cascade",
+        "qbo.migration.report",
+        required=True,
+        ondelete="cascade",
     )
     account_code = fields.Char("Account")
-    source = fields.Selection([
-        ("qbo", "QBO Export"),
-        ("odoo", "Odoo"),
-    ])
+    source = fields.Selection(
+        [
+            ("qbo", "QBO Export"),
+            ("odoo", "Odoo"),
+        ]
+    )
     date = fields.Date()
     memo = fields.Char()
     partner_name = fields.Char("Partner")

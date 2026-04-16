@@ -507,7 +507,7 @@ class QboAccountImporter(models.AbstractModel):
         "qbo.sales.receipt.importer",
         "qbo.refund.receipt.importer",
         "qbo.cc.payment.importer",
-        "qbo.xlsx.fallback",
+        "qbo.journal.fallback",
     ],
 )
 class QboAccountFinalizer(models.AbstractModel):

@@ -354,28 +354,17 @@ class QboConnection(models.Model):
     last_invoice_sync = fields.Datetime(string="Last Invoice Sync")
     last_bill_sync = fields.Datetime(string="Last Bill Sync")
     last_journal_entry_sync = fields.Datetime(string="Last Journal Entry Sync")
-
-    # Journal export for transactions not available via the API
-    # (Payroll Cheques, Sales Tax Adjustments, Inventory Starting Values)
-    gl_export_file = fields.Binary(
-        string="Journal Export (XLSX)",
-        help="Upload the QBO Journal export (All Dates, Excel format) "
-        "to import Payroll Cheques and other transactions not available "
-        "via the QBO API. Supports both with and without Transaction ID column.",
-    )
-    gl_export_filename = fields.Char(string="GL Export Filename")
-
-    use_gl_first = fields.Boolean(
-        string="Use GL-first import",
-        default=True,
-        help=(
-            "If enabled, the Import All action uses the QBO JournalReport API "
-            "as the primary source for all postings, with enriched records for "
-            "invoices, bills, payments, and credit memos. Disabling falls back "
-            "to the original per-entity API import pipelines."
-        ),
+    last_journal_cache_sync = fields.Datetime(
+        string="Last Journal Cache Refresh",
+        readonly=True,
     )
 
+    # Journal cache
+    journal_cache_id = fields.Many2one(
+        "qbo.journal.cache",
+        string="Journal Cache",
+        readonly=True,
+    )
 
     # Connection state
     state = fields.Selection(
@@ -543,9 +532,7 @@ class QboConnection(models.Model):
         if where:
             query += f" WHERE {where}"
         url = f"{client.base_url}/query"
-        response = requests.get(
-            url, headers=client.headers, params={"query": query}
-        )
+        response = requests.get(url, headers=client.headers, params={"query": query})
         if response.status_code == 401:
             client.connection.refresh_access_token()
             response = requests.get(
@@ -969,15 +956,60 @@ class QboConnection(models.Model):
         self.ensure_one()
         return self._execute_all_pipelines()
 
+    def action_refresh_journal_cache(self) -> dict:
+        """Refresh the cached QBO JournalReport data."""
+        self.ensure_one()
+        cache = self._ensure_journal_cache(force_refresh=True)
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Journal Cache Refreshed"),
+                "message": _(
+                    "Cached %d transactions (%d rows), "
+                    "period %s to %s."
+                )
+                % (
+                    len(cache.transaction_ids),
+                    cache.row_count,
+                    cache.date_from,
+                    cache.date_to,
+                ),
+                "type": "success",
+                "sticky": False,
+            },
+        }
+
+    def _ensure_journal_cache(self, force_refresh=False):
+        """Return the journal cache, creating/refreshing if needed.
+
+        Called by the fallback pipeline and the migration report to
+        guarantee a populated cache exists before reading from it.
+        """
+        self.ensure_one()
+        cache = self.journal_cache_id
+        if not cache:
+            cache = self.env["qbo.journal.cache"].create({
+                "qbo_connection_id": self.id,
+            })
+            self.journal_cache_id = cache
+            force_refresh = True
+
+        if force_refresh or not cache.fetch_date:
+            cache.action_refresh()
+            self.last_journal_cache_sync = fields.Datetime.now()
+
+        return cache
+
     def action_generate_validation_report(self) -> dict:
         """Create and open a QBO migration validation report."""
         self.ensure_one()
-        if not self.gl_export_file:
-            raise UserError(_("Please upload a Journal export (XLSX) first."))
 
-        report = self.env["qbo.migration.report"].create({
-            "qbo_connection_id": self.id,
-        })
+        report = self.env["qbo.migration.report"].create(
+            {
+                "qbo_connection_id": self.id,
+            }
+        )
         report.action_run()
 
         return {

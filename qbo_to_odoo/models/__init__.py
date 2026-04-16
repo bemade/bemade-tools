@@ -8,6 +8,7 @@ from . import product_category
 from . import product_product
 from . import res_partner
 from . import qbo_connection
+from . import qbo_journal_cache
 from . import qbo_migration_report
 from . import sale_order
 from . import purchase_order

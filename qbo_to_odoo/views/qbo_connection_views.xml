@@ -52,22 +52,19 @@
                     </group>
                     <group string="GL Import">
                         <group>
-                            <field name="gl_export_file" filename="gl_export_filename"
-                                   string="Journal Export (XLSX)"/>
-                            <field name="gl_export_filename" invisible="1"/>
+                            <button name="action_refresh_journal_cache"
+                                    string="Refresh Journal Cache"
+                                    type="object"
+                                    class="btn-secondary"
+                                    invisible="state != 'connected'"
+                                    help="Fetch the JournalReport from QBO API and cache it locally for use by the fallback pipeline and migration report."/>
                             <button name="action_generate_validation_report"
                                     string="Open Validation Report"
                                     type="object"
                                     class="btn-secondary"
                                     help="Create a migration validation report comparing the Journal export against Odoo posted entries."/>
                         </group>
-                        <group>
-                            <p class="text-muted">
-                                Upload the QBO Journal export (All Dates, XLSX)
-                                to import Payroll Cheques and other non-API
-                                transaction types, and for validation.
-                            </p>
-                        </group>
+                        <group/>
                     </group>
                     <notebook>
                         <page string="Import Actions" invisible="state != 'connected'">
@@ -87,6 +84,7 @@
                                 <field name="last_invoice_sync" readonly="1"/>
                                 <field name="last_bill_sync" readonly="1"/>
                                 <field name="last_journal_entry_sync" readonly="1"/>
+                                <field name="last_journal_cache_sync" readonly="1"/>
                             </group>
                         </page>
                     </notebook>

@@ -4,3 +4,6 @@ access_qbo_connection_user,qbo.connection.user,model_qbo_connection,account.grou
 access_qbo_migration_report,qbo.migration.report,model_qbo_migration_report,base.group_system,1,1,1,1
 access_qbo_migration_report_tb_line,qbo.migration.report.tb.line,model_qbo_migration_report_tb_line,base.group_system,1,1,1,1
 access_qbo_migration_report_txn_line,qbo.migration.report.txn.line,model_qbo_migration_report_txn_line,base.group_system,1,1,1,1
+access_qbo_journal_cache,qbo.journal.cache,model_qbo_journal_cache,base.group_system,1,1,1,1
+access_qbo_journal_cache_transaction,qbo.journal.cache.transaction,model_qbo_journal_cache_transaction,base.group_system,1,1,1,1
+access_qbo_journal_cache_line,qbo.journal.cache.line,model_qbo_journal_cache_line,base.group_system,1,1,1,1
