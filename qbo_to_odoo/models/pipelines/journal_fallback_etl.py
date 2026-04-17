@@ -41,7 +41,8 @@ _logger = logging.getLogger(__name__)
 # QBO versions would double-count.  They appear as "unimported" in logs but
 # the FX drift they represent is structural (QBO vs Odoo rate differences).
 _ALLOWED_TYPES = frozenset({
-    "Payroll Cheque",
+    "Payroll Cheque",   # XLSX export name
+    "Paycheque",        # API JournalReport name
     "Inventory Starting Value",
     "Tax Payment",
     "Sales Tax Payment",
