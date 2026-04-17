@@ -35,6 +35,7 @@ _QBO_TYPE_LABELS = {
     "Credit Card Credit": "CC Credit",
     "Credit Card Expense": "CC Expense",
     "Payroll Cheque": "Payroll Cheque",
+    "Paycheque": "Payroll Cheque",
     "Supplier Credit": "Supplier Credit",
     "Inventory Starting Value": "Inventory Starting Value",
 }

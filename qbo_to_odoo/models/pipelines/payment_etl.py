@@ -76,7 +76,7 @@ def _pair_credits_to_invoices(credits, invoices, qbo_id):
         "qbo.vendor.credit.importer",
     ],
     chunk_size=50,
-    multiprocessing_threshold=50,
+    multiprocessing_threshold=99999,
 )
 class QboPaymentImporter(models.AbstractModel):
     """ETL Pipeline for importing QBO Payments as account.payment objects."""
