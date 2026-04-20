@@ -201,6 +201,7 @@ class AccountMoveInvoiceETLImporter(models.AbstractModel):
             f"Triggering recalculation of invoice/billing status for {len(orders)} {orders._name}"
         )
         orders._compute_invoice_status()
+        self.env.flush_all()
 
 
 @ETL.pipeline(
@@ -239,6 +240,7 @@ class AccountMoveInvoicePostProcessor(models.AbstractModel):
             f"Triggering recalculation of invoice/billing status for {len(orders)} {orders._name}"
         )
         orders._compute_invoice_status()
+        self.env.flush_all()
 
     @ETL.extract("oinv")
     def extract_for_post_processing(self, ctx: ETLContext):

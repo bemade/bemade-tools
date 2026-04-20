@@ -381,7 +381,10 @@ class AccountMoveCommon(models.AbstractModel):
         # As there are open SAP invoices that we have imported, we need to deduct
         # the open Odoo invoice quantity stemming from SAP invoices
 
-        # Since this is a stored field, we now need to trigger recalculation
+        # Since this is a stored field, we now need to trigger recalculation.
+        # Invalidate the ORM cache for sap_qty_invoiced first so the compute
+        # reads the freshly-written DB values instead of the pre-UPDATE cache.
+        self.env[model].invalidate_model(["sap_qty_invoiced"])
         lines = self.env[model].search([("sap_qty_invoiced", "!=", False)])
         self._trigger_recomputation(lines)
 
