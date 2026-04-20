@@ -61,6 +61,7 @@ class PurchaseOrderLine(models.Model):
         "qty_received",
         "product_uom_qty",
         "order_id.state",
+        "sap_qty_invoiced",
     )
     def _compute_qty_invoiced(self):
         super()._compute_qty_invoiced()
