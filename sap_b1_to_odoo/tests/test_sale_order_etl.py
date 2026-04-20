@@ -146,13 +146,14 @@ class TestSapSaleOrderInvoiceStatus(TransactionCase):
         )
 
         # Create and post a partial invoice for 4 units
-        ctx = {"default_move_type": "out_invoice"}
+        # active_ids must be in context at create() time so sale_order_ids default works
+        ctx = {"default_move_type": "out_invoice", "active_ids": so.ids}
         wiz = (
             self.env["sale.advance.payment.inv"]
             .with_context(**ctx)
             .create({"advance_payment_method": "delivered"})
         )
-        wiz.with_context(active_ids=so.ids).create_invoices()
+        wiz.create_invoices()
         invoice = so.invoice_ids
         self.assertTrue(invoice, "Invoice should have been created")
         invoice.invoice_line_ids.quantity = 4.0
