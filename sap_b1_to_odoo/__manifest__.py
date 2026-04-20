@@ -50,6 +50,7 @@
         "data/res_config_settings.xml",
         "data/sap_database_setup.xml",
         "data/menus_actions.xml",
+        "data/remediation_server_action.xml",
         "views/sap_database_views.xml",
         "views/sap_field_views.xml",
         "views/mrp_views.xml",
