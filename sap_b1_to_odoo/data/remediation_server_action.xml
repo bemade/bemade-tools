@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Bemade Inc.
+    Copyright (C) 2024-June Bemade Inc. (<https://www.bemade.org>).
+    Author: Marc Durepos (Contact : marc@bemade.org)
+    License: LGPL-3
+-->
+<odoo noupdate="1">
+    <!--
+        Remediation server action for SAP-migrated sale orders with stale
+        invoice_status.  Run from Settings > Technical > Server Actions.
+
+        Safe to run multiple times (idempotent).  Only touches invoice_status
+        (computed field); does not alter qty_delivered, qty_invoiced, or
+        sap_qty_invoiced directly.  Logs the count of orders moved to
+        'to invoice' via Odoo's log() builtin.
+
+        AC#6: non-destructive, idempotent, logs count, no code change required.
+    -->
+    <record id="remediate_stale_invoice_status" model="ir.actions.server">
+        <field name="name">RWI: Remediate stale invoice_status on SAP-migrated SOs</field>
+        <field name="model_id" ref="sale.model_sale_order"/>
+        <field name="binding_model_id" ref="sale.model_sale_order"/>
+        <field name="state">code</field>
+        <field name="code">
+orders = env['sale.order'].search([
+    ('sap_docnum', '!=', 0),
+    ('state', 'in', ['sale', 'done']),
+])
+# Invalidate ORM cache so stale sap_qty_invoiced is re-read from DB
+env['sale.order.line'].invalidate_model(['sap_qty_invoiced'])
+# Force recompute on lines first, then headers
+lines = orders.order_line
+lines._compute_qty_invoiced()
+lines._compute_qty_to_invoice()
+lines._compute_invoice_status()
+orders._compute_invoice_status()
+env.flush_all()
+# Count what actually moved to 'to invoice'
+changed = orders.filtered(lambda o: o.invoice_status == 'to invoice')
+log(f"Remediation complete: {len(orders)} orders scanned, {len(changed)} now 'to invoice'.")
+        </field>
+    </record>
+</odoo>
