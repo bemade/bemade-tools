@@ -37,7 +37,7 @@ class SaleOrderLine(models.Model):
         "Another line with this line number and docentry already exists for this SAP table.",
     )
 
-    @api.depends("invoice_lines.move_id.state", "invoice_lines.quantity")
+    @api.depends("invoice_lines.move_id.state", "invoice_lines.quantity", "sap_qty_invoiced")
     def _compute_qty_invoiced(self):
         super()._compute_qty_invoiced()
         # Pre-fetch quantities
