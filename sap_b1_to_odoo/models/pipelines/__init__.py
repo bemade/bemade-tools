@@ -29,8 +29,6 @@ from . import account_move_gl_correction_etl
 # from . import account_move_etl
 # from . import account_move_bill_etl
 # from . import account_move_credit_memo_etl
-# from . import account_payment_etl
-# from . import account_credit_memo_reconciliation_etl
 from . import account_internal_reconciliation_etl
 # Disabled: force-paid creates write-off JEs against a bank account, causing
 # GL drift. With correct invoice totals (expense lines) and expanded ITR type
