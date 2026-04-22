@@ -5,8 +5,23 @@ account.partial.reconcile / account.full.reconcile — it records which
 journal items were matched together (e.g. an invoice with its payment).
 
 This pipeline reads ITR groups from SAP and directly reconciles the
-corresponding receivable/payable lines in Odoo.  No journal entries are
-created; we simply call reconcile() on the existing lines.
+corresponding receivable/payable lines in Odoo using a FIFO-bipartite
+allocator that walks members in SAP-recorded ``lineseq`` order.
+
+Design
+------
+Each OITR group contains a set of debit-side and credit-side members
+(determined by ``iscredit``).  The allocator walks both sides in
+``lineseq`` order, consuming each member's ``reconsum`` amount, and
+emits ``(debit_aml, credit_aml, amount)`` triples.  Each triple is
+turned into an ``account.partial.reconcile`` directly — bypassing
+Odoo's greedy ``_prepare_reconciliation_plan`` — using the same low-
+level pattern as ``qbo_to_odoo.move_posting_helpers.reconcile_at_amount``
+but generalised over an arbitrary bipartite group.
+
+After all partials for the group are created, a single
+``account.full.reconcile`` is emitted when every member's residual is
+zero (or within currency epsilon).
 
 Works with both enriched moves (sap_table = oinv/opch/etc.) and generic
 JDT1-pipeline moves (sap_table = ojdt).
@@ -17,6 +32,7 @@ from collections import defaultdict
 
 from odoo import models
 from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
+from odoo.fields import Command
 
 _logger = logging.getLogger(__name__)
 
@@ -24,14 +40,14 @@ _logger = logging.getLogger(__name__)
 #
 # Types 13/14/18/19 have enriched moves (sap_table = oinv/orin/opch/orpc).
 # All other types fall back to generic JDT1 moves (sap_table = 'ojdt')
-# via the OJDT createdby → transid reverse lookup.
+# via the OJDT createdby -> transid reverse lookup.
 _SRCOBJTYP_MAP = {
     # Enriched document types
     "13": {"sap_table": "oinv", "transtype": "13"},   # A/R Invoice
     "14": {"sap_table": "orin", "transtype": "14"},   # A/R Credit Memo
     "18": {"sap_table": "opch", "transtype": "18"},   # A/P Invoice
     "19": {"sap_table": "orpc", "transtype": "19"},   # A/P Credit Memo
-    # Payment types (no enriched moves — always use OJDT fallback)
+    # Payment types (no enriched moves -- always use OJDT fallback)
     "24": {"sap_table": "orct", "transtype": "24"},   # Incoming Payment
     "46": {"sap_table": "ovpm", "transtype": "46"},   # Outgoing Payment
     # Inventory & production (OJDT fallback)
@@ -52,26 +68,79 @@ _SRCOBJTYP_MAP = {
 }
 
 
-def _reconcile_capped(lines_with_caps):
-    """Reconcile lines with per-line amount caps from SAP reconsum.
+# ---------------------------------------------------------------------------
+# Pure allocator -- no Odoo dependency; testable in isolation
+# ---------------------------------------------------------------------------
 
-    Like ``account.move.line.reconcile()`` but caps each line's residual
-    to its SAP ``reconsum`` amount before the reconciliation algorithm
-    runs.  This prevents Odoo's greedy matching from over-allocating one
-    member at the expense of another.
+def allocate_fifo(debits, credits):
+    """FIFO bipartite allocator for a single OITR account bucket.
+
+    Walks debit-side and credit-side members in SAP-recorded ``lineseq``
+    order (callers must pre-sort by ``lineseq`` before calling), consuming
+    each member's ``reconsum`` amount and emitting ``(debit_aml,
+    credit_aml, amount)`` triples.
 
     Args:
-        lines_with_caps: list of ``(account.move.line, cap_amount)``
-            tuples.  All lines must be on the same account.
-            ``cap_amount`` is the absolute SAP reconsum for that member.
-    """
-    from odoo.fields import Command
+        debits: list of ``{"aml": account.move.line, "reconsum": float}``
+            dicts, **already sorted by lineseq**.
+        credits: list of ``{"aml": account.move.line, "reconsum": float}``
+            dicts, **already sorted by lineseq**.
 
-    AML = lines_with_caps[0][0].env["account.move.line"]
-    amls = AML.browse()
-    for line, _ in lines_with_caps:
-        amls |= line
-    caps = {line.id: cap for line, cap in lines_with_caps}
+    Returns:
+        List of ``(debit_aml, credit_aml, amount)`` triples.  Amount is
+        always positive and in the transaction currency (the same currency
+        that SAP's ``reconsum`` / ``reconsumsc`` is expressed in).
+    """
+    d_caps = [d["reconsum"] for d in debits]
+    c_caps = [c["reconsum"] for c in credits]
+
+    triples = []
+    di = 0
+    ci = 0
+
+    while di < len(debits) and ci < len(credits):
+        # Advance past exhausted entries
+        while di < len(debits) and d_caps[di] < 0.005:
+            di += 1
+        while ci < len(credits) and c_caps[ci] < 0.005:
+            ci += 1
+
+        if di >= len(debits) or ci >= len(credits):
+            break
+
+        amount = round(min(d_caps[di], c_caps[ci]), 2)
+        triples.append((debits[di]["aml"], credits[ci]["aml"], amount))
+        d_caps[di] = round(d_caps[di] - amount, 2)
+        c_caps[ci] = round(c_caps[ci] - amount, 2)
+
+    return triples
+
+
+# ---------------------------------------------------------------------------
+# ORM helpers -- require an Odoo environment
+# ---------------------------------------------------------------------------
+
+def _create_partial_for_triple(debit_aml, credit_aml, amount_currency):
+    """Create one ``account.partial.reconcile`` for a FIFO triple.
+
+    Mirrors ``reconcile_at_amount`` from
+    ``qbo_to_odoo.move_posting_helpers`` but operates on a pre-determined
+    (debit_aml, credit_aml, amount) triple rather than finding the pair
+    itself.  Exchange difference entries are created by the standard Odoo
+    machinery if the two lines are in different currencies.
+
+    Args:
+        debit_aml: The debit-side ``account.move.line``.
+        credit_aml: The credit-side ``account.move.line``.
+        amount_currency: Exact amount to reconcile in the transaction
+            currency (from SAP ``reconsum``).
+
+    Returns:
+        The created ``account.partial.reconcile`` recordset (may be empty
+        if Odoo's planner finds nothing to create).
+    """
+    AML = debit_aml.env["account.move.line"]
+    amls = debit_aml + credit_aml
 
     plan_list = [{"amls": amls, "aml_ids": set(amls.ids)}]
 
@@ -79,14 +148,14 @@ def _reconcile_capped(lines_with_caps):
     with amls.move_id._check_balanced(move_container), \
          amls.move_id._sync_dynamic_lines(move_container):
 
-        # Prefetch (mirrors _reconcile_plan_with_sync)
-        amls.move_id  # noqa: B018
-        amls.matched_debit_ids  # noqa: B018
-        amls.matched_credit_ids  # noqa: B018
+        amls.move_id           # prefetch
+        amls.matched_debit_ids
+        amls.matched_credit_ids
 
         pre_hook_data = amls._reconcile_pre_hook()
 
-        # Build values map with capped residuals
+        # Build values map -- cap both sides to `amount_currency` so the
+        # standard plan builder produces exactly one partial at that amount.
         aml_values_map = {}
         for aml in amls:
             vals = {
@@ -95,7 +164,7 @@ def _reconcile_capped(lines_with_caps):
                 "amount_residual_currency": aml.amount_residual_currency,
                 "parent_state": aml.parent_state,
             }
-            cap = caps.get(aml.id, 0)
+            cap = abs(amount_currency)
             if cap and abs(vals["amount_residual_currency"]) > cap + 0.005:
                 sign = -1 if vals["amount_residual_currency"] < 0 else 1
                 rate = (
@@ -107,7 +176,6 @@ def _reconcile_capped(lines_with_caps):
                 vals["amount_residual"] = round(sign * cap * rate, 2)
             aml_values_map[aml] = vals
 
-        # Prepare partials + exchange diffs
         partials_values_list = []
         exchange_diff_values_list = []
         all_plan_results = []
@@ -122,15 +190,12 @@ def _reconcile_capped(lines_with_caps):
                     results.get("exchange_values")
                     and results["exchange_values"]["move_values"]["line_ids"]
                 ):
-                    exchange_diff_values_list.append(
-                        results["exchange_values"]
-                    )
+                    exchange_diff_values_list.append(results["exchange_values"])
 
         if not partials_values_list:
             amls._reconcile_post_hook(pre_hook_data)
-            return
+            return AML.env["account.partial.reconcile"]
 
-        # Create partials
         partials = AML.env["account.partial.reconcile"].create(
             partials_values_list
         )
@@ -140,7 +205,6 @@ def _reconcile_capped(lines_with_caps):
             plan["partials"] = partials[start_range:start_range + size]
             start_range += size
 
-        # Create exchange difference moves
         exchange_moves = AML._create_exchange_difference_moves(
             exchange_diff_values_list
         )
@@ -162,41 +226,51 @@ def _reconcile_capped(lines_with_caps):
                     used_exchange_moves.add(exchange_move)
                     used_partials.add(partial)
 
-        # Full reconcile: check if all lines are now fully matched
-        number2lines = amls._reconciled_by_number()
-        for plan in plan_list:
-            involved = plan["amls"]._filter_reconciled_by_number(
-                number2lines
-            )
-            has_multi = len(involved.currency_id) > 1
-            if all(
-                aml.reconciled
-                or (
-                    has_multi
-                    and aml.company_currency_id.is_zero(aml.amount_residual)
-                )
-                or (
-                    not has_multi
-                    and aml.currency_id.is_zero(
-                        aml.amount_residual_currency
-                    )
-                )
-                for aml in involved
-                if aml.matched_debit_ids or aml.matched_credit_ids
-            ):
-                involved_partials = (
-                    involved.matched_debit_ids + involved.matched_credit_ids
-                )
-                AML.env["account.full.reconcile"].create({
-                    "partial_reconcile_ids": [
-                        Command.link(p.id) for p in involved_partials
-                    ],
-                    "reconciled_line_ids": [
-                        Command.link(a.id) for a in involved
-                    ],
-                })
-
         amls._reconcile_post_hook(pre_hook_data)
+
+    return partials
+
+
+def _stitch_full_reconcile(all_amls):
+    """Emit ``account.full.reconcile`` if every member's residual is zero.
+
+    Args:
+        all_amls: ``account.move.line`` recordset containing all members
+            of the group (across all account buckets that were reconciled).
+    """
+    AML = all_amls.env["account.move.line"]
+    number2lines = all_amls._reconciled_by_number()
+    involved = all_amls._filter_reconciled_by_number(number2lines)
+    if not involved:
+        involved = all_amls
+
+    has_multi = len(involved.currency_id) > 1
+    if all(
+        aml.reconciled
+        or (
+            has_multi
+            and aml.company_currency_id.is_zero(aml.amount_residual)
+        )
+        or (
+            not has_multi
+            and aml.currency_id.is_zero(aml.amount_residual_currency)
+        )
+        for aml in involved
+        if aml.matched_debit_ids or aml.matched_credit_ids
+    ):
+        involved_partials = (
+            involved.matched_debit_ids | involved.matched_credit_ids
+        )
+        if not involved_partials:
+            return
+        AML.env["account.full.reconcile"].create({
+            "partial_reconcile_ids": [
+                Command.link(p.id) for p in involved_partials
+            ],
+            "reconciled_line_ids": [
+                Command.link(a.id) for a in involved
+            ],
+        })
 
 
 @ETL.pipeline(
@@ -208,7 +282,7 @@ def _reconcile_capped(lines_with_caps):
     ],
     multiprocessing_threshold=500,
     chunk_size=200,
-    max_workers=8,
+    max_workers=4,
 )
 class AccountInternalReconciliation(models.AbstractModel):
     _name = "account.internal.reconciliation"
@@ -216,17 +290,26 @@ class AccountInternalReconciliation(models.AbstractModel):
 
     @ETL.extract("itr1")
     def extract_internal_reconciliations(self, ctx: ETLContext):
-        """Extract all ITR1 lines grouped by reconnum."""
+        """Extract all ITR1 lines grouped by reconnum.
+
+        The query now also fetches ``lineseq`` (for FIFO ordering),
+        ``account`` (GL account code, for per-account bucketing) and
+        ``reconsumsc`` (source-currency reconsum, available for cross-
+        currency defensive handling).
+        """
         _logger.info("[ITR] Extracting reconciliation groups from SAP...")
 
         ctx.cr.execute(
             """
             SELECT
                 r.reconnum,
+                r.lineseq,
                 r.srcobjtyp,
                 r.srcobjabs::integer AS doc_id,
                 r.iscredit,
-                r.reconsum AS reconciled_amount
+                r.reconsum   AS reconciled_amount,
+                r.reconsumsc AS reconciled_amount_sc,
+                r.account
             FROM itr1 r
             JOIN oitr h ON r.reconnum = h.reconnum
             WHERE h.canceled = 'N'
@@ -235,7 +318,7 @@ class AccountInternalReconciliation(models.AbstractModel):
         )
         all_lines = ctx.cr.dictfetchall()
 
-        # Group by reconnum
+        # Group by reconnum (ORDER BY reconnum, lineseq is preserved above)
         groups_by_reconnum = defaultdict(list)
         for line in all_lines:
             groups_by_reconnum[line["reconnum"]].append(line)
@@ -272,7 +355,7 @@ class AccountInternalReconciliation(models.AbstractModel):
                 ojdt_transid_map[(srcobjtyp, row[0])] = row[1]
 
         # Pre-load Odoo moves: try enriched table first, fall back to ojdt
-        doc_move_map = {}  # "table:docentry" -> move_id
+        doc_move_map = {}  # (srcobjtyp, docentry) -> move_id
 
         for srcobjtyp, doc_ids in doc_ids_by_type.items():
             if not doc_ids:
@@ -304,7 +387,6 @@ class AccountInternalReconciliation(models.AbstractModel):
                         ("sap_table", "=", "ojdt"),
                         ("state", "=", "posted"),
                     ])
-                    # Map back: we need (srcobjtyp, original_doc_id) -> move_id
                     transid_to_move = {m.sap_docentry: m.id for m in ojdt_moves}
                     for did in missing:
                         transid = ojdt_transid_map.get((srcobjtyp, did))
@@ -330,11 +412,16 @@ class AccountInternalReconciliation(models.AbstractModel):
 
     @ETL.transform()
     def transform_internal_reconciliations(self, ctx: ETLContext, extracted):
-        """Map each reconnum group to Odoo move IDs with reconsum caps.
+        """Map each reconnum group to Odoo move IDs with lineseq metadata.
 
-        Only keeps groups where at least 2 distinct Odoo moves are found.
-        Each member carries its SAP ``reconsum`` so the load phase can cap
-        each line's contribution and avoid greedy over-allocation.
+        Each member now carries ``lineseq`` (for FIFO ordering),
+        ``reconsum`` (absolute allocated amount), ``iscredit`` (side), and
+        ``account`` (GL code used for per-account bucketing in load phase).
+
+        Groups where *any* member's Odoo move is missing are dropped
+        entirely with a warning: a partial allocation would corrupt the
+        books by reconciling a sub-set of the group and leaving orphaned
+        residuals.
         """
         data = extracted.get("extract_internal_reconciliations")
         groups = data.records if data else []
@@ -342,22 +429,38 @@ class AccountInternalReconciliation(models.AbstractModel):
         doc_move_map = cache.get("doc_move_map", {})
 
         reconciliation_groups = []
+        dropped_partial = 0
 
         for group in groups:
             reconnum = group["reconnum"]
             members = []
-            seen_move_ids = set()
+            group_ok = True
 
             for line in group["lines"]:
                 mid = doc_move_map.get((line["srcobjtyp"], line["doc_id"]))
-                if mid:
-                    members.append({
-                        "move_id": mid,
-                        "reconsum": abs(float(line["reconciled_amount"])),
-                        "iscredit": line["iscredit"],
-                    })
-                    seen_move_ids.add(mid)
+                if mid is None:
+                    # Member not in Odoo -- drop the whole group
+                    group_ok = False
+                    _logger.debug(
+                        "[ITR] reconnum %s: member srcobjtyp=%s doc_id=%s not "
+                        "found in Odoo -- dropping group",
+                        reconnum, line["srcobjtyp"], line["doc_id"],
+                    )
+                    break
+                members.append({
+                    "move_id": mid,
+                    "lineseq": int(line["lineseq"]),
+                    "reconsum": abs(float(line["reconciled_amount"])),
+                    "iscredit": line["iscredit"],
+                    "account": line["account"],
+                })
 
+            if not group_ok:
+                dropped_partial += 1
+                continue
+
+            # Need at least two distinct moves
+            seen_move_ids = {m["move_id"] for m in members}
             if len(seen_move_ids) >= 2:
                 reconciliation_groups.append({
                     "reconnum": reconnum,
@@ -365,8 +468,9 @@ class AccountInternalReconciliation(models.AbstractModel):
                 })
 
         _logger.info(
-            "[ITR] %d groups have 2+ mapped moves (out of %d total)",
-            len(reconciliation_groups), len(groups),
+            "[ITR] %d groups ready (out of %d total); %d dropped "
+            "(missing Odoo move)",
+            len(reconciliation_groups), len(groups), dropped_partial,
         )
         return reconciliation_groups
 
@@ -374,9 +478,22 @@ class AccountInternalReconciliation(models.AbstractModel):
     def load_internal_reconciliations(self, ctx: ETLContext, transformed):
         """Reconcile receivable/payable lines within each ITR group.
 
-        Uses SAP's ``reconsum`` to cap each line's contribution, preventing
-        Odoo's greedy reconciliation from misallocating amounts across
-        members of the group.
+        For each group:
+
+        1. **Idempotency guard** -- skip if any ``account.partial.reconcile``
+           already links two of the group's member AMLs.
+        2. **AML selection** -- for each member, find the AR/AP line on its
+           move that matches the ``iscredit`` side; warn if multiple
+           candidates exist (but continue with the largest-residual one).
+        3. **Per-account bucket** -- bucket AMLs by ``account_id``; OITR
+           groups spanning multiple AR/AP accounts are handled by running
+           the allocator independently per account.
+        4. **FIFO allocate** -- call :func:`allocate_fifo` (sorted by
+           ``lineseq``) to get ``(debit_aml, credit_aml, amount)`` triples.
+        5. **Create partials** -- one ``account.partial.reconcile`` per
+           triple via :func:`_create_partial_for_triple`.
+        6. **Full reconcile** -- stitch a single ``account.full.reconcile``
+           when every member's residual is zero.
         """
         groups = transformed.get("transform_internal_reconciliations", [])
 
@@ -396,12 +513,38 @@ class AccountInternalReconciliation(models.AbstractModel):
 
         for group in groups:
             reconnum = group["reconnum"]
+            members = group["members"]
 
-            # Build (line, cap) pairs from members.
-            # Each member maps to the unreconciled receivable/payable line(s)
-            # on its move, capped at the SAP reconsum amount.
-            lines_with_caps = []
-            for member in group["members"]:
+            # -- Step 1: per-group idempotency guard -----------------------
+            # Collect all AR/AP AML candidates and check for existing
+            # partials that already link two of them.
+            candidate_aml_ids = set()
+            for member in members:
+                move = moves_by_id.get(member["move_id"])
+                if not move:
+                    continue
+                for aml in move.line_ids:
+                    if aml.account_id.account_type in (
+                        "asset_receivable", "liability_payable"
+                    ):
+                        candidate_aml_ids.add(aml.id)
+
+            if candidate_aml_ids:
+                existing = ctx.env["account.partial.reconcile"].search([
+                    ("debit_move_id", "in", list(candidate_aml_ids)),
+                    ("credit_move_id", "in", list(candidate_aml_ids)),
+                ], limit=1)
+                if existing:
+                    _logger.debug(
+                        "[ITR] group %s already reconciled -- skipped",
+                        reconnum,
+                    )
+                    already_done += 1
+                    continue
+
+            # -- Step 2: resolve AMLs from moves ---------------------------
+            member_amls = []
+            for member in members:
                 move = moves_by_id.get(member["move_id"])
                 if not move:
                     continue
@@ -412,44 +555,89 @@ class AccountInternalReconciliation(models.AbstractModel):
                 )
                 if not arap_lines:
                     continue
-                # If multiple AR/AP lines on the same move (rare), pick the
-                # one whose sign matches the member role (debit for 'D',
-                # credit for 'C') and has the largest residual.
+
+                # Sign-match: credit side -> credit > 0, debit -> debit > 0
                 if len(arap_lines) > 1:
                     if member["iscredit"] == "C":
                         candidates = arap_lines.filtered(lambda l: l.credit > 0)
                     else:
                         candidates = arap_lines.filtered(lambda l: l.debit > 0)
+                    if candidates and len(candidates) > 1:
+                        _logger.warning(
+                            "[ITR] group %s move %s: %d AR/AP candidates on "
+                            "account -- using largest residual",
+                            reconnum, member["move_id"], len(candidates),
+                        )
                     arap_lines = candidates or arap_lines
-                line = max(arap_lines, key=lambda l: abs(l.amount_residual))
-                lines_with_caps.append((line, member["reconsum"]))
 
-            if not lines_with_caps:
+                aml = max(arap_lines, key=lambda l: abs(l.amount_residual))
+                member_amls.append({
+                    "lineseq": member["lineseq"],
+                    "reconsum": member["reconsum"],
+                    "iscredit": member["iscredit"],
+                    "aml": aml,
+                })
+
+            if not member_amls:
                 already_done += 1
                 continue
 
-            # Group by account — reconciliation requires same account
-            by_account = defaultdict(list)
-            for line, cap in lines_with_caps:
-                by_account[line.account_id.id].append((line, cap))
+            # -- Step 3: bucket by account ---------------------------------
+            by_account = defaultdict(lambda: {"debits": [], "credits": []})
+            for m in member_amls:
+                side = "credits" if m["iscredit"] == "C" else "debits"
+                by_account[m["aml"].account_id.id][side].append({
+                    "aml": m["aml"],
+                    "lineseq": m["lineseq"],
+                    "reconsum": m["reconsum"],
+                })
 
+            all_created_amls = ctx.env["account.move.line"]
             group_reconciled = False
-            for account_id, account_pairs in by_account.items():
-                has_debit = any(l.debit > 0 for l, _ in account_pairs)
-                has_credit = any(l.credit > 0 for l, _ in account_pairs)
-                if not (has_debit and has_credit):
+
+            for account_id, bucket in by_account.items():
+                debits = sorted(bucket["debits"], key=lambda x: x["lineseq"])
+                credits = sorted(bucket["credits"], key=lambda x: x["lineseq"])
+
+                if not debits or not credits:
+                    _logger.debug(
+                        "[ITR] group %s account %s: one-sided bucket "
+                        "(debits=%d credits=%d) -- skipping bucket",
+                        reconnum, account_id, len(debits), len(credits),
+                    )
                     continue
 
-                with ctx.skippable(f"ITR group {reconnum} account {account_id}"):
-                    _reconcile_capped(account_pairs)
+                # -- Step 4: FIFO allocate ---------------------------------
+                triples = allocate_fifo(debits, credits)
+                if not triples:
+                    continue
+
+                # -- Step 5: create one partial per triple -----------------
+                with ctx.skippable(
+                    f"ITR group {reconnum} account {account_id}"
+                ):
+                    for debit_aml, credit_aml, amount in triples:
+                        _create_partial_for_triple(
+                            debit_aml, credit_aml, amount
+                        )
+                        all_created_amls |= debit_aml | credit_aml
                     group_reconciled = True
 
-            if group_reconciled:
-                reconciled_count += 1
-            else:
+            if not group_reconciled:
                 skipped_one_sided += 1
+                continue
+
+            # -- Step 6: stitch full reconcile -----------------------------
+            if all_created_amls:
+                with ctx.skippable(
+                    f"ITR group {reconnum} full reconcile"
+                ):
+                    _stitch_full_reconcile(all_created_amls)
+
+            reconciled_count += 1
 
         _logger.info(
-            "[ITR] Chunk complete: %d reconciled, %d already done, %d skipped (one-sided)",
+            "[ITR] Chunk complete: %d reconciled, %d already done, "
+            "%d skipped (one-sided)",
             reconciled_count, already_done, skipped_one_sided,
         )
