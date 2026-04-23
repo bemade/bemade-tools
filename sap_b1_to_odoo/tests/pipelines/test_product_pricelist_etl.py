@@ -24,7 +24,7 @@ from odoo.tests.common import TransactionCase
 from odoo.tests import tagged
 
 
-@tagged("-at_install", "post_install")
+@tagged("-at_install", "post_install", "pricelist_house_default")
 class TestProductPricelistHouseDefault(TransactionCase):
     """Guards the new step-5 house-default hook in the base pipeline."""
 
