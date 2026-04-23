@@ -400,22 +400,17 @@ class ProductPricelistItemImporter(models.AbstractModel):
                 f"({cust_created} created, {cust_updated} updated)."
             )
 
-        # 5. Set house-default pricelist on the company-scoped ir.config_parameter
-        #    so that partners without a specific pricelist fall back to it.
-        #    This MUST run before the OCRD loop (step 4) so that the inverse
-        #    computation uses the correct fallback when evaluating whether a
-        #    specific value should be stored.
+        # 5. Apply house-default pricelist sequencing and archive empty shell.
+        #    This MUST run before the OCRD loop (step 4) so that:
+        #    (a) listnum_to_id is already populated (steps 1-2 done above), and
+        #    (b) sequence changes precede partner writes.
         house_default = self._get_house_default_pricelist(ctx)
-        if house_default:
-            company_id = ctx.env.company.id
-            param_key = f"res.partner.property_product_pricelist_{company_id}"
-            ctx.env["ir.config_parameter"].sudo().set_param(param_key, house_default.id)
-            _logger.info(
-                f"Set house-default pricelist to '{house_default.name}' "
-                f"(id={house_default.id}) via ir.config_parameter key '{param_key}'."
-            )
+        self._apply_house_default_pricelist(ctx, house_default)
 
-        # 4. Set customer default pricelists from OCRD.listnum
+        # 4. Set customer default pricelists from OCRD.listnum, skipping partners
+        #    whose SAP listnum maps to the house-default pricelist (they resolve
+        #    correctly via the sequence-based resolver; writing explicit = house
+        #    would be a wasted no-op due to _inverse_product_pricelist collapse).
         customer_listnum_map = data["customer_listnum_map"]
         partners_map = data["partners_map"]
         if customer_listnum_map:
@@ -428,23 +423,28 @@ class ProductPricelistItemImporter(models.AbstractModel):
                 if not partner_id or not pricelist_id:
                     skipped_count += 1
                     continue
+                if house_default and pricelist_id == house_default.id:
+                    # Walk-up/retail customer — let them fall through to the
+                    # house default via the resolver; don't write explicit specific.
+                    skipped_count += 1
+                    continue
                 Partner.browse(partner_id).property_product_pricelist = pricelist_id
                 updated_count += 1
             _logger.info(
                 f"Set default pricelists for {updated_count} customers "
-                f"({skipped_count} skipped — missing partner or pricelist)."
+                f"({skipped_count} skipped — missing partner/pricelist or house-default)."
             )
 
         # Set USD pricelist for USD partners
         self._set_usd_pricelist_partners(ctx)
 
     def _get_house_default_pricelist(self, ctx: ETLContext):
-        """Return the pricelist that should be set as the company-wide house default.
+        """Return the pricelist that should serve as the company-wide house default.
 
-        The house default is written to the ir.config_parameter
-        ``res.partner.property_product_pricelist_{company_id}`` so that partners
-        without a specific pricelist assignment resolve to it instead of falling
-        through to the first active pricelist.
+        When non-empty, the returned pricelist will be given the lowest sequence
+        among active company-scoped pricelists so that Odoo's resolver
+        (``_get_country_pricelist_multi`` step 1: lowest-sequence active match)
+        routes all partners without a specific pricelist to it.
 
         Override this method in a client module to return a client-specific
         pricelist.  The base implementation returns an empty recordset (no-op).
@@ -457,6 +457,73 @@ class ProductPricelistItemImporter(models.AbstractModel):
             house default should be configured.
         """
         return ctx.env["product.pricelist"]
+
+    def _apply_house_default_pricelist(self, ctx: ETLContext, house_default) -> None:
+        """Apply house-default pricelist: lower its sequence and archive empty shells.
+
+        When ``house_default`` is non-empty:
+
+        1. Sets ``house_default.sequence`` to ``min(other_active_sequences) - 1``
+           (or 1 if there are no other active pricelists in the company domain),
+           ensuring it wins step (1) of Odoo 19's sequence-first resolver.
+        2. Archives every OTHER active pricelist in the company domain that has:
+           - zero ``item_ids``
+           - no ``sap_listnum`` and no ``sap_abs_id``
+           (targets the Odoo-auto "Default" id 1 shell; the predicate keeps this
+           client-agnostic and safe).
+
+        When ``house_default`` is empty (base default), this method is a no-op.
+
+        Args:
+            ctx: ETL context with Odoo environment.
+            house_default: Singleton returned by ``_get_house_default_pricelist``,
+                or an empty recordset.
+        """
+        if not house_default:
+            return
+
+        Pricelist = ctx.env["product.pricelist"]
+        company_id = ctx.env.company.id
+        pl_domain = [
+            "|",
+            ("company_id", "=", company_id),
+            ("company_id", "=", False),
+        ]
+
+        # Find all other active pricelists in the company domain (excluding house_default)
+        other_active = Pricelist.search(
+            pl_domain + [("id", "!=", house_default.id), ("active", "=", True)]
+        )
+        if other_active:
+            min_seq = min(other_active.mapped("sequence"))
+            new_seq = min_seq - 1
+        else:
+            new_seq = 1
+
+        if house_default.sequence != new_seq:
+            house_default.sequence = new_seq
+            _logger.info(
+                f"Set house-default pricelist '{house_default.name}' "
+                f"(id={house_default.id}) sequence to {new_seq}."
+            )
+
+        # Archive empty, unlinked active pricelists that would otherwise win the resolver
+        shells_to_archive = Pricelist.search(
+            pl_domain + [
+                ("id", "!=", house_default.id),
+                ("active", "=", True),
+                ("sap_listnum", "=", False),
+                ("sap_abs_id", "=", False),
+            ]
+        ).filtered(lambda pl: not pl.item_ids)
+        if shells_to_archive:
+            shells_to_archive.write({"active": False})
+            names = ", ".join(
+                f"'{pl.name}' (id={pl.id})" for pl in shells_to_archive
+            )
+            _logger.info(
+                f"Archived {len(shells_to_archive)} empty shell pricelist(s): {names}."
+            )
 
     def _set_usd_pricelist_partners(self, ctx: ETLContext) -> None:
         """Set USD pricelist for partners with USD currency."""

@@ -9,86 +9,145 @@
 #
 #    For full license details, see https://www.gnu.org/licenses/lgpl-3.0.en.html.
 #
-"""Tests for ProductPricelistItemImporter house-default pricelist step.
+"""Tests for ProductPricelistItemImporter house-default pricelist step (Fix A).
 
 Acceptance criteria:
-1. (test_house_default_is_noop_when_hook_returns_empty) The base pipeline
-   _get_house_default_pricelist returns an empty recordset; running
-   load_pricelists_and_blankets must NOT create an ir.config_parameter row
-   for res.partner.property_product_pricelist_{company_id}.
+
+1. (test_house_default_hook_base_returns_empty) The base
+   ``_get_house_default_pricelist`` must return an empty ``product.pricelist``
+   recordset, and ``_apply_house_default_pricelist`` called with an empty
+   recordset must make no sequence or archive writes (no-op).
+
+2. (test_apply_house_default_archives_empty_default_and_lowers_sequence)
+   Given an empty "Default"-shaped pricelist (no sap_listnum, no items,
+   active=True, sequence=10) and a house_default pricelist (sequence=16, one
+   item), after calling ``_apply_house_default_pricelist``:
+   - The empty Default pricelist is archived (active=False).
+   - house_default.sequence is strictly less than every other remaining
+     active pricelist in the company domain.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-from odoo.tests.common import TransactionCase
 from odoo.tests import tagged
+from odoo.tests.common import TransactionCase
 
 
 @tagged("-at_install", "post_install", "pricelist_house_default")
 class TestProductPricelistHouseDefault(TransactionCase):
-    """Guards the new step-5 house-default hook in the base pipeline."""
+    """Guards the new step-5 house-default hook and apply logic in the base pipeline."""
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         cls.importer = cls.env["product.pricelist.item.importer"]
 
-    def test_house_default_is_noop_when_hook_returns_empty(self):
-        """Base _get_house_default_pricelist returns empty; no ir.config_parameter written.
-
-        Verifies that the base implementation is a no-op: calling
-        _get_house_default_pricelist with a real ctx returns an empty recordset
-        and load_pricelists_and_blankets does not write the company-scoped
-        ir.config_parameter key.
-        """
-        company_id = self.env.company.id
-        param_key = f"res.partner.property_product_pricelist_{company_id}"
-
-        # Ensure the key does not exist before the test
-        self.env["ir.config_parameter"].sudo().search(
-            [("key", "=", param_key)]
-        ).unlink()
-
+    def _make_ctx(self):
         ctx = MagicMock()
         ctx.env = self.env
+        return ctx
+
+    def test_house_default_hook_base_returns_empty(self):
+        """Base _get_house_default_pricelist returns an empty recordset (no-op).
+
+        Also verifies that calling _apply_house_default_pricelist with an empty
+        recordset leaves all pricelist sequences and active flags unchanged.
+        """
+        ctx = self._make_ctx()
 
         result = self.importer._get_house_default_pricelist(ctx)
 
         self.assertFalse(
             result,
             "_get_house_default_pricelist must return an empty recordset in the "
-            "base pipeline (no house default configured).",
+            "base pipeline.",
         )
-
-        # Simulate what load_pricelists_and_blankets does with the return value
-        if result:
-            param_key_check = f"res.partner.property_product_pricelist_{company_id}"
-            self.env["ir.config_parameter"].sudo().set_param(
-                param_key_check, result.id
-            )
-
-        existing_param = self.env["ir.config_parameter"].sudo().get_param(param_key)
         self.assertFalse(
-            existing_param,
-            "No ir.config_parameter row should exist for the house-default key "
-            "when the base pipeline hook returns an empty recordset.",
+            result.ids,
+            "_get_house_default_pricelist must return a falsy recordset with no ids.",
         )
 
-    def test_house_default_step_runs_before_ocrd_loop(self):
-        """Step 5 (house default) must be set before the OCRD loop runs.
+        # Capture sequences before calling apply with empty recordset
+        Pricelist = self.env["product.pricelist"]
+        before = {
+            pl.id: (pl.sequence, pl.active)
+            for pl in Pricelist.with_context(active_test=False).search([])
+        }
 
-        This test verifies ordering by inspecting the load method source code
-        for the relative position of the house-default block vs. the OCRD-loop
-        block (step 4).  A structural guard rather than a runtime test.
+        self.importer._apply_house_default_pricelist(ctx, result)
+
+        # Flush ORM writes; then verify nothing changed
+        self.env.flush_all()
+        Pricelist.invalidate_model()
+        after = {
+            pl.id: (pl.sequence, pl.active)
+            for pl in Pricelist.with_context(active_test=False).search([])
+        }
+        self.assertEqual(
+            before,
+            after,
+            "_apply_house_default_pricelist with empty recordset must be a no-op: "
+            "no sequence or active changes.",
+        )
+
+    def test_apply_house_default_archives_empty_default_and_lowers_sequence(self):
+        """After applying, empty Default is archived and house_default has lowest sequence.
+
+        Setup:
+          - empty_default: no sap_listnum, no items, active=True, sequence=10
+          - house_default: one item, active=True, sequence=16
+        After _apply_house_default_pricelist:
+          - empty_default.active == False
+          - house_default.sequence < sequence of every other remaining active pl
         """
-        import inspect
-        source = inspect.getsource(self.importer.__class__.load_pricelists_and_blankets)
-        # Find the position of each key line
-        pos_house_default = source.find("_get_house_default_pricelist")
-        pos_ocrd_loop = source.find("customer_listnum_map")
-        self.assertGreater(
-            pos_ocrd_loop,
-            pos_house_default,
-            "The house-default step (_get_house_default_pricelist) must appear "
-            "in the source before the OCRD customer_listnum_map loop.",
+        company = self.env.company
+
+        # Create the empty "Default"-shaped pricelist (no sap_listnum, no items)
+        empty_default = self.env["product.pricelist"].create({
+            "name": "Default",
+            "company_id": company.id,
+            "sequence": 10,
+            "active": True,
+        })
+
+        # Create house_default with one item so the item_ids predicate doesn't archive it
+        house_default = self.env["product.pricelist"].create({
+            "name": "Retail",
+            "company_id": company.id,
+            "sequence": 16,
+            "active": True,
+            "item_ids": [(0, 0, {
+                "applied_on": "3_global",
+                "compute_price": "fixed",
+                "fixed_price": 0.0,
+            })],
+        })
+
+        ctx = self._make_ctx()
+        self.importer._apply_house_default_pricelist(ctx, house_default)
+
+        self.env.flush_all()
+        empty_default.invalidate_recordset()
+        house_default.invalidate_recordset()
+
+        # empty_default must be archived
+        self.assertFalse(
+            empty_default.active,
+            "The empty Default pricelist must be archived after applying house default.",
         )
+
+        # house_default.sequence must be strictly less than all other active pricelists
+        other_active_seqs = self.env["product.pricelist"].search([
+            ("id", "!=", house_default.id),
+            ("active", "=", True),
+            "|",
+            ("company_id", "=", company.id),
+            ("company_id", "=", False),
+        ]).mapped("sequence")
+        for seq in other_active_seqs:
+            self.assertLess(
+                house_default.sequence,
+                seq,
+                f"house_default.sequence ({house_default.sequence}) must be less "
+                f"than every other active pricelist sequence ({seq}).",
+            )
