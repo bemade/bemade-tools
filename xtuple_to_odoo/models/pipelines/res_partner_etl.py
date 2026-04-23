@@ -361,12 +361,22 @@ class XtuplePartnerCustomerImporter(models.AbstractModel):
         # Transform customers that need xTuple fields updated
         update_vals = []
         for customer in customers_to_update:
+            address_info = self._extract_address_info(
+                customer, countries_dict, states_dict
+            )
             update_vals.append(
                 {
                     "name": customer.get("cust_name", ""),
                     "xtuple_cust_id": customer.get("cust_id"),
                     "xtuple_crmacct_id": customer.get("crmacct_id"),
                     "xtuple_partner_type": "customer",
+                    # Address info for backfill (per-field guard applied in load)
+                    "_addr_street": address_info["street"],
+                    "_addr_street2": address_info["street2"],
+                    "_addr_city": address_info["city"],
+                    "_addr_zip": address_info["zip"],
+                    "_addr_state_id": address_info["state"].id if address_info["state"] else False,
+                    "_addr_country_id": address_info["country"].id if address_info["country"] else False,
                 }
             )
 
@@ -393,10 +403,34 @@ class XtuplePartnerCustomerImporter(models.AbstractModel):
             updated = 0
             for vals in update_vals:
                 name = vals.pop("name")
+                # Extract address backfill values (prefixed with _addr_)
+                addr_backfill = {
+                    k[len("_addr_"):]: v
+                    for k, v in list(vals.items())
+                    if k.startswith("_addr_")
+                }
+                for k in list(vals.keys()):
+                    if k.startswith("_addr_"):
+                        del vals[k]
+
                 partner = ctx.env["res.partner"].search(
                     [("name", "=ilike", name)], limit=1
                 )
                 if partner:
+                    # Apply per-field address backfill (only fill empty fields)
+                    if not partner.street and addr_backfill.get("street"):
+                        vals["street"] = addr_backfill["street"]
+                    if not partner.street2 and addr_backfill.get("street2"):
+                        vals["street2"] = addr_backfill["street2"]
+                    if not partner.city and addr_backfill.get("city"):
+                        vals["city"] = addr_backfill["city"]
+                    if not partner.zip and addr_backfill.get("zip"):
+                        vals["zip"] = addr_backfill["zip"]
+                    if not partner.state_id and addr_backfill.get("state_id"):
+                        vals["state_id"] = addr_backfill["state_id"]
+                    if not partner.country_id and addr_backfill.get("country_id"):
+                        vals["country_id"] = addr_backfill["country_id"]
+
                     partner.write(vals)
                     updated += 1
             _logger.info(
@@ -557,12 +591,22 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
         # Transform vendors that need xTuple fields updated (matched by name)
         update_vals = []
         for vendor in vendors_to_update:
+            address_info = self._extract_address_info(
+                vendor, countries_dict, states_dict
+            )
             update_vals.append(
                 {
                     "name": vendor.get("vend_name", ""),
                     "xtuple_vend_id": int(vendor.get("vend_id")),
                     "xtuple_crmacct_id": vendor.get("vend_crmacct_id"),
                     "xtuple_partner_type": "vendor",
+                    # Address info for backfill (per-field guard applied in load)
+                    "_addr_street": address_info["street"],
+                    "_addr_street2": address_info["street2"],
+                    "_addr_city": address_info["city"],
+                    "_addr_zip": address_info["zip"],
+                    "_addr_state_id": address_info["state"].id if address_info["state"] else False,
+                    "_addr_country_id": address_info["country"].id if address_info["country"] else False,
                 }
             )
 
@@ -604,10 +648,34 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
             updated = 0
             for vals in update_vals:
                 name = vals.pop("name")
+                # Extract address backfill values (prefixed with _addr_)
+                addr_backfill = {
+                    k[len("_addr_"):]: v
+                    for k, v in list(vals.items())
+                    if k.startswith("_addr_")
+                }
+                for k in list(vals.keys()):
+                    if k.startswith("_addr_"):
+                        del vals[k]
+
                 partner = ctx.env["res.partner"].search(
                     [("name", "=ilike", name)], limit=1
                 )
                 if partner:
+                    # Apply per-field address backfill (only fill empty fields)
+                    if not partner.street and addr_backfill.get("street"):
+                        vals["street"] = addr_backfill["street"]
+                    if not partner.street2 and addr_backfill.get("street2"):
+                        vals["street2"] = addr_backfill["street2"]
+                    if not partner.city and addr_backfill.get("city"):
+                        vals["city"] = addr_backfill["city"]
+                    if not partner.zip and addr_backfill.get("zip"):
+                        vals["zip"] = addr_backfill["zip"]
+                    if not partner.state_id and addr_backfill.get("state_id"):
+                        vals["state_id"] = addr_backfill["state_id"]
+                    if not partner.country_id and addr_backfill.get("country_id"):
+                        vals["country_id"] = addr_backfill["country_id"]
+
                     partner.write(vals)
                     updated += 1
             _logger.info(
