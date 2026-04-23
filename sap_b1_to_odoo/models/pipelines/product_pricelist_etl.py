@@ -496,16 +496,14 @@ class ProductPricelistItemImporter(models.AbstractModel):
         )
         if other_active:
             min_seq = min(other_active.mapped("sequence"))
-            new_seq = min_seq - 1
-        else:
-            new_seq = 1
-
-        if house_default.sequence != new_seq:
-            house_default.sequence = new_seq
-            _logger.info(
-                f"Set house-default pricelist '{house_default.name}' "
-                f"(id={house_default.id}) sequence to {new_seq}."
-            )
+            # Only lower the sequence if house_default does not already win
+            if house_default.sequence >= min_seq:
+                house_default.sequence = min_seq - 1
+                _logger.info(
+                    f"Set house-default pricelist '{house_default.name}' "
+                    f"(id={house_default.id}) sequence to {min_seq - 1}."
+                )
+        # else: house_default is the sole active pricelist — sequence is already optimal
 
         # Archive empty, unlinked active pricelists that would otherwise win the resolver
         shells_to_archive = Pricelist.search(
