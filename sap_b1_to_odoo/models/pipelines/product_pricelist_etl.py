@@ -400,6 +400,21 @@ class ProductPricelistItemImporter(models.AbstractModel):
                 f"({cust_created} created, {cust_updated} updated)."
             )
 
+        # 5. Set house-default pricelist on the company-scoped ir.config_parameter
+        #    so that partners without a specific pricelist fall back to it.
+        #    This MUST run before the OCRD loop (step 4) so that the inverse
+        #    computation uses the correct fallback when evaluating whether a
+        #    specific value should be stored.
+        house_default = self._get_house_default_pricelist(ctx)
+        if house_default:
+            company_id = ctx.env.company.id
+            param_key = f"res.partner.property_product_pricelist_{company_id}"
+            ctx.env["ir.config_parameter"].sudo().set_param(param_key, house_default.id)
+            _logger.info(
+                f"Set house-default pricelist to '{house_default.name}' "
+                f"(id={house_default.id}) via ir.config_parameter key '{param_key}'."
+            )
+
         # 4. Set customer default pricelists from OCRD.listnum
         customer_listnum_map = data["customer_listnum_map"]
         partners_map = data["partners_map"]
@@ -422,6 +437,26 @@ class ProductPricelistItemImporter(models.AbstractModel):
 
         # Set USD pricelist for USD partners
         self._set_usd_pricelist_partners(ctx)
+
+    def _get_house_default_pricelist(self, ctx: ETLContext):
+        """Return the pricelist that should be set as the company-wide house default.
+
+        The house default is written to the ir.config_parameter
+        ``res.partner.property_product_pricelist_{company_id}`` so that partners
+        without a specific pricelist assignment resolve to it instead of falling
+        through to the first active pricelist.
+
+        Override this method in a client module to return a client-specific
+        pricelist.  The base implementation returns an empty recordset (no-op).
+
+        Args:
+            ctx: ETL context with Odoo environment.
+
+        Returns:
+            A ``product.pricelist`` singleton, or an empty recordset if no
+            house default should be configured.
+        """
+        return ctx.env["product.pricelist"]
 
     def _set_usd_pricelist_partners(self, ctx: ETLContext) -> None:
         """Set USD pricelist for partners with USD currency."""
