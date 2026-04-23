@@ -19,7 +19,7 @@
 #
 {
     "name": "SAP Business One to Odoo",
-    "version": "19.0.0.0.4",
+    "version": "19.0.0.0.5",
     "summary": "Convert a database from SAP Business One to Odoo",
     "category": "Technical",
     "author": "Bemade Inc.",
