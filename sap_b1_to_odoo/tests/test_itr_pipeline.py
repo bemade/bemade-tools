@@ -52,7 +52,7 @@ def _ar_account(env):
         return account
     return env["account.account"].create({
         "name": "Test AR",
-        "code": "TEST_AR",
+        "code": "TESTAR",
         "account_type": "asset_receivable",
         "reconcile": True,
     })
@@ -66,7 +66,7 @@ def _make_posted_move(env, journal, ar_account, debit, credit, ref, partner=None
     if not income_account:
         income_account = env["account.account"].create({
             "name": "Test Income",
-            "code": "TEST_INC",
+            "code": "TESTINC",
             "account_type": "income",
         })
 
@@ -170,14 +170,14 @@ class TestItrSingleGroup(TransactionCase):
                     "lineseq": 0,
                     "reconsum": 100.0,
                     "iscredit": "D",
-                    "account": "TEST_AR",
+                    "account": "TESTAR",
                 },
                 {
                     "move_id": move_c.id,
                     "lineseq": 1,
                     "reconsum": 100.0,
                     "iscredit": "C",
-                    "account": "TEST_AR",
+                    "account": "TESTAR",
                 },
             ],
         }]
@@ -250,14 +250,14 @@ class TestItrIdempotency(TransactionCase):
                     "lineseq": 0,
                     "reconsum": 200.0,
                     "iscredit": "D",
-                    "account": "TEST_AR",
+                    "account": "TESTAR",
                 },
                 {
                     "move_id": move_c.id,
                     "lineseq": 1,
                     "reconsum": 200.0,
                     "iscredit": "C",
-                    "account": "TEST_AR",
+                    "account": "TESTAR",
                 },
             ],
         }]
@@ -345,21 +345,21 @@ class TestItrInvoice453(TransactionCase):
                     "lineseq": 21,
                     "reconsum": 6123.93,
                     "iscredit": "D",
-                    "account": "TEST_AR",
+                    "account": "TESTAR",
                 },
                 {
                     "move_id": move_pay343.id,
                     "lineseq": 2,
                     "reconsum": 3658.69,
                     "iscredit": "C",
-                    "account": "TEST_AR",
+                    "account": "TESTAR",
                 },
                 {
                     "move_id": move_cm32.id,
                     "lineseq": 17,
                     "reconsum": 2465.24,
                     "iscredit": "C",
-                    "account": "TEST_AR",
+                    "account": "TESTAR",
                 },
             ],
         }]
