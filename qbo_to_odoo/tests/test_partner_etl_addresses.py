@@ -76,7 +76,7 @@ def _stub_qbo_vendor(
     }
 
 
-@tagged("post_install", "-at_install")
+@tagged("post_install", "-at_install", "partner_address_etl")
 class TestQboCustomerLinkerAddressBackfill(TransactionCase):
     """AC1 & AC2: customer linker backfills empty address, skips populated address."""
 
@@ -177,7 +177,7 @@ class TestQboCustomerLinkerAddressBackfill(TransactionCase):
                          "Street must not change on second run")
 
 
-@tagged("post_install", "-at_install")
+@tagged("post_install", "-at_install", "partner_address_etl")
 class TestQboCountryAliasResolution(TransactionCase):
     """AC3: create path resolves 'USA' → country_id.code == 'US'."""
 
@@ -219,7 +219,7 @@ class TestQboCountryAliasResolution(TransactionCase):
         self.assertEqual(country_id, us_country.id)
 
 
-@tagged("post_install", "-at_install")
+@tagged("post_install", "-at_install", "partner_address_etl")
 class TestQboVendorLinkerAddressBackfill(TransactionCase):
     """AC4: vendor linker backfills address on empty partner."""
 
