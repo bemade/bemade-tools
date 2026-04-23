@@ -7,11 +7,11 @@ mismatches as CSV to stdout.
 
 Usage (from Odoo shell):
     odoo-bin shell -d <db> -c odoo.conf <<'EOF'
-    exec(open("addons/sap_b1_to_odoo/tools/verify_itr_reconciliation.py").read())
+    exec(open("addons/sap_b1_to_odoo/scripts/verify_itr_reconciliation.py").read())
     EOF
 
 Or as a standalone script (requires PYTHONPATH to include the Odoo source):
-    python -m odoo.addons.sap_b1_to_odoo.tools.verify_itr_reconciliation \\
+    python -m odoo.addons.sap_b1_to_odoo.scripts.verify_itr_reconciliation \\
         --database <db> --config <conf>
 
 Environment variables (optional):
