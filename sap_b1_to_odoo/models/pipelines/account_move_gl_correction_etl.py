@@ -123,17 +123,26 @@ class AccountMoveGLCorrection(models.AbstractModel):
             ar_ap_account = None
             tax_accounts = []
             sap_table = move_id_to_table.get(move_id, "")
-            is_purchase = sap_table in ("opch", "orpc")
+
+            # The payment_term line's expected sign on the AR/AP control:
+            #   oinv (out_invoice): debit  (customer owes us)
+            #   orin (out_refund/AR CM): credit (we owe customer back)
+            #   opch (in_invoice): credit (we owe vendor)
+            #   orpc (in_refund/AP CM): debit  (vendor owes us back)
+            # Pick the JDT1 AR/AP line whose sign matches the expected
+            # payment_term direction.  The previous logic used a single
+            # is_purchase flag and was wrong for refunds, picking the
+            # opposite-side offset (often a customer-AR account on bills
+            # like spousal-support payouts).
+            payment_term_is_debit = sap_table in ("oinv", "orpc")
 
             for jl in jdt1_lines:
                 if jl["account_type"] in (
                     "asset_receivable", "liability_payable",
                 ):
-                    # Pick the AR/AP line that matches the payment_term side:
-                    # bills/refunds: credit side; invoices/credit memos: debit side
-                    if is_purchase and jl["credit"] > 0:
+                    if payment_term_is_debit and jl["debit"] > 0:
                         ar_ap_account = jl["account_id"]
-                    elif not is_purchase and jl["debit"] > 0:
+                    elif not payment_term_is_debit and jl["credit"] > 0:
                         ar_ap_account = jl["account_id"]
                 elif jl["account_type"] == "liability_current":
                     # Tax accounts are typically liability_current
