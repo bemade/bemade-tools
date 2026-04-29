@@ -73,6 +73,7 @@ def _extract_applications(ctx, table, payment_srcobjtyp):
         FROM {table} r
         JOIN {parent_table} o ON r.docnum = o.docnum
         WHERE r.sumapplied <> 0
+          AND o.canceled = 'N'
         ORDER BY o.docentry, r.docline
         """
     )
