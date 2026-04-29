@@ -667,6 +667,14 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                         ).action_post()
 
         # ── Post-posting: fix AR/AP account on payment_term lines ──
+        # Flush any pending ORM writes from action_post() before our raw
+        # SQL update so they don't get re-applied on top of our changes
+        # at commit time.  Specifically, _compute_account_id depends on
+        # partner_id/move_type/etc., and during posting Odoo can queue a
+        # recompute write that targets the partner's property account
+        # (often a customer AR account for vendors with that property).
+        moves.line_ids.flush_recordset(['account_id'])
+
         corrected_arap = 0
         truth_misses = 0
         no_arap_in_truth = 0
@@ -681,7 +689,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 continue
             # Always update (no `account_id <> arap_id` filter): for some
             # moves -- particularly enriched in_refund credit memos --
-            # Odoo's compute_account_id picks up a customer AR property
+            # Odoo's _compute_account_id picks up a customer AR property
             # account during action_post and overwrites whatever an earlier
             # update set, so even when the value matches at SQL time it
             # may not match by reconcile time.  Force-set it here.
@@ -696,7 +704,10 @@ class AccountMoveJDT1Importer(models.AbstractModel):
             )
             corrected_arap += ctx.env.cr.rowcount
 
-        ctx.env.invalidate_all()
+        # Invalidate account_id specifically so any subsequent reads pull
+        # the freshly-updated value from DB; invalidate_all here would be
+        # too broad and could dirty other fields' computes.
+        moves.line_ids.invalidate_recordset(['account_id'])
         _logger.info(
             "Post-posting: applied %d AR/AP account updates "
             "(%d moves missing truth, %d moves with truth but no arap_id).",
