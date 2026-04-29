@@ -587,6 +587,25 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                             "move_type": truth.get("move_type", "entry"),
                         },
                     }, tax_account_ids=tax_account_ids)
+                    # _fix_taxes_pre_posting_sap rewrites debit/credit/balance/
+                    # amount_currency on the payment_term and tax lines via raw
+                    # SQL.  invalidate_all() below clears the cache, but the
+                    # *stored* computed fields (amount_residual,
+                    # amount_residual_currency, reconciled) still hold the
+                    # values computed at create() time -- before the fix
+                    # adjusted amount_currency.  Mark the underlying fields
+                    # as modified so the dependent stored fields are
+                    # recomputed from the new values; otherwise downstream
+                    # reconciliation reads stale residuals and creates
+                    # partials capped at the pre-fix (untaxed) amount.
+                    move.line_ids.modified(
+                        ['debit', 'credit', 'balance', 'amount_currency']
+                    )
+                    move.line_ids.flush_recordset([
+                        'amount_residual',
+                        'amount_residual_currency',
+                        'reconciled',
+                    ])
 
                 ctx.env.invalidate_all()
                 moves |= move
