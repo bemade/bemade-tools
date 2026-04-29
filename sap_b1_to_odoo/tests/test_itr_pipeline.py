@@ -164,22 +164,7 @@ class TestItrSingleGroup(TransactionCase):
         # Build synthetic group in the format produced by transform phase
         groups = [{
             "reconnum": 9999,
-            "members": [
-                {
-                    "move_id": move_d.id,
-                    "lineseq": 0,
-                    "reconsum": 100.0,
-                    "iscredit": "D",
-                    "account": "TESTAR",
-                },
-                {
-                    "move_id": move_c.id,
-                    "lineseq": 1,
-                    "reconsum": 100.0,
-                    "iscredit": "C",
-                    "account": "TESTAR",
-                },
-            ],
+            "move_ids": [move_d.id, move_c.id],
         }]
 
         # Run the load phase directly
@@ -244,22 +229,7 @@ class TestItrIdempotency(TransactionCase):
 
         groups = [{
             "reconnum": 8888,
-            "members": [
-                {
-                    "move_id": move_d.id,
-                    "lineseq": 0,
-                    "reconsum": 200.0,
-                    "iscredit": "D",
-                    "account": "TESTAR",
-                },
-                {
-                    "move_id": move_c.id,
-                    "lineseq": 1,
-                    "reconsum": 200.0,
-                    "iscredit": "C",
-                    "account": "TESTAR",
-                },
-            ],
+            "move_ids": [move_d.id, move_c.id],
         }]
 
         ctx = _make_itr_context(self.env, groups)
@@ -275,15 +245,12 @@ class TestItrIdempotency(TransactionCase):
         ])
         self.assertGreater(partials_after_first, 0)
 
-        # Second run
-        with self.assertLogs(
-            "odoo.addons.sap_b1_to_odoo.models.pipelines"
-            ".account_internal_reconciliation_etl",
-            level=logging.DEBUG,
-        ) as cm:
-            model_instance.load_internal_reconciliations(
-                ctx, {"transform_internal_reconciliations": groups}
-            )
+        # Second run -- idempotency now comes from pick_open_arap_lines
+        # filtering already-reconciled AMLs (and reconcile() being a no-op
+        # on lines with zero residual), not from an early-skip log.
+        model_instance.load_internal_reconciliations(
+            ctx, {"transform_internal_reconciliations": groups}
+        )
 
         partials_after_second = self.env["account.partial.reconcile"].search_count([
             ("debit_move_id", "in", move_d.line_ids.ids),
@@ -291,16 +258,6 @@ class TestItrIdempotency(TransactionCase):
         self.assertEqual(
             partials_after_first, partials_after_second,
             "Second run must not create additional partials",
-        )
-
-        # Check for skip log message
-        skip_msgs = [
-            m for m in cm.output
-            if "already reconciled" in m and "8888" in m
-        ]
-        self.assertTrue(
-            skip_msgs,
-            "Expected 'already reconciled' log for reconnum 8888",
         )
 
 
@@ -336,32 +293,9 @@ class TestItrInvoice453(TransactionCase):
             debit=0.0, credit=2465.24, ref="cm32"
         )
 
-        # SAP lineseq order: pay343 (seq=2) < cm32 (seq=17) < inv453 (seq=21)
         groups = [{
             "reconnum": 453,
-            "members": [
-                {
-                    "move_id": move_inv453.id,
-                    "lineseq": 21,
-                    "reconsum": 6123.93,
-                    "iscredit": "D",
-                    "account": "TESTAR",
-                },
-                {
-                    "move_id": move_pay343.id,
-                    "lineseq": 2,
-                    "reconsum": 3658.69,
-                    "iscredit": "C",
-                    "account": "TESTAR",
-                },
-                {
-                    "move_id": move_cm32.id,
-                    "lineseq": 17,
-                    "reconsum": 2465.24,
-                    "iscredit": "C",
-                    "account": "TESTAR",
-                },
-            ],
+            "move_ids": [move_inv453.id, move_pay343.id, move_cm32.id],
         }]
 
         ctx = _make_itr_context(self.env, groups)
