@@ -589,23 +589,25 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                     }, tax_account_ids=tax_account_ids)
                     # _fix_taxes_pre_posting_sap rewrites debit/credit/balance/
                     # amount_currency on payment_term and tax lines via raw
-                    # SQL.  invalidate_all() below clears the cache, but the
-                    # *stored* computed fields (amount_residual,
+                    # SQL.  Stored computed fields (amount_residual,
                     # amount_residual_currency, reconciled) still hold the
                     # values computed at create() time -- before the fix
-                    # adjusted amount_currency.  We must:
-                    #   1. drop the stale cached values for the underlying
-                    #      fields so _compute_amount_residual reads the new
-                    #      DB values,
-                    #   2. call _compute_amount_residual to populate the
-                    #      cache with the freshly recomputed residuals,
-                    #   3. flush so the new residuals land in the DB.
-                    # Without this, downstream reconciliation reads stale
-                    # residuals and creates partials capped at the pre-fix
+                    # adjusted amount_currency.  Without an explicit
+                    # recompute, downstream reconciliation reads stale
+                    # residuals and caps each partial at the pre-fix
                     # (untaxed) amount.
+                    #
+                    # Verified-working pattern: invalidate only the residual
+                    # fields, call _compute_amount_residual (which reads
+                    # balance/amount_currency from DB on cache miss), then
+                    # flush.  Invalidating balance/debit/credit/
+                    # amount_currency too is unsafe -- it triggers a
+                    # recompute of `balance` and an `_check_balanced`
+                    # constraint that rolls back the savepoint and drops
+                    # the move entirely.
                     move.line_ids.invalidate_recordset([
-                        'debit', 'credit', 'balance', 'amount_currency',
-                        'amount_residual', 'amount_residual_currency',
+                        'amount_residual',
+                        'amount_residual_currency',
                         'reconciled',
                     ])
                     move.line_ids._compute_amount_residual()
