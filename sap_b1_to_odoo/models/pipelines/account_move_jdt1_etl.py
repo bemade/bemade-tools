@@ -588,19 +588,27 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                         },
                     }, tax_account_ids=tax_account_ids)
                     # _fix_taxes_pre_posting_sap rewrites debit/credit/balance/
-                    # amount_currency on the payment_term and tax lines via raw
+                    # amount_currency on payment_term and tax lines via raw
                     # SQL.  invalidate_all() below clears the cache, but the
                     # *stored* computed fields (amount_residual,
                     # amount_residual_currency, reconciled) still hold the
                     # values computed at create() time -- before the fix
-                    # adjusted amount_currency.  Mark the underlying fields
-                    # as modified so the dependent stored fields are
-                    # recomputed from the new values; otherwise downstream
-                    # reconciliation reads stale residuals and creates
-                    # partials capped at the pre-fix (untaxed) amount.
-                    move.line_ids.modified(
-                        ['debit', 'credit', 'balance', 'amount_currency']
-                    )
+                    # adjusted amount_currency.  We must:
+                    #   1. drop the stale cached values for the underlying
+                    #      fields so _compute_amount_residual reads the new
+                    #      DB values,
+                    #   2. call _compute_amount_residual to populate the
+                    #      cache with the freshly recomputed residuals,
+                    #   3. flush so the new residuals land in the DB.
+                    # Without this, downstream reconciliation reads stale
+                    # residuals and creates partials capped at the pre-fix
+                    # (untaxed) amount.
+                    move.line_ids.invalidate_recordset([
+                        'debit', 'credit', 'balance', 'amount_currency',
+                        'amount_residual', 'amount_residual_currency',
+                        'reconciled',
+                    ])
+                    move.line_ids._compute_amount_residual()
                     move.line_ids.flush_recordset([
                         'amount_residual',
                         'amount_residual_currency',
