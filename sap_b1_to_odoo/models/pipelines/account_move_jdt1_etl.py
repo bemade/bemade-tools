@@ -587,35 +587,56 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                             "move_type": truth.get("move_type", "entry"),
                         },
                     }, tax_account_ids=tax_account_ids)
-                    # _fix_taxes_pre_posting_sap rewrites debit/credit/balance/
-                    # amount_currency on payment_term and tax lines via raw
-                    # SQL.  Stored computed fields (amount_residual,
-                    # amount_residual_currency, reconciled) still hold the
-                    # values computed at create() time -- before the fix
-                    # adjusted amount_currency.  Without an explicit
-                    # recompute, downstream reconciliation reads stale
-                    # residuals and caps each partial at the pre-fix
-                    # (untaxed) amount.
+                    # _fix_taxes_pre_posting_sap rewrites debit/credit/
+                    # balance/amount_currency on payment_term and tax
+                    # lines via raw SQL.  The stored computed fields
+                    # amount_residual / amount_residual_currency /
+                    # reconciled still hold the values computed at
+                    # create() time -- before the fix adjusted
+                    # amount_currency.  Without an explicit refresh,
+                    # downstream reconciliation reads stale residuals
+                    # and caps each partial at the pre-fix (untaxed)
+                    # amount, leaving invoices stuck with
+                    # residual = amount_tax even when SAP shows them
+                    # fully paid.
                     #
-                    # Verified-working pattern: invalidate only the residual
-                    # fields, call _compute_amount_residual (which reads
-                    # balance/amount_currency from DB on cache miss), then
-                    # flush.  Invalidating balance/debit/credit/
-                    # amount_currency too is unsafe -- it triggers a
-                    # recompute of `balance` and an `_check_balanced`
-                    # constraint that rolls back the savepoint and drops
-                    # the move entirely.
-                    move.line_ids.invalidate_recordset([
-                        'amount_residual',
-                        'amount_residual_currency',
-                        'reconciled',
-                    ])
-                    move.line_ids._compute_amount_residual()
-                    move.line_ids.flush_recordset([
-                        'amount_residual',
-                        'amount_residual_currency',
-                        'reconciled',
-                    ])
+                    # We can't go through the ORM (`_compute_amount_residual`
+                    # + `flush_recordset`) because flush_recordset triggers
+                    # an AML write hook that runs `_check_balanced` against
+                    # the in-memory cache, and the cache holds the pre-fix
+                    # debit/credit/balance values.  That fails on ~50
+                    # invoices and rolls them back via the ETL savepoint.
+                    #
+                    # Recompute directly in SQL instead.  At this point in
+                    # the import there are no partial reconciles for the
+                    # move yet, so the formula reduces to:
+                    #   amount_residual          = balance
+                    #   amount_residual_currency = amount_currency
+                    # and the line is reconciled iff both are zero.
+                    # Only AR/AP/cash control accounts get a non-zero
+                    # residual (matches the `need_residual_lines` filter
+                    # in account.move.line._compute_amount_residual).
+                    ctx.env.cr.execute(
+                        """
+                        UPDATE account_move_line ml
+                        SET amount_residual = ml.balance,
+                            amount_residual_currency = ml.amount_currency,
+                            reconciled = (
+                                ml.balance = 0
+                                AND ml.amount_currency = 0
+                            )
+                        FROM account_account a
+                        WHERE ml.move_id = %s
+                          AND a.id = ml.account_id
+                          AND (
+                            a.reconcile
+                            OR a.account_type IN (
+                                'asset_cash', 'liability_credit_card'
+                            )
+                          )
+                        """,
+                        (move.id,),
+                    )
 
                 ctx.env.invalidate_all()
                 moves |= move
