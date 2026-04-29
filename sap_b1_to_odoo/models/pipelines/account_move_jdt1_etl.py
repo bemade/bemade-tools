@@ -669,6 +669,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         # ── Post-posting: fix AR/AP account on payment_term lines ──
         corrected_arap = 0
         truth_misses = 0
+        no_arap_in_truth = 0
         for move in moves:
             idx = move_index.get(move.id)
             if idx is None or idx not in gl_truth:
@@ -676,102 +677,32 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 continue
             arap_id = gl_truth[idx].get("arap_account_id")
             if not arap_id:
+                no_arap_in_truth += 1
                 continue
+            # Always update (no `account_id <> arap_id` filter): for some
+            # moves -- particularly enriched in_refund credit memos --
+            # Odoo's compute_account_id picks up a customer AR property
+            # account during action_post and overwrites whatever an earlier
+            # update set, so even when the value matches at SQL time it
+            # may not match by reconcile time.  Force-set it here.
             ctx.env.cr.execute(
                 """
                 UPDATE account_move_line
                    SET account_id = %s
                  WHERE move_id = %s
                    AND display_type = 'payment_term'
-                   AND account_id <> %s
                 """,
-                (arap_id, move.id, arap_id),
+                (arap_id, move.id),
             )
             corrected_arap += ctx.env.cr.rowcount
 
-        if corrected_arap or truth_misses:
-            ctx.env.invalidate_all()
-            _logger.info(
-                "Post-posting: corrected %d AR/AP accounts (%d moves "
-                "missing truth).",
-                corrected_arap, truth_misses,
-            )
+        ctx.env.invalidate_all()
+        _logger.info(
+            "Post-posting: applied %d AR/AP account updates "
+            "(%d moves missing truth, %d moves with truth but no arap_id).",
+            corrected_arap, truth_misses, no_arap_in_truth,
+        )
 
-        # ── Belt-and-suspenders cleanup: source-of-truth direct from SAP
-        # JDT1 line_id=0 -> Odoo's payment_term account_id.  Catches any
-        # moves where the gl_truth path didn't update (cause unknown;
-        # observed for ~15 enriched in_refund moves whose payment_term
-        # ended up on an asset_receivable customer-AR account despite
-        # the metadata correctly identifying the AP control account in
-        # truth).  For enriched moves sap_docentry is the doc table id
-        # (OINV/ORIN/OPCH/ORPC); we resolve to OJDT.transid via
-        # ``createdby`` matching, then read JDT1 line_id=0.
-        accounts_dict = lookups.get("accounts", {})
-        belt_corrected = 0
-        for move in moves:
-            if not move.sap_docentry or not move.sap_table:
-                continue
-            if move.sap_table == "ojdt":
-                # Generic JE: sap_docentry IS the transid.
-                ctx.cr.execute(
-                    """
-                    SELECT oa.formatcode FROM jdt1 j
-                    JOIN oact oa ON oa.acctcode = j.account
-                    WHERE j.transid = %s AND j.line_id = 0
-                    """,
-                    (move.sap_docentry,),
-                )
-            else:
-                # Enriched: sap_docentry -> OJDT.createdby -> transid.
-                _config = _TRANSTYPE_CONFIG
-                transtype = next(
-                    (k for k, v in _config.items()
-                     if v.get("sap_table") == move.sap_table),
-                    None,
-                )
-                if not transtype:
-                    continue
-                ctx.cr.execute(
-                    """
-                    SELECT oa.formatcode FROM ojdt o
-                    JOIN jdt1 j ON j.transid = o.transid AND j.line_id = 0
-                    JOIN oact oa ON oa.acctcode = j.account
-                    WHERE o.transtype = %s AND o.createdby = %s
-                    """,
-                    (transtype, move.sap_docentry),
-                )
-            row = ctx.cr.fetchone()
-            if not row:
-                continue
-            fc = row[0]
-            target_info = accounts_dict.get(fc)
-            if not target_info:
-                continue
-            target_id = target_info[0]
-            target_type = target_info[1]
-            if target_type not in (
-                "asset_receivable", "liability_payable",
-            ):
-                # Not an AR/AP control account; skip the belt-fix.
-                continue
-            ctx.env.cr.execute(
-                """
-                UPDATE account_move_line
-                   SET account_id = %s
-                 WHERE move_id = %s
-                   AND display_type = 'payment_term'
-                   AND account_id <> %s
-                """,
-                (target_id, move.id, target_id),
-            )
-            belt_corrected += ctx.env.cr.rowcount
-        if belt_corrected:
-            ctx.env.invalidate_all()
-            _logger.info(
-                "Post-posting belt-pass: corrected %d AR/AP accounts via "
-                "direct SAP JDT1 lookup.",
-                belt_corrected,
-            )
 
         # ── Verify: Odoo amount_total matches SAP DocTotal ──
         mismatched = 0
