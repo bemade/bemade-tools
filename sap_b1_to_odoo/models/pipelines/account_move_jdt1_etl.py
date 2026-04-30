@@ -309,7 +309,8 @@ class AccountMoveJDT1Importer(models.AbstractModel):
             SELECT j.transid, j.line_id, j.account, j.debit, j.credit,
                    j.shortname, j.fccurrency, j.fcdebit, j.fccredit,
                    j.ref1, j.ref2, j.project,
-                   a.formatcode AS acct_formatcode
+                   a.formatcode AS acct_formatcode,
+                   a.acttype AS acttype
               FROM jdt1 j
               JOIN oact a ON j.account = a.acctcode
              WHERE j.transid IN %s
@@ -442,6 +443,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         accounts_dict = lookups["accounts"]
         currencies_dict = lookups["currencies"]
         company_currency_id = lookups["company_currency_id"]
+        unallocated_earnings_id = lookups.get("unallocated_earnings_id")
 
         move_vals_list = []
         enriched_count = 0
@@ -500,6 +502,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                         header, jdt1_lines, accounts_dict, partners_dict,
                         currencies_dict, company_currency_id,
                         misc_journal_id,
+                        unallocated_earnings_id=unallocated_earnings_id,
                     )
 
                 if not move_vals:
@@ -945,8 +948,28 @@ class AccountMoveJDT1Importer(models.AbstractModel):
     @staticmethod
     def _build_generic_entry_vals(header, jdt1_lines, accounts_dict,
                                   partners_dict, currencies_dict,
-                                  company_currency_id, misc_journal_id):
-        """Build move_type='entry' from JDT1 lines."""
+                                  company_currency_id, misc_journal_id,
+                                  unallocated_earnings_id=None):
+        """Build move_type='entry' from JDT1 lines.
+
+        For SAP B1 Period-End-Closing journal entries
+        (``OJDT.transtype = '-3'``), every line whose source SAP
+        account is income/expense (``OACT.acttype IN ('I','E')``) is
+        redirected to the Odoo "Unallocated Earnings" clearing account
+        (code ``999999``, ``account_type='equity_unaffected'``).  This
+        matches SAP B1's Period-End Closing utility output, where each
+        closing JE pairs one P&L line with one offset to the Retained
+        Earnings Clearing account; redirecting only the P&L leg keeps
+        the move balanced by construction.  Balance-sheet legs
+        (``acttype='N'``) pass through untouched.
+
+        Note: unmapped P&L accounts (no ``sap_acct_code`` row) that
+        previously warn-and-skipped will now resolve to 999999 and
+        post -- which is correct for closing entries, since the only
+        purpose of the line is to drain the period's P&L into
+        unallocated earnings.
+        """
+        is_closing = header.get("transtype") == "-3"
         line_commands = []
         partner_id = False
 
@@ -954,6 +977,8 @@ class AccountMoveJDT1Importer(models.AbstractModel):
             line_vals = AccountMoveJDT1Importer._build_jdt1_line_vals(
                 jdt1, accounts_dict, partners_dict,
                 currencies_dict, company_currency_id,
+                is_closing=is_closing,
+                unallocated_earnings_id=unallocated_earnings_id,
             )
             if line_vals:
                 line_commands.append(Command.create(line_vals))
@@ -1004,23 +1029,54 @@ class AccountMoveJDT1Importer(models.AbstractModel):
 
     @staticmethod
     def _build_jdt1_line_vals(jdt1, accounts_dict, partners_dict,
-                              currencies_dict, company_currency_id):
-        """Build account.move.line vals from a single JDT1 row."""
+                              currencies_dict, company_currency_id,
+                              is_closing=False,
+                              unallocated_earnings_id=None):
+        """Build account.move.line vals from a single JDT1 row.
+
+        When ``is_closing`` is True (header ``transtype='-3'``) and the
+        JDT1 row's ``OACT.acttype`` is ``'I'`` (income) or ``'E'``
+        (expense), the line's ``account_id`` and ``sap_acct_id`` are
+        redirected to ``unallocated_earnings_id`` (Odoo code 999999,
+        ``equity_unaffected``).  Debit/credit/currency/amount are
+        preserved exactly -- only the account changes.  Balance-sheet
+        legs (``acttype='N'``) and non-closing JEs are unaffected.
+        """
         debit = float(jdt1.get("debit") or 0)
         credit = float(jdt1.get("credit") or 0)
 
         if debit == 0 and credit == 0:
             return None
 
+        acttype = (jdt1.get("acttype") or "").strip()
+        is_pl_redirect = (
+            is_closing
+            and acttype in ("I", "E")
+            and unallocated_earnings_id
+        )
+
         acct_formatcode = (jdt1.get("acct_formatcode") or "").strip()
         account_info = accounts_dict.get(acct_formatcode)
         if not account_info:
-            _logger.warning(
-                "Account not found for SAP code '%s' (transid=%s, line=%s)",
-                acct_formatcode, jdt1.get("transid"), jdt1.get("line_id"),
-            )
-            return None
-        account_id, _account_type = account_info
+            if is_pl_redirect:
+                # Closing-entry P&L leg with no Odoo mapping: still
+                # redirect to 999999 so the closing JE posts and
+                # balances against its Retained Earnings Clearing
+                # offset.  This is the intended behaviour -- the
+                # original P&L account doesn't matter for closing.
+                account_id = unallocated_earnings_id
+            else:
+                _logger.warning(
+                    "Account not found for SAP code '%s' "
+                    "(transid=%s, line=%s)",
+                    acct_formatcode, jdt1.get("transid"),
+                    jdt1.get("line_id"),
+                )
+                return None
+        else:
+            account_id, _account_type = account_info
+            if is_pl_redirect:
+                account_id = unallocated_earnings_id
 
         shortname = (jdt1.get("shortname") or "").strip()
         partner_id = partners_dict.get(shortname) if shortname else False
