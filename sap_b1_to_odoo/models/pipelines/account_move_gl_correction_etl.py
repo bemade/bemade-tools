@@ -124,22 +124,25 @@ class AccountMoveGLCorrection(models.AbstractModel):
             tax_accounts = []
             sap_table = move_id_to_table.get(move_id, "")
 
-            # The payment_term line's expected sign on the AR/AP control:
-            #   oinv (out_invoice): debit  (customer owes us)
-            #   orin (out_refund/AR CM): credit (we owe customer back)
-            #   opch (in_invoice): credit (we owe vendor)
-            #   orpc (in_refund/AP CM): debit  (vendor owes us back)
-            # Pick the JDT1 AR/AP line whose sign matches the expected
-            # payment_term direction.  The previous logic used a single
-            # is_purchase flag and was wrong for refunds, picking the
-            # opposite-side offset (often a customer-AR account on bills
-            # like spousal-support payouts).
+            # Pick the JDT1 AR/AP line that matches the move's expected
+            # payment_term placement: type + sign.
+            #   oinv (out_invoice):     asset_receivable, debit
+            #   orin (out_refund/AR CM): asset_receivable, credit
+            #   opch (in_invoice):       liability_payable, credit
+            #   orpc (in_refund/AP CM):  liability_payable, debit
+            # The type filter is critical -- some bills/invoices have a
+            # SECOND AR/AP-typed JDT1 line on a customer-specific AR
+            # account (e.g. RWI uses 'A/R Mike Carter' as a Chase-card
+            # spend offset), and an unfiltered 'last AR/AP match wins'
+            # would pick that instead of the AP control.
+            if sap_table in ("opch", "orpc"):
+                expected_type = "liability_payable"
+            else:
+                expected_type = "asset_receivable"
             payment_term_is_debit = sap_table in ("oinv", "orpc")
 
             for jl in jdt1_lines:
-                if jl["account_type"] in (
-                    "asset_receivable", "liability_payable",
-                ):
+                if jl["account_type"] == expected_type:
                     if payment_term_is_debit and jl["debit"] > 0:
                         ar_ap_account = jl["account_id"]
                     elif not payment_term_is_debit and jl["credit"] > 0:
