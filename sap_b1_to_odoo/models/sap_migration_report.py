@@ -243,12 +243,18 @@ class SapMigrationReport(models.Model):
     # -- SAP queries --
 
     def _get_sap_trial_balance(self):
+        # Mirror the import-time rewrite of SAP B1 Period-End-Closing
+        # JEs (OJDT.transtype='-3'): P&L legs (OACT.acttype in I/E)
+        # are redirected to Odoo account 999999 (equity_unaffected).
+        # Exclude those legs from their original account and aggregate
+        # them under a synthetic '999999' row so the comparison TB
+        # represents the same accounting treatment as Odoo.
         sap_cr = self.sap_database_id.get_cursor()
         try:
             sap_cr.execute(
                 """
-                SELECT a.formatcode,
-                       a.acctname,
+                SELECT a.formatcode AS code,
+                       a.acctname AS name,
                        COALESCE(SUM(j.debit), 0) AS debit,
                        COALESCE(SUM(j.credit), 0) AS credit
                   FROM jdt1 j
@@ -256,16 +262,32 @@ class SapMigrationReport(models.Model):
                   JOIN oact a ON j.account = a.acctcode
                  WHERE h.refdate <= %s
                    AND a.postable = 'Y'
+                   AND NOT (h.transtype = '-3' AND a.acttype IN ('I', 'E'))
                  GROUP BY a.formatcode, a.acctname
-                 ORDER BY a.formatcode
+
+                 UNION ALL
+
+                SELECT '999999' AS code,
+                       'Unallocated Earnings' AS name,
+                       COALESCE(SUM(j.debit), 0) AS debit,
+                       COALESCE(SUM(j.credit), 0) AS credit
+                  FROM jdt1 j
+                  JOIN ojdt h ON h.transid = j.transid
+                  JOIN oact a ON j.account = a.acctcode
+                 WHERE h.refdate <= %s
+                   AND a.postable = 'Y'
+                   AND h.transtype = '-3'
+                   AND a.acttype IN ('I', 'E')
+                HAVING COALESCE(SUM(j.debit), 0) <> 0
+                    OR COALESCE(SUM(j.credit), 0) <> 0
                 """,
-                (self.cutoff_date,),
+                (self.cutoff_date, self.cutoff_date),
             )
             result = {}
             for row in sap_cr.dictfetchall():
-                code = row["formatcode"].strip()
+                code = row["code"].strip()
                 result[code] = {
-                    "name": row["acctname"].strip(),
+                    "name": row["name"].strip(),
                     "debit": float(row["debit"]),
                     "credit": float(row["credit"]),
                 }
@@ -274,28 +296,56 @@ class SapMigrationReport(models.Model):
             sap_cr.close()
 
     def _get_sap_transactions(self, sap_acct_code):
+        # The synthetic '999999' code holds the redirected P&L legs of
+        # SAP B1 Period-End-Closing JEs (transtype='-3', acttype I/E).
+        # SAP itself has no 999999 account, so for that code we filter
+        # by transtype/acttype instead of formatcode.
         sap_cr = self.sap_database_id.get_cursor()
         try:
-            sap_cr.execute(
-                """
-                SELECT h.transid,
-                       h.refdate,
-                       h.transtype,
-                       h.memo,
-                       h.createdby,
-                       j.debit,
-                       j.credit,
-                       j.shortname,
-                       j.line_id
-                  FROM jdt1 j
-                  JOIN ojdt h ON h.transid = j.transid
-                  JOIN oact a ON j.account = a.acctcode
-                 WHERE a.formatcode = %s
-                   AND h.refdate <= %s
-                 ORDER BY h.refdate, h.transid, j.line_id
-                """,
-                (sap_acct_code, self.cutoff_date),
-            )
+            if sap_acct_code == "999999":
+                sap_cr.execute(
+                    """
+                    SELECT h.transid,
+                           h.refdate,
+                           h.transtype,
+                           h.memo,
+                           h.createdby,
+                           j.debit,
+                           j.credit,
+                           j.shortname,
+                           j.line_id
+                      FROM jdt1 j
+                      JOIN ojdt h ON h.transid = j.transid
+                      JOIN oact a ON j.account = a.acctcode
+                     WHERE h.transtype = '-3'
+                       AND a.acttype IN ('I', 'E')
+                       AND h.refdate <= %s
+                     ORDER BY h.refdate, h.transid, j.line_id
+                    """,
+                    (self.cutoff_date,),
+                )
+            else:
+                sap_cr.execute(
+                    """
+                    SELECT h.transid,
+                           h.refdate,
+                           h.transtype,
+                           h.memo,
+                           h.createdby,
+                           j.debit,
+                           j.credit,
+                           j.shortname,
+                           j.line_id
+                      FROM jdt1 j
+                      JOIN ojdt h ON h.transid = j.transid
+                      JOIN oact a ON j.account = a.acctcode
+                     WHERE a.formatcode = %s
+                       AND h.refdate <= %s
+                       AND NOT (h.transtype = '-3' AND a.acttype IN ('I', 'E'))
+                     ORDER BY h.refdate, h.transid, j.line_id
+                    """,
+                    (sap_acct_code, self.cutoff_date),
+                )
             return sap_cr.dictfetchall()
         finally:
             sap_cr.close()
@@ -303,9 +353,19 @@ class SapMigrationReport(models.Model):
     # -- Odoo queries --
 
     def _get_odoo_trial_balance(self):
+        # Include the unallocated-earnings clearing account (Odoo code
+        # 999999) under key '999999' even if it has no sap_acct_code,
+        # so it lines up with the synthetic '999999' row produced by
+        # _get_sap_trial_balance for redirected closing-JE P&L legs.
+        # `code_store` is jsonb (per-company code map), so we resolve
+        # the 999999 account id via the ORM and match on id in SQL.
+        unallocated_id = self.env["account.account"].search(
+            [("code", "=", "999999")], limit=1,
+        ).id or 0
         self.env.cr.execute(
             """
-            SELECT aa.sap_acct_code,
+            SELECT CASE WHEN aa.id = %s THEN '999999'
+                        ELSE aa.sap_acct_code END AS sap_acct_code,
                    aa.code_store,
                    aa.name ->> 'en_US' AS acct_name,
                    COALESCE(SUM(aml.debit), 0) AS debit,
@@ -315,11 +375,11 @@ class SapMigrationReport(models.Model):
               JOIN account_move am ON aml.move_id = am.id
              WHERE am.date <= %s
                AND am.state = 'posted'
-               AND aa.sap_acct_code IS NOT NULL
-             GROUP BY aa.sap_acct_code, aa.code_store, aa.name
-             ORDER BY aa.sap_acct_code
+               AND (aa.sap_acct_code IS NOT NULL OR aa.id = %s)
+             GROUP BY aa.id, aa.sap_acct_code, aa.code_store, aa.name
+             ORDER BY 1
             """,
-            (self.cutoff_date,),
+            (unallocated_id, self.cutoff_date, unallocated_id),
         )
         result = {}
         for row in self.env.cr.dictfetchall():
@@ -346,12 +406,20 @@ class SapMigrationReport(models.Model):
               FROM account_move_line aml
               JOIN account_account aa ON aml.account_id = aa.id
               JOIN account_move am ON aml.move_id = am.id
-             WHERE aa.sap_acct_code = %s
+             WHERE (aa.sap_acct_code = %s
+                    OR (%s = '999999' AND aa.id = %s))
                AND am.date <= %s
                AND am.state = 'posted'
              ORDER BY am.date, am.id
             """,
-            (sap_acct_code, self.cutoff_date),
+            (
+                sap_acct_code,
+                sap_acct_code,
+                self.env["account.account"].search(
+                    [("code", "=", "999999")], limit=1,
+                ).id or 0,
+                self.cutoff_date,
+            ),
         )
         return self.env.cr.dictfetchall()
 
