@@ -1,4 +1,5 @@
-from odoo import models, api, Command
+from odoo import models, api, Command, _
+from odoo.exceptions import UserError
 from odoo.tools.sql import SQL
 import logging
 from odoo.addons.sap_b1_to_odoo.tools import fix_tz
@@ -763,6 +764,41 @@ class AccountMoveCommon(models.AbstractModel):
         # Company currency
         company_currency_id = self.env.company.currency_id.id
 
+        # Unallocated Earnings clearing account (code 999999) —
+        # destination for P&L legs of SAP B1 Period-End-Closing JEs
+        # (OJDT.transtype='-3').  Looked up by Odoo `code` (not by
+        # sap_acct_code) because the account exists only in Odoo's
+        # chart, not in SAP's OACT.  Hard-fail if missing or mistyped
+        # so a misconfigured target DB surfaces immediately rather
+        # than silently mis-classifying year-end closing entries.
+        unallocated_account = self.env["account.account"].search(
+            [
+                ("code", "=", "999999"),
+                ("company_ids", "in", [company_id]),
+            ],
+            limit=1,
+        )
+        if not unallocated_account:
+            unallocated_account = self.env["account.account"].search(
+                [("code", "=", "999999")], limit=1,
+            )
+        if not unallocated_account:
+            raise UserError(_(
+                "Unallocated Earnings account (code '999999') not found. "
+                "It is required to redirect P&L legs of SAP B1 "
+                "Period-End-Closing journal entries (transtype='-3'). "
+                "Please create an account with code '999999' and "
+                "account_type='equity_unaffected' before importing."
+            ))
+        if unallocated_account.account_type != "equity_unaffected":
+            raise UserError(_(
+                "Account '999999' must have account_type "
+                "'equity_unaffected' (currently '%s'). "
+                "This account is used as the closing-entry clearing "
+                "account for SAP B1 Period-End-Closing JEs."
+            ) % unallocated_account.account_type)
+        unallocated_earnings_id = unallocated_account.id
+
         return {
             "products": products_dict,
             "users": users_dict,
@@ -773,6 +809,7 @@ class AccountMoveCommon(models.AbstractModel):
             "unit_uom_id": unit_uom_id,
             "company_currency_id": company_currency_id,
             "company_id": company_id,
+            "unallocated_earnings_id": unallocated_earnings_id,
         }
 
     @api.model
