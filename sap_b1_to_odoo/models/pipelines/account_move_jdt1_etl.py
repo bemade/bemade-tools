@@ -687,20 +687,6 @@ class AccountMoveJDT1Importer(models.AbstractModel):
             if not arap_id:
                 no_arap_in_truth += 1
                 continue
-            # DIAGNOSTIC: trace specific moves we know are landing on
-            # the wrong account in the final DB state.  Verify the SQL
-            # actually persists by re-reading immediately.
-            is_diag = (
-                (move.sap_table == 'orpc' and move.sap_docentry == 115)
-                or (move.sap_table == 'opch' and move.sap_docentry == 17193)
-                or (move.sap_table == 'opch' and move.sap_docentry == 5700)
-            )
-            if is_diag:
-                _logger.warning(
-                    "[DIAG] post-posting %s#%s move_id=%s "
-                    "applying arap_id=%s",
-                    move.sap_table, move.sap_docentry, move.id, arap_id,
-                )
             # Always update (no `account_id <> arap_id` filter): for some
             # moves -- particularly enriched in_refund credit memos --
             # Odoo's _compute_account_id picks up a customer AR property
@@ -717,17 +703,6 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 (arap_id, move.id),
             )
             corrected_arap += ctx.env.cr.rowcount
-            if is_diag:
-                ctx.env.cr.execute(
-                    "SELECT id, account_id FROM account_move_line "
-                    "WHERE move_id=%s AND display_type='payment_term'",
-                    (move.id,),
-                )
-                _logger.warning(
-                    "[DIAG] post-update DB state for %s#%s: %s",
-                    move.sap_table, move.sap_docentry,
-                    ctx.env.cr.fetchall(),
-                )
 
         # Invalidate account_id specifically so any subsequent reads pull
         # the freshly-updated value from DB; invalidate_all here would be
