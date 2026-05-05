@@ -1,10 +1,7 @@
-from odoo.tests.common import TransactionCase
+from odoo.tests.common import TransactionCase, tagged
 import os
-import logging
 
-_logger = logging.getLogger(__name__)
-
-
+@tagged("-at_install", "xtuple")
 class TestXtupleDatabase(TransactionCase):
     def setUp(self):
         super().setUp()

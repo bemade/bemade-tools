@@ -32,18 +32,18 @@ class ResPartner(models.Model):
     )
 
     _xtuple_cust_id_unique = models.Constraint(
-        "UNIQUE (xtuple_cust_id)",
+        "EXCLUDE USING btree (xtuple_cust_id WITH =) WHERE (xtuple_cust_id != 0)",
         "A partner with that xTuple Customer ID already exists.",
     )
     _xtuple_vend_id_unique = models.Constraint(
-        "UNIQUE (xtuple_vend_id)",
+        "EXCLUDE USING btree (xtuple_vend_id WITH =) WHERE (xtuple_vend_id != 0)",
         "A partner with that xTuple Vendor ID already exists.",
     )
     _xtuple_cntct_id_unique = models.Constraint(
-        "UNIQUE (xtuple_cntct_id)",
+        "EXCLUDE USING btree (xtuple_cntct_id WITH =) WHERE (xtuple_cntct_id != 0)",
         "A partner with that xTuple Contact ID already exists.",
     )
     _xtuple_shipto_id_unique = models.Constraint(
-        "UNIQUE (xtuple_shipto_id)",
+        "EXCLUDE USING btree (xtuple_shipto_id WITH =) WHERE (xtuple_shipto_id != 0)",
         "A partner with that xTuple Ship-To ID already exists.",
     )
