@@ -86,7 +86,7 @@ def _make_xtuple_vendor(vend_id=2, name="Gamma Supplies", **addr_kwargs):
     return defaults
 
 
-@tagged("post_install", "-at_install", "partner_address_etl")
+@tagged("-at_install", "xtuple")
 class TestXtupleCustomerUpdatePathAddressBackfill(TransactionCase):
     """AC5, AC6, AC8: xTuple customer update-path address backfill."""
 
@@ -184,7 +184,7 @@ class TestXtupleCustomerUpdatePathAddressBackfill(TransactionCase):
                          "city must be unchanged on second run")
 
 
-@tagged("post_install", "-at_install", "partner_address_etl")
+@tagged("-at_install", "xtuple")
 class TestXtupleVendorUpdatePathAddressBackfill(TransactionCase):
     """AC7: xTuple vendor update-path address backfill."""
 

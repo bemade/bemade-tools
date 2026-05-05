@@ -1,11 +1,12 @@
-from odoo.tests.common import TransactionCase
+from odoo.tests.common import TransactionCase, tagged
+from odoo import Command
 import os
 import logging
 from odoo.addons.xtuple_to_odoo.tools import normalize_country_code
 
 _logger = logging.getLogger(__name__)
 
-
+@tagged("-at_install", "xtuple")
 class TestPartnerImport(TransactionCase):
     def setUp(self):
         super().setUp()
@@ -381,3 +382,31 @@ class TestPartnerImport(TransactionCase):
         finally:
             if cursor:
                 cursor.close()
+
+# Test the partner merge functionality works when one partner has an xTuple ID
+
+class TestPartnerMerge(TransactionCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+
+        cls.partner_non_xtuple = cls.env["res.partner"].create(
+            {
+                "name": "Test 1",
+            }
+        )
+        cls.partner_xtuple = cls.env["res.partner"].create(
+            {
+                "name": "Test 1 mangled",
+                "xtuple_cntct_id": 1,
+            }
+        )
+
+    def test_merge_completes_without_error(self):
+        """ When partners are merged, the merge moves values over to the new partner
+        prior to deleting the original, which means that the method fails when there are
+        fields with unicity contraints. """
+        self.env["base.partner.merge.automatic.wizard"].create({
+            "partner_ids": [Command.set([self.partner_non_xtuple.id, self.partner_xtuple.id])],
+            "dst_partner_id": self.partner_non_xtuple.id,
+        }).action_merge() # Should fail with vanilla Odoo        
