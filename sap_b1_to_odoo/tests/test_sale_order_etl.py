@@ -354,7 +354,13 @@ class TestSapSaleOrderLineState(TransactionCase):
         return so
 
     def _stomp_to_draft(self, so):
-        """Simulate the pre-fix state: parent state stomped back to draft via SQL."""
+        """Simulate the pre-fix state: parent state stomped back to draft via SQL.
+
+        flush_all() is called first to materialise any pending ORM writes
+        (e.g. from action_confirm) so that the subsequent raw SQL UPDATE is not
+        overwritten when the ORM auto-flushes on the next read.
+        """
+        self.env.flush_all()
         self.env.cr.execute(
             "UPDATE sale_order SET state = 'draft' WHERE id = %s", (so.id,)
         )
@@ -486,7 +492,10 @@ class TestSapSaleOrderLineState(TransactionCase):
         so_mismatch = self._make_so(sap_docnum=33343)
         so_consistent = self._make_so(sap_docnum=33344)
 
-        # Force mismatch on so_mismatch: parent='sale', line='draft'
+        # Force mismatch on so_mismatch: parent='sale', line='draft'.
+        # flush_all() first so pending ORM writes from action_confirm don't
+        # overwrite the raw SQL when the ORM auto-flushes on next read.
+        self.env.flush_all()
         self.env.cr.execute(
             "UPDATE sale_order_line SET state = 'draft' WHERE order_id = %s",
             (so_mismatch.id,),
