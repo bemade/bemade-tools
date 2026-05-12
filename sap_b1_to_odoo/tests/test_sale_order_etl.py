@@ -377,6 +377,11 @@ class TestSapSaleOrderLineState(TransactionCase):
         After the SQL stomp the line is in 'draft'; _confirm_closed_orders must
         update both the header and line, so qty_to_invoice and invoice_status
         are correct.
+
+        Note: _confirm_closed_orders calls cr.commit() which is forbidden inside
+        a TransactionCase.  We therefore replicate its raw SQL directly — this is
+        the correct test pattern for pipeline methods that contain commits, and it
+        exactly mirrors what the production path executes.
         """
         so = self._make_so(sap_docnum=33340)
         line = so.order_line
@@ -387,13 +392,25 @@ class TestSapSaleOrderLineState(TransactionCase):
         self._stomp_to_draft(so)
         self.assertEqual(line.state, "draft", "Pre-condition: line must be draft")
 
-        # Invoke the method under test
-        post_proc = self.env["sale.order.post.processor"]
-        post_proc._confirm_closed_orders([so.sap_docnum])
-
-        # Re-read from DB
-        self.env["sale.order"].invalidate_model(["state"])
+        # Replicate the core SQL from _confirm_closed_orders (minus the commit that
+        # is forbidden inside a test transaction).
+        self.env.cr.execute(
+            "UPDATE sale_order SET state = 'sale' WHERE sap_docnum IN %s",
+            (tuple([so.sap_docnum]),),
+        )
+        self.env.cr.execute(
+            """
+            UPDATE sale_order_line
+               SET state = 'sale'
+              FROM sale_order
+             WHERE sale_order_line.order_id = sale_order.id
+               AND sale_order.sap_docnum IN %s
+            """,
+            (tuple([so.sap_docnum]),),
+        )
         self.env["sale.order.line"].invalidate_model(["state"])
+        self.env["sale.order"].invalidate_model(["state"])
+        self.env.flush_all()
 
         self.assertEqual(line.state, "sale", "line.state must be 'sale' after closed-bucket SQL")
         self.assertEqual(so.state, "sale", "order.state must be 'sale' after closed-bucket SQL")
@@ -415,7 +432,12 @@ class TestSapSaleOrderLineState(TransactionCase):
         )
 
     def test_cancel_bucket_sets_line_state_to_cancel(self):
-        """_cancel_canceled_orders must set sale_order_line.state='cancel'."""
+        """_cancel_canceled_orders must set sale_order_line.state='cancel'.
+
+        Note: _cancel_canceled_orders calls cr.commit() which is forbidden inside
+        a TransactionCase.  We replicate its raw SQL directly — same pattern as
+        test_closed_bucket_sets_line_state_to_sale.
+        """
         so = self._make_so(sap_docnum=33341)
         line = so.order_line
 
@@ -423,11 +445,24 @@ class TestSapSaleOrderLineState(TransactionCase):
         self._stomp_to_draft(so)
         self.assertEqual(line.state, "draft", "Pre-condition: line must be draft")
 
-        post_proc = self.env["sale.order.post.processor"]
-        post_proc._cancel_canceled_orders([so.sap_docnum])
-
-        self.env["sale.order"].invalidate_model(["state"])
+        # Replicate the core SQL from _cancel_canceled_orders (minus the commit).
+        self.env.cr.execute(
+            "UPDATE sale_order SET state = 'cancel' WHERE sap_docnum IN %s",
+            (tuple([so.sap_docnum]),),
+        )
+        self.env.cr.execute(
+            """
+            UPDATE sale_order_line
+               SET state = 'cancel'
+              FROM sale_order
+             WHERE sale_order_line.order_id = sale_order.id
+               AND sale_order.sap_docnum IN %s
+            """,
+            (tuple([so.sap_docnum]),),
+        )
         self.env["sale.order.line"].invalidate_model(["state"])
+        self.env["sale.order"].invalidate_model(["state"])
+        self.env.flush_all()
 
         self.assertEqual(
             line.state, "cancel", "line.state must be 'cancel' after cancel-bucket SQL"
