@@ -265,11 +265,147 @@ class AccountMoveJDT1Importer(models.AbstractModel):
     _description = "SAP Unified Journal Entry Importer (OJDT/JDT1)"
     _inherit = "sap.account.move.importer.mixin"
 
+    # ----------------------------------------------------------------
+    # SO-link configuration (overrides stubs from common mixin)
+    # ----------------------------------------------------------------
+
+    # Per-transtype SAP table configs for sales invoice/credit-memo types.
+    # Both resolve through rdr1 (BaseType=17 direct) or dln1 (BaseType=15).
+    _SALE_LINK_CONFIGS = {
+        "13": {
+            "invoice_line_table": "inv1",
+            "order_line_table": "rdr1",
+            "picking_table": "dln1",
+            "picking_basetype": 15,
+            "order_basetype": 17,
+            "order_line_model": "sale.order.line",
+        },
+        "14": {
+            "invoice_line_table": "rin1",
+            "order_line_table": "rdr1",
+            "picking_table": "dln1",
+            "picking_basetype": 15,
+            "order_basetype": 17,
+            "order_line_model": "sale.order.line",
+        },
+    }
+
     def _get_order_line_link_config(self):
-        return None
+        """Return the inv1/rdr1/dln1 config for import_order_invoiced_qty.
+
+        The post-processor calls import_order_invoiced_qty → _get_order_line_links_raw,
+        which queries SAP for inv1 BaseEntry/BaseLine chains.  We return the
+        transtype-13 config here as the default; the rin1 (transtype-14) leg is
+        handled separately by _get_sale_order_lines_dict in extract_lookups so
+        credit-memo lines get the correct order_line_id in the transform.
+
+        The _get_row_vals path in the common mixin also calls this via
+        _get_order_line_link_vals — but for the JDT1 importer, _get_row_vals
+        receives an already-resolved order_lines_dict (populated in
+        extract_lookups), so any non-None return is fine here.
+        """
+        return self._SALE_LINK_CONFIGS["13"]
 
     def _get_order_line_link_vals(self, order_line_id):
-        return {}
+        """Return x2many vals linking a move line to its sale.order.line.
+
+        Uses Command.link() per Odoo 19 convention.  The caller (_get_row_vals
+        in the common mixin) only invokes this when order_line_id is truthy,
+        so we always return the link command unconditionally.
+        """
+        return {"sale_line_ids": [Command.link(order_line_id)]}
+
+    @api.model
+    def _get_sale_order_lines_dict(self, sap_cr):
+        """Build a combined (invoice_docentry, invoice_linenum) → sol_id dict.
+
+        Queries SAP inv1 (transtype 13) and rin1 (transtype 14) in a single
+        pass per table, then resolves both to rdr1-keyed sale.order.line ids
+        using the common _get_order_line_links_for_config helper.  Called once
+        in extract_lookups so the full dict is shared across all transform
+        chunks.
+
+        Returns {} when there are no rdr1-linked SO lines in Odoo (e.g. a
+        fresh install before SOs are imported) — safe no-op in that case.
+        """
+        combined = {}
+        for config in self._SALE_LINK_CONFIGS.values():
+            links = self._get_order_line_links_for_config(sap_cr, config)
+            combined.update(links)
+        return combined
+
+    @api.model
+    def _get_order_line_links_for_config(self, cr, config):
+        """Variant of _get_order_line_links that accepts an explicit config dict.
+
+        Avoids monkey-patching _get_order_line_link_config when we need to
+        resolve links for a specific SAP table (inv1 or rin1) independently.
+        """
+        rel_lines = self._get_order_line_links_raw_for_config(cr, config)
+
+        order_lines = self.env[config["order_line_model"]].search_read(
+            [
+                ("sap_docentry", "!=", False),
+                ("sap_line_num", "!=", False),
+                ("sap_table", "=", config["order_line_table"].lower()),
+            ],
+            ["id", "sap_docentry", "sap_line_num"],
+        )
+        # sap_line_num in Odoo is stored as SAP linenum + 2
+        order_lines_dict = {
+            (line["sap_docentry"], line["sap_line_num"] - 2): line["id"]
+            for line in order_lines
+        }
+        return {
+            (row["invoicedocentry"], row["invoicelinenum"]): order_lines_dict.get(
+                (row["orderdocentry"], row["orderlinenum"])
+            )
+            for row in rel_lines
+        }
+
+    @staticmethod
+    def _get_order_line_links_raw_for_config(cr, config):
+        """Like _get_order_line_links_raw but takes an explicit config dict."""
+        cr.execute(
+            """
+            SELECT
+                {invoice_line_table}.DocEntry AS invoicedocentry,
+                {invoice_line_table}.LineNum AS invoicelinenum,
+                {invoice_line_table}.Quantity AS quantity,
+                CASE
+                    WHEN {invoice_line_table}.BaseType = {order_basetype}
+                        THEN {invoice_line_table}.BaseEntry
+                    WHEN {invoice_line_table}.BaseType = {picking_basetype}
+                        THEN (
+                            SELECT BaseEntry
+                              FROM {picking_table}
+                             WHERE DocEntry = {invoice_line_table}.BaseEntry
+                               AND LineNum = {invoice_line_table}.BaseLine
+                        )
+                END AS orderdocentry,
+                CASE
+                    WHEN {invoice_line_table}.BaseType = {order_basetype}
+                        THEN {invoice_line_table}.BaseLine
+                    WHEN {invoice_line_table}.BaseType = {picking_basetype}
+                        THEN (
+                            SELECT BaseLine
+                              FROM {picking_table}
+                             WHERE DocEntry = {invoice_line_table}.BaseEntry
+                               AND LineNum = {invoice_line_table}.BaseLine
+                        )
+                END AS orderlinenum
+              FROM {invoice_line_table}
+             WHERE {invoice_line_table}.BaseType IN (
+                   {picking_basetype}, {order_basetype}
+               )
+            """.format(
+                invoice_line_table=config["invoice_line_table"],
+                picking_table=config["picking_table"],
+                picking_basetype=config["picking_basetype"],
+                order_basetype=config["order_basetype"],
+            )
+        )
+        return cr.dictfetchall()
 
     @api.model
     def _get_cogs_line_vals(self, row, lookups):
@@ -372,11 +508,22 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         )
         tax_account_ids = {r["account_id"][0] for r in rep_lines}
 
+        # SO-link lookups: build (invoice_docentry, invoice_linenum) → sol_id
+        # for both inv1 (transtype 13) and rin1 (transtype 14) in one pass.
+        # This dict is threaded into _build_enriched_vals → _get_move_vals so
+        # that _get_row_vals can link each product line to its sale.order.line.
+        order_lines_dict = self._get_sale_order_lines_dict(ctx.cr)
+        _logger.info(
+            "Extracted %d SO-link entries for JDT1 sales transtypes.",
+            len(order_lines_dict),
+        )
+
         return {
             "partners": partners_dict,
             "lookups": lookups,
             "misc_journal_id": misc_journal.id if misc_journal else False,
             "tax_account_ids": tax_account_ids,
+            "order_lines_dict": order_lines_dict,
         }
 
     def _embed_enrichment(self, sap_cr, enrichable_headers):
@@ -439,6 +586,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         lookups = meta["lookups"]
         misc_journal_id = meta["misc_journal_id"]
         tax_account_ids = meta["tax_account_ids"]
+        order_lines_dict = meta.get("order_lines_dict", {})
 
         accounts_dict = lookups["accounts"]
         currencies_dict = lookups["currencies"]
@@ -466,7 +614,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 if transtype in _ENRICHABLE_TYPES and config and doc:
                     move_vals = self._build_enriched_vals(
                         header, doc, doc_lines, config,
-                        partners_dict, lookups,
+                        partners_dict, lookups, order_lines_dict,
                     )
                     if move_vals:
                         enriched_count += 1
@@ -498,6 +646,18 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                     )
 
                 if not move_vals:
+                    # Generic-fallback path: used when the enriched build
+                    # returned None (partner not found, no doc, or all-note
+                    # lines) AND for non-enrichable transtypes.
+                    #
+                    # For sales transtypes (13/14) that fall through here,
+                    # the resulting move_type='entry' lines have empty
+                    # sale_line_ids by design.  No inv1/rin1 source row is
+                    # available for these JDT1-only entries (e.g. invoices
+                    # whose SAP header was canceled/excluded), so no
+                    # BaseEntry/BaseLine chain exists to resolve to an rdr1
+                    # line.  This is expected; see design doc 02-design.md
+                    # "Risks — JDT1 generic-fallback invoices have no SO link".
                     move_vals = self._build_generic_entry_vals(
                         header, jdt1_lines, accounts_dict, partners_dict,
                         currencies_dict, company_currency_id,
@@ -748,7 +908,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
     # ----------------------------------------------------------------
 
     def _build_enriched_vals(self, header, doc, doc_lines, config,
-                             partners_dict, lookups):
+                             partners_dict, lookups, order_lines_dict=None):
         """Build enriched move vals from embedded source doc."""
         partner_id = partners_dict.get(doc.get("cardcode"))
         if not partner_id:
@@ -759,7 +919,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         vals = self._get_move_vals(
             doc, partner_id, lines_dict,
             config["sap_table"], config["line_table"],
-            {}, lookups,
+            order_lines_dict or {}, lookups,
         )
 
         if not vals.get("line_ids"):
@@ -1156,3 +1316,143 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                         ojdt_transids.add(row[0])
 
         return ojdt_transids
+
+
+@ETL.pipeline(
+    target_model="sale.order.line",
+    importer_name="account.move.jdt1.sale.post.processor",
+    sap_source="ojdt",
+    depends_on=["account.move.jdt1.importer"],
+    allow_multiprocessing=False,
+)
+class AccountMoveJDT1SalePostProcessor(models.AbstractModel):
+    """Post-processor: populate sap_qty_invoiced after JDT1 sales import.
+
+    Runs after account.move.jdt1.importer completes. Calls
+    import_order_invoiced_qty to aggregate SAP inv1/rin1 quantities per
+    sale.order.line and write sap_qty_invoiced, then triggers recomputation
+    of qty_invoiced and invoice_status via _trigger_recomputation.
+
+    Mirrors AccountMoveInvoicePostProcessor in account_move_etl.py but
+    is driven from JDT1 completion rather than the legacy OINV pipeline.
+    """
+
+    _name = "account.move.jdt1.sale.post.processor"
+    _description = "JDT1 Sale Post-Processor - Update Order Line Invoiced Quantities"
+    _inherit = "sap.account.move.importer.mixin"
+
+    def _get_order_line_link_config(self):
+        """Return inv1/rdr1/dln1 config (used by import_order_invoiced_qty).
+
+        import_order_invoiced_qty calls _get_order_line_links_raw, which we
+        override below to UNION inv1 (positive qty) and rin1 (negated qty).
+        This config is the canonical table reference for the order_line_model.
+        """
+        return {
+            "invoice_line_table": "inv1",
+            "order_line_table": "rdr1",
+            "picking_table": "dln1",
+            "picking_basetype": 15,
+            "order_basetype": 17,
+            "order_line_model": "sale.order.line",
+        }
+
+    def _get_order_line_link_vals(self, order_line_id):
+        return {"sale_line_ids": [Command.link(order_line_id)]}
+
+    def _get_order_line_links_raw(self, cr):
+        """Return signed per-line quantities for inv1 and rin1 combined.
+
+        inv1 quantities are positive (units invoiced); rin1 quantities are
+        stored positive in SAP (units credited/returned) and are negated here
+        so SUM(quantity) in import_order_invoiced_qty yields the net invoiced
+        quantity (invoice total − credit total).  This is the convention that
+        test plan item 3 locks down: 10 invoiced − 3 credited = 7 net.
+        """
+        cr.execute(
+            """
+            SELECT
+                inv1.DocEntry AS invoicedocentry,
+                inv1.LineNum  AS invoicelinenum,
+                inv1.Quantity AS quantity,
+                CASE
+                    WHEN inv1.BaseType = 17 THEN inv1.BaseEntry
+                    WHEN inv1.BaseType = 15 THEN (
+                        SELECT BaseEntry FROM dln1
+                         WHERE DocEntry = inv1.BaseEntry
+                           AND LineNum  = inv1.BaseLine
+                    )
+                END AS orderdocentry,
+                CASE
+                    WHEN inv1.BaseType = 17 THEN inv1.BaseLine
+                    WHEN inv1.BaseType = 15 THEN (
+                        SELECT BaseLine FROM dln1
+                         WHERE DocEntry = inv1.BaseEntry
+                           AND LineNum  = inv1.BaseLine
+                    )
+                END AS orderlinenum
+              FROM inv1
+             WHERE inv1.BaseType IN (15, 17)
+
+            UNION ALL
+
+            SELECT
+                rin1.DocEntry AS invoicedocentry,
+                rin1.LineNum  AS invoicelinenum,
+                -rin1.Quantity AS quantity,   -- negate: credit reduces net
+                CASE
+                    WHEN rin1.BaseType = 17 THEN rin1.BaseEntry
+                    WHEN rin1.BaseType = 15 THEN (
+                        SELECT BaseEntry FROM dln1
+                         WHERE DocEntry = rin1.BaseEntry
+                           AND LineNum  = rin1.BaseLine
+                    )
+                END AS orderdocentry,
+                CASE
+                    WHEN rin1.BaseType = 17 THEN rin1.BaseLine
+                    WHEN rin1.BaseType = 15 THEN (
+                        SELECT BaseLine FROM dln1
+                         WHERE DocEntry = rin1.BaseEntry
+                           AND LineNum  = rin1.BaseLine
+                    )
+                END AS orderlinenum
+              FROM rin1
+             WHERE rin1.BaseType IN (15, 17)
+            """
+        )
+        return cr.dictfetchall()
+
+    @api.model
+    def _trigger_recomputation(self, lines):
+        """Trigger recomputation of invoiced quantities and order status."""
+        _logger.info(
+            "JDT1 post-processor: recomputing invoiced qty for %d %s entries",
+            len(lines), lines._name,
+        )
+        orders = lines.order_id
+        lines._compute_qty_invoiced()
+        lines._compute_qty_to_invoice()
+        _logger.info(
+            "JDT1 post-processor: recomputing invoice_status for %d %s",
+            len(orders), orders._name,
+        )
+        orders._compute_invoice_status()
+        self.env.flush_all()
+
+    @ETL.extract("ojdt")
+    def extract_for_post_processing(self, ctx: ETLContext):
+        """Trivial extract — satisfies ETL contract."""
+        return {}
+
+    @ETL.transform()
+    def transform_for_post_processing(self, ctx: ETLContext, extracted):
+        """Trivial transform — satisfies ETL contract."""
+        return {}
+
+    @ETL.load()
+    def update_order_invoiced_qty(self, ctx: ETLContext, transformed):
+        """Write sap_qty_invoiced for all SAP-imported sale.order.line rows."""
+        _logger.info(
+            "JDT1 post-processor: updating sale.order.line.sap_qty_invoiced"
+        )
+        self.import_order_invoiced_qty(ctx.cr)
