@@ -41,4 +41,61 @@ changed = orders.filtered(lambda o: o.invoice_status == 'to invoice')
 log(f"Remediation complete: {len(orders)} orders scanned, {len(changed)} now 'to invoice'.")
         </field>
     </record>
+    <!--
+        Remediation server action for SAP-migrated sale order lines with stale state.
+
+        sale_order_line.state is a stored related field (related='order_id.state',
+        store=True, precompute=True). The SAP importer writes sale_order.state via raw
+        SQL (bypassing ORM), so the stored line.state columns were never updated and
+        remain 'draft' even when the parent order is 'sale' or 'cancel'.
+
+        This action selects every sale.order.line whose state differs from its parent
+        order's state (excluding draft orders, which are legitimately draft), fixes them
+        via raw SQL + invalidate_model(['state']) + flush_all(), then recomputes
+        qty_to_invoice and invoice_status on the touched lines and their parent orders.
+
+        Idempotent: safe to re-run.  Only invalidates 'state' — leaves the
+        sap_qty_invoiced cache (bemade-tools#17 fix) intact.
+
+        AC#5, AC#6, AC#7, AC#8.
+    -->
+    <record id="remediate_stale_line_state" model="ir.actions.server">
+        <field name="name">RWI: Remediate stale line state on SAP-migrated SOs</field>
+        <field name="model_id" ref="sale.model_sale_order_line"/>
+        <field name="binding_model_id" ref="sale.model_sale_order_line"/>
+        <field name="state">code</field>
+        <field name="code">
+# Fix sale_order_line.state rows that diverged from their parent order's state.
+# Only targets non-draft orders (draft orders legitimately have draft lines).
+env.cr.execute("""
+    UPDATE sale_order_line sol
+       SET state = so.state
+      FROM sale_order so
+     WHERE sol.order_id = so.id
+       AND sol.state != so.state
+       AND so.state NOT IN ('draft', 'sent')
+""")
+rows_fixed = env.cr.rowcount
+
+# Invalidate only 'state' — preserves sap_qty_invoiced cache from bemade-tools#17.
+env['sale.order.line'].invalidate_model(['state'])
+env.flush_all()
+
+# Recompute qty_to_invoice and invoice_status on touched lines and their orders.
+touched_lines = env['sale.order.line'].search([
+    ('order_id.sap_docnum', '!=', 0),
+    ('order_id.state', 'in', ['sale', 'done']),
+])
+touched_lines._compute_qty_to_invoice()
+touched_lines._compute_invoice_status()
+touched_lines.order_id._compute_invoice_status()
+env.flush_all()
+
+changed_to_invoice = touched_lines.order_id.filtered(
+    lambda o: o.invoice_status == 'to invoice'
+)
+log(f"Remediation complete: {rows_fixed} line(s) fixed, "
+    f"{len(changed_to_invoice)} order(s) now 'to invoice'.")
+        </field>
+    </record>
 </odoo>
