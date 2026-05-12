@@ -583,6 +583,12 @@ class TestJDT1SaleLink(TransactionCase):
             "dln1": [],
         })
 
+        # Flush ORM cache so the stored related field sale_order_line.sap_docentry
+        # (related to order_id.sap_docentry) is written to the DB before the raw
+        # SQL UPDATE in import_order_invoiced_qty runs.  Without this flush the
+        # UPDATE WHERE clause sees sap_docentry=0 and matches nothing.
+        self.env.flush_all()
+
         self.post_proc.import_order_invoiced_qty(sap_cr)
 
         self.env["sale.order.line"].invalidate_model(["sap_qty_invoiced"])
