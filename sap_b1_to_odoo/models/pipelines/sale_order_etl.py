@@ -779,7 +779,17 @@ class SaleOrderPostProcessor(models.AbstractModel):
 
     @api.model
     def _confirm_closed_orders(self, closed_orders):
-        """Mark orders as confirmed and closed (no delivery order)."""
+        """Mark orders as confirmed and closed (no delivery order).
+
+        The sale.order raw SQL UPDATE bypasses ORM machinery (action_confirm is
+        intentionally NOT called here — these closed orders must NOT create delivery
+        orders or run confirmation side-effects).  Because sale_order_line.state is a
+        stored related field (related='order_id.state', store=True, precompute=True),
+        the stored column is NOT updated automatically when we write the parent via raw
+        SQL.  We therefore issue a paired UPDATE on sale_order_line filtered through
+        the same sap_docnum predicate, then invalidate the ORM state cache so that any
+        subsequent compute (e.g. _compute_qty_to_invoice) reads the corrected value.
+        """
         if closed_orders:
             _logger.info(
                 f"Marking {len(closed_orders)} orders as confirmed and closed."
@@ -792,6 +802,23 @@ class SaleOrderPostProcessor(models.AbstractModel):
                     tuple(closed_orders),
                 )
             )
+            # Paired UPDATE: sync line.state with parent order.state.
+            # JOIN through sale_order so we filter by sap_docnum (not present on line).
+            # Intentionally only invalidates 'state' — leaves sap_qty_invoiced cache intact.
+            self.env.cr.execute(
+                SQL(
+                    """
+                    UPDATE sale_order_line
+                       SET state = 'sale'
+                      FROM sale_order
+                     WHERE sale_order_line.order_id = sale_order.id
+                       AND sale_order.sap_docnum IN %s
+                    """,
+                    tuple(closed_orders),
+                )
+            )
+            self.env["sale.order.line"].invalidate_model(["state"])
+            self.env.flush_all()
 
     @api.model
     def _set_delivered_qty_for_closed_orders(self, closed_orders):
@@ -838,7 +865,13 @@ class SaleOrderPostProcessor(models.AbstractModel):
 
     @api.model
     def _cancel_canceled_orders(self, canceled_orders):
-        """Mark canceled orders as cancelled."""
+        """Mark canceled orders as cancelled.
+
+        Same raw-SQL-bypass rationale as _confirm_closed_orders: _action_cancel() must
+        NOT run (no cancel side-effects desired).  Paired UPDATE keeps the stored
+        sale_order_line.state column in sync with the parent order's new state.
+        Only 'state' is invalidated to preserve the sap_qty_invoiced cache.
+        """
         if canceled_orders:
             _logger.info(f"Cancelling {len(canceled_orders)} cancelled orders")
             self.env.cr.execute(
@@ -847,6 +880,23 @@ class SaleOrderPostProcessor(models.AbstractModel):
                     tuple(canceled_orders),
                 )
             )
+            # Paired UPDATE: sync line.state with parent order.state.
+            # JOIN through sale_order so we filter by sap_docnum (not present on line).
+            # Intentionally only invalidates 'state' — leaves sap_qty_invoiced cache intact.
+            self.env.cr.execute(
+                SQL(
+                    """
+                    UPDATE sale_order_line
+                       SET state = 'cancel'
+                      FROM sale_order
+                     WHERE sale_order_line.order_id = sale_order.id
+                       AND sale_order.sap_docnum IN %s
+                    """,
+                    tuple(canceled_orders),
+                )
+            )
+            self.env["sale.order.line"].invalidate_model(["state"])
+            self.env.flush_all()
 
     @api.model
     def _recompute_delivery_status(self):
