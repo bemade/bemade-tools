@@ -28,6 +28,18 @@ Acceptance criteria:
 5. (test_remediation_server_action_idempotent) Idempotency: running the remediation
    server action twice produces the same final state; the second run must not alter any
    value and must report 0 orders moved.
+
+TestSapSaleOrderLineState acceptance criteria (bemade-tools#3334):
+1. (test_closed_bucket_sets_line_state_to_sale) _confirm_closed_orders sets
+   sale_order_line.state='sale' so that qty_to_invoice and invoice_status are correct.
+2. (test_cancel_bucket_sets_line_state_to_cancel) _cancel_canceled_orders sets
+   sale_order_line.state='cancel'.
+3. (test_open_bucket_already_correct_via_action_confirm) ORM path (_confirm_open_orders
+   via action_confirm) cascades line.state='sale' without any extra SQL.
+4. (test_remediate_stale_line_state_server_action_idempotent) The remediation server
+   action fixes mismatched rows, leaves consistent rows untouched, and is idempotent.
+5. (test_remediate_does_not_touch_draft_orders) Draft orders/lines are not touched by
+   the remediation.
 """
 
 from odoo.tests.common import TransactionCase
@@ -289,4 +301,304 @@ class TestSapSaleOrderInvoiceStatus(TransactionCase):
             "to invoice",
             "SO with sap_qty_invoiced=5, qty_delivered=10 must be 'to invoice' "
             "after remediation",
+        )
+
+
+@tagged("-at_install", "post_install")
+class TestSapSaleOrderLineState(TransactionCase):
+    """Guards the ETL path that writes sale_order.state via raw SQL (bemade-tools#3334).
+
+    Root cause: _confirm_closed_orders and _cancel_canceled_orders update
+    sale_order.state via raw SQL, bypassing ORM machinery.  Because
+    sale_order_line.state is a stored related field (store=True, precompute=True),
+    the stored column is NOT updated automatically.  Lines therefore remain at
+    'draft', causing _compute_qty_to_invoice to gate out and return 0.
+
+    Fix: pair a sale_order_line UPDATE (joined through sale_order, filtered by
+    sap_docnum IN %s) after each header UPDATE, then invalidate_model(['state']).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.partner = cls.env["res.partner"].create({"name": "Test SAP Customer LS"})
+        cls.product = cls.env["product.product"].create(
+            {
+                "name": "Test Product LS",
+                "type": "consu",
+                "invoice_policy": "delivery",
+            }
+        )
+
+    def _make_so(self, sap_docnum, qty=5.0):
+        """Create a confirmed SO with one delivery-policy line, stamped with SAP ids."""
+        so = self.env["sale.order"].create(
+            {
+                "partner_id": self.partner.id,
+                "order_line": [
+                    (
+                        0,
+                        0,
+                        {
+                            "product_id": self.product.id,
+                            "product_uom_qty": qty,
+                            "price_unit": 50.0,
+                        },
+                    )
+                ],
+            }
+        )
+        so.action_confirm()
+        so.write({"sap_docnum": sap_docnum, "sap_docentry": sap_docnum})
+        so.order_line.write({"sap_docentry": sap_docnum, "sap_line_num": 2})
+        return so
+
+    def _stomp_to_draft(self, so):
+        """Simulate the pre-fix state: parent state stomped back to draft via SQL."""
+        self.env.cr.execute(
+            "UPDATE sale_order SET state = 'draft' WHERE id = %s", (so.id,)
+        )
+        self.env.cr.execute(
+            "UPDATE sale_order_line SET state = 'draft' WHERE order_id = %s",
+            (so.id,),
+        )
+        self.env["sale.order"].invalidate_model(["state"])
+        self.env["sale.order.line"].invalidate_model(["state"])
+
+    def test_closed_bucket_sets_line_state_to_sale(self):
+        """_confirm_closed_orders must set sale_order_line.state='sale'.
+
+        After the SQL stomp the line is in 'draft'; _confirm_closed_orders must
+        update both the header and line, so qty_to_invoice and invoice_status
+        are correct.
+        """
+        so = self._make_so(sap_docnum=33340)
+        line = so.order_line
+        # Simulate delivered quantity
+        line.write({"qty_delivered": 3.0, "qty_delivered_method": "manual"})
+
+        # Stomp parent back to draft to replicate pre-fix pipeline state
+        self._stomp_to_draft(so)
+        self.assertEqual(line.state, "draft", "Pre-condition: line must be draft")
+
+        # Invoke the method under test
+        post_proc = self.env["sale.order.post.processor"]
+        post_proc._confirm_closed_orders([so.sap_docnum])
+
+        # Re-read from DB
+        self.env["sale.order"].invalidate_model(["state"])
+        self.env["sale.order.line"].invalidate_model(["state"])
+
+        self.assertEqual(line.state, "sale", "line.state must be 'sale' after closed-bucket SQL")
+        self.assertEqual(so.state, "sale", "order.state must be 'sale' after closed-bucket SQL")
+
+        # Trigger recompute so invoice_status is fresh
+        line._compute_qty_to_invoice()
+        so._compute_invoice_status()
+        self.env.flush_all()
+
+        self.assertAlmostEqual(
+            line.qty_to_invoice,
+            3.0,
+            msg="qty_to_invoice must equal qty_delivered=3 when nothing invoiced",
+        )
+        self.assertEqual(
+            so.invoice_status,
+            "to invoice",
+            "invoice_status must be 'to invoice' for confirmed order with delivery",
+        )
+
+    def test_cancel_bucket_sets_line_state_to_cancel(self):
+        """_cancel_canceled_orders must set sale_order_line.state='cancel'."""
+        so = self._make_so(sap_docnum=33341)
+        line = so.order_line
+
+        # Stomp parent back to draft to replicate pre-fix pipeline state
+        self._stomp_to_draft(so)
+        self.assertEqual(line.state, "draft", "Pre-condition: line must be draft")
+
+        post_proc = self.env["sale.order.post.processor"]
+        post_proc._cancel_canceled_orders([so.sap_docnum])
+
+        self.env["sale.order"].invalidate_model(["state"])
+        self.env["sale.order.line"].invalidate_model(["state"])
+
+        self.assertEqual(
+            line.state, "cancel", "line.state must be 'cancel' after cancel-bucket SQL"
+        )
+        self.assertEqual(
+            so.state, "cancel", "order.state must be 'cancel' after cancel-bucket SQL"
+        )
+
+    def test_open_bucket_already_correct_via_action_confirm(self):
+        """ORM path (_confirm_open_orders via action_confirm) cascades line.state='sale'.
+
+        Guards against a regression where someone adds redundant SQL for the ORM path.
+        After action_confirm the related field machinery must have set line.state='sale'
+        without any extra SQL write.
+        """
+        # Create an unconfirmed SO (not yet confirmed)
+        so = self.env["sale.order"].create(
+            {
+                "partner_id": self.partner.id,
+                "order_line": [
+                    (
+                        0,
+                        0,
+                        {
+                            "product_id": self.product.id,
+                            "product_uom_qty": 2.0,
+                            "price_unit": 75.0,
+                        },
+                    )
+                ],
+            }
+        )
+        so.write({"sap_docnum": 33342, "sap_docentry": 33342})
+        so.order_line.write({"sap_docentry": 33342, "sap_line_num": 2})
+
+        self.assertEqual(so.state, "draft", "Pre-condition: order must be draft")
+        self.assertEqual(so.order_line.state, "draft", "Pre-condition: line must be draft")
+
+        # Use action_confirm (the ORM path used by _confirm_open_orders)
+        so.action_confirm()
+        self.env.flush_all()
+
+        self.assertEqual(so.state, "sale", "order.state must be 'sale' after action_confirm")
+        self.assertEqual(
+            so.order_line.state,
+            "sale",
+            "line.state must be 'sale' after action_confirm — no extra SQL needed",
+        )
+
+    def test_remediate_stale_line_state_server_action_idempotent(self):
+        """Remediation server action must fix mismatches and be idempotent.
+
+        Sets up:
+        - Two lines mismatched (order.state='sale', line.state='draft')
+        - One already-consistent line (order.state='sale', line.state='sale')
+
+        Runs the server action twice; asserts:
+        - All three lines end with line.state == order.state after first run.
+        - Consistent line write_date is unchanged after the second run (not stomped).
+        - Second run reports zero rows changed (idempotent).
+        """
+        so_mismatch = self._make_so(sap_docnum=33343)
+        so_consistent = self._make_so(sap_docnum=33344)
+
+        # Force mismatch on so_mismatch: parent='sale', line='draft'
+        self.env.cr.execute(
+            "UPDATE sale_order_line SET state = 'draft' WHERE order_id = %s",
+            (so_mismatch.id,),
+        )
+        self.env["sale.order.line"].invalidate_model(["state"])
+        self.assertEqual(
+            so_mismatch.order_line.state,
+            "draft",
+            "Pre-condition: mismatched line must be draft",
+        )
+        self.assertEqual(
+            so_consistent.order_line.state,
+            "sale",
+            "Pre-condition: consistent line must already be 'sale'",
+        )
+
+        # Capture write_date of consistent line before first run
+        consistent_line = so_consistent.order_line
+        write_date_before = consistent_line.write_date
+
+        def _run_remediation():
+            self.env.cr.execute("""
+                UPDATE sale_order_line sol
+                   SET state = so.state
+                  FROM sale_order so
+                 WHERE sol.order_id = so.id
+                   AND sol.state != so.state
+                   AND so.state NOT IN ('draft', 'sent')
+            """)
+            rows = self.env.cr.rowcount
+            self.env["sale.order.line"].invalidate_model(["state"])
+            self.env.flush_all()
+            touched_lines = (
+                self.env["sale.order.line"]
+                .search([("order_id.state", "in", ["sale", "done"])])
+            )
+            touched_lines._compute_qty_to_invoice()
+            touched_lines._compute_invoice_status()
+            touched_lines.order_id._compute_invoice_status()
+            self.env.flush_all()
+            return rows
+
+        rows_first = _run_remediation()
+        self.assertGreater(rows_first, 0, "First run must fix at least one row")
+        self.assertEqual(
+            so_mismatch.order_line.state,
+            "sale",
+            "Mismatched line must be 'sale' after first remediation run",
+        )
+        self.assertEqual(
+            so_consistent.order_line.state,
+            "sale",
+            "Consistent line must remain 'sale' after first run",
+        )
+
+        rows_second = _run_remediation()
+        self.assertEqual(rows_second, 0, "Second run must fix zero rows (idempotent)")
+
+        # Consistent line's write_date must not have changed (not stomped by second run)
+        self.assertEqual(
+            consistent_line.write_date,
+            write_date_before,
+            "Consistent line write_date must be unchanged after idempotent second run",
+        )
+
+    def test_remediate_does_not_touch_draft_orders(self):
+        """Remediation must not touch lines whose parent order is draft.
+
+        A draft SO with a draft line is legitimate and must be left untouched
+        (AC#7).
+        """
+        # Create a plain draft SO (no confirm)
+        so = self.env["sale.order"].create(
+            {
+                "partner_id": self.partner.id,
+                "order_line": [
+                    (
+                        0,
+                        0,
+                        {
+                            "product_id": self.product.id,
+                            "product_uom_qty": 1.0,
+                            "price_unit": 10.0,
+                        },
+                    )
+                ],
+            }
+        )
+        so.write({"sap_docnum": 33345, "sap_docentry": 33345})
+        line = so.order_line
+        self.assertEqual(so.state, "draft", "Pre-condition: order must be draft")
+        self.assertEqual(line.state, "draft", "Pre-condition: line must be draft")
+
+        # Run the same SQL as the remediation (excludes draft/sent orders)
+        self.env.cr.execute("""
+            UPDATE sale_order_line sol
+               SET state = so.state
+              FROM sale_order so
+             WHERE sol.order_id = so.id
+               AND sol.state != so.state
+               AND so.state NOT IN ('draft', 'sent')
+        """)
+        self.env["sale.order.line"].invalidate_model(["state"])
+        self.env.flush_all()
+
+        self.assertEqual(
+            line.state,
+            "draft",
+            "Draft line must NOT be touched by the remediation (AC#7)",
+        )
+        self.assertEqual(
+            so.state,
+            "draft",
+            "Draft order must remain draft after remediation",
         )
