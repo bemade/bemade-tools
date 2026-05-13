@@ -217,6 +217,8 @@ class SaleOrderHeaderImporter(models.AbstractModel):
                 "sap_docnum": header["docnum"],
                 "sap_docentry": header["docentry"],
                 "sap_atcentry": header["atcentry"],
+                "sap_table": "ordr",
+                "sap_docstatus": header.get("docstatus"),
                 "partner_id": partner_id,
                 "pricelist_id": pricelist_id,
                 "partner_invoice_id": partner_invoice_id,
@@ -290,7 +292,7 @@ class SaleOrderLineImporter(models.AbstractModel):
 
         # Get orders that exist in Odoo
         ctx.env.cr.execute(
-            "SELECT DISTINCT sap_docentry FROM sale_order WHERE sap_docentry IS NOT NULL"
+            "SELECT DISTINCT sap_docentry FROM sale_order WHERE sap_docentry IS NOT NULL AND sap_table = 'ordr'"
         )
         existing_docentries = tuple(row[0] for row in ctx.env.cr.fetchall())
 
@@ -347,7 +349,9 @@ class SaleOrderLineImporter(models.AbstractModel):
         products_map = {product.sap_item_code: product.id for product in products}
 
         docentries = list(lines_by_order.keys())
-        orders = ctx.env["sale.order"].search([("sap_docentry", "in", docentries)])
+        orders = ctx.env["sale.order"].search(
+            [("sap_docentry", "in", docentries), ("sap_table", "=", "ordr")],
+        )
         orders_map = {order.sap_docentry: order.id for order in orders}
 
         # Pre-load all sale taxes for fast lookup
@@ -510,7 +514,7 @@ class SaleOrderTextLineImporter(models.AbstractModel):
 
         # Get orders that exist in Odoo
         ctx.env.cr.execute(
-            "SELECT DISTINCT sap_docentry FROM sale_order WHERE sap_docentry IS NOT NULL"
+            "SELECT DISTINCT sap_docentry FROM sale_order WHERE sap_docentry IS NOT NULL AND sap_table = 'ordr'"
         )
         existing_docentries = tuple(row[0] for row in ctx.env.cr.fetchall())
 
@@ -569,7 +573,9 @@ class SaleOrderTextLineImporter(models.AbstractModel):
         _logger.info("Pre-computing lookup dictionaries...")
 
         docentries = list(lines_by_order.keys())
-        orders = ctx.env["sale.order"].search([("sap_docentry", "in", docentries)])
+        orders = ctx.env["sale.order"].search(
+            [("sap_docentry", "in", docentries), ("sap_table", "=", "ordr")],
+        )
         orders_map = {order.sap_docentry: order.id for order in orders}
 
         _logger.info("Lookup dictionaries ready.")
@@ -946,37 +952,49 @@ class SaleOrderPostProcessor(models.AbstractModel):
             ]
         )
 
-        # Process each order's pickings
+        # Process each order's pickings.  Multi-step warehouses (Pick → Pack
+        # → Out) chain pickings: validating one step creates / releases the
+        # next, so we loop until no validatable pickings remain.  Without the
+        # loop, qty_delivered on the sale.order.line stays 0 because only the
+        # final customer-facing OUT picking writes qty_delivered, and OUT
+        # never gets reached on first pass.
         for order in orders:
-            pickings = order.picking_ids.filtered(
-                lambda p: p.state in ["waiting", "confirmed", "assigned"]
-            )
-            if not pickings:
-                continue
-
-            sap_lines = order_lines[order.sap_docnum]
-            for picking in pickings:
-                for move in picking.move_ids:
-                    order_line = move.sale_line_id
-                    if not order_line:
-                        move.quantity = 0
-                        continue
-
-                    # Find corresponding SAP line
-                    sap_line = next(
-                        (
-                            l
-                            for l in sap_lines
-                            if l["linenum"] + 2 == order_line.sap_line_num
-                        ),
-                        None,
-                    )
-                    if sap_line:
-                        move.quantity = sap_line["quantity"]
-
-                # Validate picking if any moves have quantities
-                if any(move.quantity > 0 for move in picking.move_ids):
-                    picking.with_context(skip_backorder=True).button_validate()
+            order_sap_lines = order_lines[order.sap_docnum]
+            for _ in range(10):  # iteration guard against unexpected chains
+                pickings = order.picking_ids.filtered(
+                    lambda p: p.state in ("waiting", "confirmed", "assigned")
+                )
+                if not pickings:
+                    break
+                progressed = False
+                for picking in pickings:
+                    for move in picking.move_ids:
+                        order_line = move.sale_line_id
+                        if not order_line:
+                            move.quantity = 0
+                            continue
+                        sap_line = next(
+                            (
+                                l
+                                for l in order_sap_lines
+                                if l["linenum"] + 2 == order_line.sap_line_num
+                            ),
+                            None,
+                        )
+                        if sap_line:
+                            move.quantity = sap_line["quantity"]
+                    if any(move.quantity > 0 for move in picking.move_ids):
+                        prior_state = picking.state
+                        # skip_sms bypasses the confirm.stock.sms wizard that
+                        # blocks customer-facing OUT picking validation when
+                        # the partner has SMS delivery notifications enabled.
+                        picking.with_context(
+                            skip_backorder=True, skip_sms=True,
+                        ).button_validate()
+                        if picking.state != prior_state:
+                            progressed = True
+                if not progressed:
+                    break
 
         _logger.info(
             f"Validated pickings for {len(orders)} orders based on SAP quantities"

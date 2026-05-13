@@ -220,6 +220,7 @@ class SaleQuotationHeaderImporter(models.AbstractModel):
                 "sap_docnum": header["docnum"],
                 "sap_docentry": header["docentry"],
                 "sap_atcentry": header["atcentry"],
+                "sap_table": "oqut",
                 "partner_id": partner_id,
                 "pricelist_id": pricelist_id,
                 "partner_invoice_id": partner_invoice_id,
@@ -290,7 +291,7 @@ class SaleQuotationLineImporter(models.AbstractModel):
 
         # Get quotations that exist in Odoo
         ctx.env.cr.execute(
-            "SELECT DISTINCT sap_docentry FROM sale_order WHERE sap_docentry IS NOT NULL"
+            "SELECT DISTINCT sap_docentry FROM sale_order WHERE sap_docentry IS NOT NULL AND sap_table = 'oqut'"
         )
         existing_docentries = tuple(row[0] for row in ctx.env.cr.fetchall())
 
@@ -346,7 +347,9 @@ class SaleQuotationLineImporter(models.AbstractModel):
         products_map = {product.sap_item_code: product.id for product in products}
 
         docentries = list(lines_by_order.keys())
-        orders = ctx.env["sale.order"].search([("sap_docentry", "in", docentries)])
+        orders = ctx.env["sale.order"].search(
+            [("sap_docentry", "in", docentries), ("sap_table", "=", "oqut")],
+        )
         orders_map = {order.sap_docentry: order.id for order in orders}
 
         # Pre-load all sale taxes for fast lookup
@@ -509,7 +512,7 @@ class SaleQuotationTextLineImporter(models.AbstractModel):
 
         # Get quotations that exist in Odoo
         ctx.env.cr.execute(
-            "SELECT DISTINCT sap_docentry FROM sale_order WHERE sap_docentry IS NOT NULL"
+            "SELECT DISTINCT sap_docentry FROM sale_order WHERE sap_docentry IS NOT NULL AND sap_table = 'oqut'"
         )
         existing_docentries = tuple(row[0] for row in ctx.env.cr.fetchall())
 
@@ -568,7 +571,9 @@ class SaleQuotationTextLineImporter(models.AbstractModel):
         _logger.info("Pre-computing lookup dictionaries...")
 
         docentries = list(lines_by_order.keys())
-        orders = ctx.env["sale.order"].search([("sap_docentry", "in", docentries)])
+        orders = ctx.env["sale.order"].search(
+            [("sap_docentry", "in", docentries), ("sap_table", "=", "oqut")],
+        )
         orders_map = {order.sap_docentry: order.id for order in orders}
 
         _logger.info("Lookup dictionaries ready.")

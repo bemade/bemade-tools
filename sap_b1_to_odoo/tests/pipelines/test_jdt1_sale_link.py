@@ -666,3 +666,222 @@ class TestJDT1SaleLink(TransactionCase):
             "no",
             "invoice_status must be 'no' for SOL with no delivery and no inv link.",
         )
+
+    # -----------------------------------------------------------------------
+    # AC8: JDT1 must not thread the inv1/rin1 order_lines_dict for pch1/rpc1
+    # transtypes (regression for the vendor-bill→sale_line_ids contamination
+    # bug — inv1 and pch1 DocEntry sequences in SAP B1 are independent and
+    # commonly collide on (docentry, linenum), which would falsely link
+    # vendor-bill AMLs into sale_line_ids if the dict were shared).
+    # -----------------------------------------------------------------------
+
+    def test_pch1_transtype_does_not_receive_order_lines_dict(self):
+        """transform_journal_entries must pass {} to _build_enriched_vals for pch1/rpc1.
+
+        Spies on the importer's _build_enriched_vals; runs the transform with
+        one transtype-18 (opch/pch1) header and one transtype-13 (oinv/inv1)
+        header, both with the same collision keys; asserts the sale_links dict
+        is non-empty for inv1 and empty for pch1.
+        """
+        from odoo.addons.etl_framework import ETLContext
+
+        so = self._make_confirmed_so(sap_docentry=4000, sap_docnum=4000)
+
+        # Pre-populate order_lines_dict-resolving mock so extract_lookups
+        # produces a non-empty dict.  We bypass extract_lookups by calling
+        # transform_journal_entries with a hand-built `extracted` payload.
+
+        captured = []
+        real_build = self.importer._build_enriched_vals
+
+        def _spy(self_, header, doc, doc_lines, config,
+                 partners_dict, lookups, order_lines_dict_arg):
+            captured.append({
+                "transtype": header["transtype"],
+                "line_table": config["line_table"],
+                "order_lines_dict": dict(order_lines_dict_arg or {}),
+            })
+            # Return a minimal move_vals stub so transform_journal_entries
+            # keeps going without crashing on downstream metadata extraction.
+            return {
+                "move_type": config.get("move_type", "entry"),
+                "line_ids": [],
+                "ref": "stub",
+            }
+
+        # Patch via monkey-patch on the AbstractModel class (test scope only)
+        original = type(self.importer)._build_enriched_vals
+        type(self.importer)._build_enriched_vals = _spy
+        try:
+            # Construct extracted with two enrichable headers: one inv1, one pch1
+            order_lines_dict = {(2000, 0): so.order_line.id}
+            extracted = {
+                "extract_journal_entries": {
+                    "records": [
+                        {
+                            "transid": 1,
+                            "transtype": "13",
+                            "createdby": 2000,
+                            "_lines": [{"acct_formatcode": "X"}],
+                            "_doc": {"docentry": 2000, "cardcode": "C_JDT1TEST"},
+                            "_doc_lines": [],
+                        },
+                        {
+                            "transid": 2,
+                            "transtype": "18",
+                            "createdby": 2000,
+                            "_lines": [{"acct_formatcode": "X"}],
+                            "_doc": {"docentry": 2000, "cardcode": "C_JDT1TEST"},
+                            "_doc_lines": [],
+                        },
+                    ],
+                },
+                "extract_lookups": {
+                    "partners": {"C_JDT1TEST": self.partner.id},
+                    "lookups": {
+                        "accounts": {},
+                        "currencies": {},
+                        "company_currency_id": self.env.company.currency_id.id,
+                        "unallocated_earnings_id": self.unallocated.id,
+                    },
+                    "misc_journal_id": self.misc_journal.id,
+                    "tax_account_ids": set(),
+                    "order_lines_dict": order_lines_dict,
+                },
+            }
+            ctx = MagicMock(spec=ETLContext)
+            ctx.skippable = MagicMock()
+            ctx.skippable.return_value.__enter__ = MagicMock(return_value=None)
+            ctx.skippable.return_value.__exit__ = MagicMock(return_value=False)
+
+            self.importer.transform_journal_entries(ctx, extracted)
+        finally:
+            type(self.importer)._build_enriched_vals = original
+
+        by_transtype = {c["transtype"]: c for c in captured}
+        self.assertIn("13", by_transtype, "inv1 header must have been processed")
+        self.assertIn("18", by_transtype, "pch1 header must have been processed")
+        self.assertEqual(
+            by_transtype["13"]["order_lines_dict"],
+            {(2000, 0): so.order_line.id},
+            "inv1 (transtype 13) must receive the full order_lines_dict.",
+        )
+        self.assertEqual(
+            by_transtype["18"]["order_lines_dict"],
+            {},
+            "pch1 (transtype 18) must receive an empty dict to prevent "
+            "vendor-bill AMLs being linked to sale_line_ids on docentry "
+            "collisions.",
+        )
+
+    # -----------------------------------------------------------------------
+    # AC9: import_order_invoiced_qty must filter by sap_table on the target
+    # sale.order.line, not just (sap_docentry, sap_line_num).  qut1 lines
+    # share the parent SO's sap_docentry (related field) and can collide
+    # with rdr1 sap_line_num — without the filter they get bogus
+    # sap_qty_invoiced writes.
+    # -----------------------------------------------------------------------
+
+    def test_import_order_invoiced_qty_filters_by_sap_table(self):
+        """sap_qty_invoiced must be written only to rdr1 lines, not qut1.
+
+        Fixture: a SO with two lines sharing (sap_docentry, sap_line_num):
+        one sap_table='rdr1', one sap_table='qut1'.  After
+        import_order_invoiced_qty, only the rdr1 line gets sap_qty_invoiced.
+        """
+        so = self._make_confirmed_so(sap_docentry=5000, sap_docnum=5000)
+        rdr1_line = so.order_line
+
+        # Add a second SOL on the same SO with sap_table='qut1' and the
+        # same sap_line_num (2) — this is the contamination shape we saw
+        # in production where qut1 lines under ORDR-sourced SOs shared the
+        # docentry/linenum pair.
+        qut1_line = self.env["sale.order.line"].with_context(
+            mail_create_nolog=True,
+        ).create({
+            "order_id": so.id,
+            "product_id": self.product.id,
+            "product_uom_qty": 1.0,
+            "price_unit": 50.0,
+            "sap_line_num": 2,
+            "sap_table": "qut1",
+        })
+        self.env.flush_all()
+
+        sap_cr = _make_sap_cursor({
+            "inv1": [
+                {
+                    "DocEntry": 7000,
+                    "LineNum": 0,
+                    "quantity": 10.0,
+                    "BaseType": 17,
+                    "BaseEntry": 5000,
+                    "BaseLine": 0,
+                    "invoicedocentry": 7000,
+                    "invoicelinenum": 0,
+                    "orderdocentry": 5000,
+                    "orderlinenum": 0,
+                }
+            ],
+            "rin1": [],
+            "dln1": [],
+        })
+
+        self.post_proc.import_order_invoiced_qty(sap_cr)
+
+        self.env["sale.order.line"].invalidate_model(["sap_qty_invoiced"])
+        self.assertAlmostEqual(
+            rdr1_line.sap_qty_invoiced, 10.0, places=2,
+            msg="rdr1 line must receive sap_qty_invoiced=10.",
+        )
+        self.assertFalse(
+            qut1_line.sap_qty_invoiced,
+            "qut1 line must NOT receive sap_qty_invoiced — the UPDATE "
+            "must filter by sap_table to prevent cross-table contamination.",
+        )
+
+    # -----------------------------------------------------------------------
+    # AC10: SAP docstatus='C' (manually closed in SAP) flips invoice_status
+    # to 'invoiced' even when there are no inv1 rows and qty_delivered is
+    # zero — restores the pre-JDT1 behavior of treating SAP-closed orders
+    # as fully invoiced.
+    # -----------------------------------------------------------------------
+
+    def test_invoice_status_invoiced_when_sap_docstatus_c(self):
+        """sap_docstatus='C' on the order forces invoice_status to 'invoiced'.
+
+        Fixture: a confirmed SO with qty_delivered=0, no sap_qty_invoiced,
+        but sap_docstatus='C'.  Without the override invoice_status would be
+        'no'; with it the order must show 'invoiced'.
+        """
+        so = self.env["sale.order"].create({
+            "partner_id": self.partner.id,
+            "order_line": [Command.create({
+                "product_id": self.product.id,
+                "product_uom_qty": 5.0,
+                "price_unit": 50.0,
+            })],
+        })
+        so.action_confirm()
+        # Sanity: without sap_docstatus, this is 'no'
+        self.assertEqual(
+            so.invoice_status, "no",
+            "Baseline: undelivered SO must be 'no' before sap_docstatus is set.",
+        )
+
+        so.sap_docstatus = "C"
+        # Trigger the depends explicitly — assignment alone should do it,
+        # but invalidate to be defensive against test-DB caching quirks.
+        so.invalidate_recordset(["invoice_status"])
+        self.assertEqual(
+            so.invoice_status, "invoiced",
+            "sap_docstatus='C' must force invoice_status to 'invoiced'.",
+        )
+
+        # Conversely, sap_docstatus='O' must NOT override the natural state.
+        so.sap_docstatus = "O"
+        so.invalidate_recordset(["invoice_status"])
+        self.assertEqual(
+            so.invoice_status, "no",
+            "sap_docstatus='O' must not affect invoice_status (no short-circuit).",
+        )

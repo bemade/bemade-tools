@@ -329,8 +329,10 @@ class AccountMoveCommon(models.AbstractModel):
             for line in links
             if line["orderdocentry"] and line["orderlinenum"] is not None
         ]
-        model = self._get_order_line_link_config()["order_line_model"]
+        link_config = self._get_order_line_link_config()
+        model = link_config["order_line_model"]
         table = model.replace(".", "_")
+        order_line_table = link_config["order_line_table"].lower()
         field = "sap_qty_invoiced"
         # Create a temporary table to hold the data
         self.env.cr.execute("DROP TABLE IF EXISTS temp_order_lines")
@@ -376,7 +378,9 @@ class AccountMoveCommon(models.AbstractModel):
             ) temp_sum
             WHERE {table}.sap_docentry = temp_sum.docentry
             AND {table}.sap_line_num = temp_sum.linenum
-        """
+            AND {table}.sap_table = %s
+        """,
+            (order_line_table,),
         )
 
         # As there are open SAP invoices that we have imported, we need to deduct

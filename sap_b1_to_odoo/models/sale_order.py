@@ -7,11 +7,23 @@ class SalesOrder(models.Model):
     sap_docentry = fields.Integer(index="btree", copy=False)
     sap_docnum = fields.Integer(index="btree", copy=False)
     sap_atcentry = fields.Integer(index="btree", copy=False)
+    sap_table = fields.Char(index="btree", copy=False)
+    # Source-system DocStatus from SAP ORDR/OQUT: 'O' open, 'C' closed.
+    # Closed orders in SAP are treated as fully invoiced even when there is
+    # no inv1 row — this matches the manual-close behaviour from SAP.
+    sap_docstatus = fields.Char(index="btree", copy=False)
 
     _sap_docnum_unique = models.Constraint(
         "EXCLUDE USING btree (sap_docnum WITH =) WHERE (sap_docnum != 0)",
         "Another sale order with this docnum already exists when set",
     )
+
+    @api.depends("sap_docstatus")
+    def _compute_invoice_status(self):
+        super()._compute_invoice_status()
+        for order in self.filtered(lambda o: o.sap_docstatus == "C"):
+            if order.invoice_status != "invoiced":
+                order.invoice_status = "invoiced"
 
 
 class SaleOrderLine(models.Model):
@@ -37,15 +49,30 @@ class SaleOrderLine(models.Model):
         "Another line with this line number and docentry already exists for this SAP table.",
     )
 
-    @api.depends("invoice_lines.move_id.state", "invoice_lines.quantity", "sap_qty_invoiced")
+    @api.depends(
+        "invoice_lines.move_id.state",
+        "invoice_lines.move_id.move_type",
+        "invoice_lines.quantity",
+        "sap_qty_invoiced",
+    )
     def _compute_qty_invoiced(self):
         super()._compute_qty_invoiced()
-        # Pre-fetch quantities
+        # When SAP-imported invoices/credit-memos are linked via sale_line_ids
+        # (task 3334 wiring), super() already counts them in qty_invoiced — out_invoice
+        # adds, out_refund subtracts.  We want the final qty_invoiced to reflect the
+        # SAP-side net (sap_qty_invoiced) instead of those linked AML contributions,
+        # so subtract the signed sum of sap-tagged invoice_lines and add sap_qty_invoiced
+        # back.  Quantities on account.move.line are unsigned; use move_type to sign.
         sap_lines = self.filtered("sap_qty_invoiced")
-        # Prefetch the quantity instead of running one query per line later
-        _ = sap_lines.invoice_lines.filtered("sap_docentry").mapped("quantity")
+        sap_lines.invoice_lines.filtered("sap_docentry").mapped("move_id.move_type")
         for line in sap_lines:
-            open_sap_qty = line.invoice_lines.filtered("sap_docentry").mapped(
-                "quantity"
-            )
-            line.qty_invoiced += line.sap_qty_invoiced - sum(open_sap_qty)
+            sap_signed = 0.0
+            for aml in line.invoice_lines.filtered("sap_docentry"):
+                move = aml.move_id
+                if move.state == "cancel" and move.payment_state != "invoicing_legacy":
+                    continue
+                if move.move_type == "out_invoice":
+                    sap_signed += aml.quantity
+                elif move.move_type == "out_refund":
+                    sap_signed -= aml.quantity
+            line.qty_invoiced = line.qty_invoiced - sap_signed + line.sap_qty_invoiced

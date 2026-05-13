@@ -612,9 +612,20 @@ class AccountMoveJDT1Importer(models.AbstractModel):
 
                 move_vals = None
                 if transtype in _ENRICHABLE_TYPES and config and doc:
+                    # order_lines_dict is keyed by (docentry, linenum) sourced
+                    # from inv1/rin1 only.  OPCH/ORPC share that key space but
+                    # point at unrelated vendor docs — passing the dict through
+                    # would cause _get_row_vals to falsely link vendor-bill
+                    # AMLs into sale_line_ids.  Only thread it for sale-side
+                    # transtypes.
+                    sale_links = (
+                        order_lines_dict
+                        if config["line_table"] in ("inv1", "rin1")
+                        else {}
+                    )
                     move_vals = self._build_enriched_vals(
                         header, doc, doc_lines, config,
-                        partners_dict, lookups, order_lines_dict,
+                        partners_dict, lookups, sale_links,
                     )
                     if move_vals:
                         enriched_count += 1
