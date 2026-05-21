@@ -14,7 +14,8 @@ For enriched moves, three GL-correction mechanisms ensure accuracy:
 """
 
 import logging
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict
 
 from odoo import api, models
 from odoo.fields import Command
@@ -55,6 +56,16 @@ _TRANSTYPE_CONFIG = {
 }
 
 _ENRICHABLE_TYPES = {"13", "14", "18", "19"}
+
+_CLOSING_MEMO_RE = re.compile(
+    r"^\s*(for\s+closing\s+period|ye\b|year[\s-]?end|"
+    r"record\s+.*\s+year\s+end|reclassify\s+.*\s+ye)",
+    re.IGNORECASE,
+)
+
+_CLEARING_NAME_RE = re.compile(
+    r"(retained\s+earn|clearing|unallocated)", re.IGNORECASE,
+)
 
 
 def _fix_taxes_pre_posting_sap(cr, moves_tax_data, tax_account_ids=None):
@@ -446,7 +457,8 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                    j.shortname, j.fccurrency, j.fcdebit, j.fccredit,
                    j.ref1, j.ref2, j.project,
                    a.formatcode AS acct_formatcode,
-                   a.acttype AS acttype
+                   a.acttype AS acttype,
+                   a.acctname AS acct_name
               FROM jdt1 j
               JOIN oact a ON j.account = a.acctcode
              WHERE j.transid IN %s
@@ -602,6 +614,9 @@ class AccountMoveJDT1Importer(models.AbstractModel):
             ref = f"ojdt#{header.get('transid')}"
             with ctx.skippable(ref):
                 jdt1_lines = header.pop("_lines", [])
+                header["_is_closing"] = self._detect_closing(
+                    header, jdt1_lines,
+                )
                 doc = header.pop("_doc", None)
                 doc_lines = header.pop("_doc_lines", [])
                 if not jdt1_lines:
@@ -693,6 +708,26 @@ class AccountMoveJDT1Importer(models.AbstractModel):
             len(move_vals_list), enriched_count,
             companion_count, generic_count,
         )
+
+        # Per-year diagnostic: emit one warning per year that has closing JEs.
+        yr_counts = Counter()
+        for h in headers:
+            if not h.get("_is_closing"):
+                continue
+            year = (h.get("refdate") or "????")[:4]
+            yr_counts[year] += 1
+        for year in sorted(yr_counts):
+            _logger.info(
+                "Closing-JE diagnostic %s: detected=%d",
+                year, yr_counts[year],
+            )
+            ctx.report.warning(
+                message=(
+                    f"Year-end closings {year}: detected={yr_counts[year]}"
+                ),
+                source_ref=f"closing-{year}",
+            )
+
         return {
             "move_vals": move_vals_list,
             "lookups": lookups,
@@ -1113,6 +1148,41 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         return appended
 
     # ----------------------------------------------------------------
+    # Closing-JE detection
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _detect_closing(header, jdt1_lines):
+        """Return True iff this OJDT header is a year-end closing JE.
+
+        Three OR'd arms — transtype '-3', memo-pattern match,
+        or inferred P&L↔equity crossing.  See 02-design.md for rationale.
+        """
+        if header.get("transtype") == "-3":
+            return True
+        memo = header.get("memo") or ""
+        if _CLOSING_MEMO_RE.match(memo):
+            return True
+        # Inferred arm: P&L leg + retained-earnings/clearing leg.
+        has_pl = False
+        has_clearing = False
+        for j in jdt1_lines:
+            debit = float(j.get("debit") or 0)
+            credit = float(j.get("credit") or 0)
+            if debit == 0 and credit == 0:
+                continue
+            at = (j.get("acttype") or "").strip()
+            if at not in ("I", "E", "N"):
+                return False  # bail: assets/liab present, not a P&L close
+            if at in ("I", "E"):
+                has_pl = True
+            elif at == "N":
+                name = (j.get("acct_name") or "")
+                if _CLEARING_NAME_RE.search(name):
+                    has_clearing = True
+        return has_pl and has_clearing
+
+    # ----------------------------------------------------------------
     # Generic JDT1 builder
     # ----------------------------------------------------------------
 
@@ -1140,7 +1210,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         purpose of the line is to drain the period's P&L into
         unallocated earnings.
         """
-        is_closing = header.get("transtype") == "-3"
+        is_closing = header.get("_is_closing") or header.get("transtype") == "-3"
         line_commands = []
         partner_id = False
 
