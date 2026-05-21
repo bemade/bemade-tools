@@ -152,6 +152,28 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         # Get company ID
         company_id = ctx.env.company.id
 
+        # Build pricelist lookup: SAP listnum → Odoo pricelist ID (for customer create)
+        pricelists_by_listnum = {}
+        try:
+            ctx.cr.execute("SELECT listnum FROM opln")
+            sap_listnums = {row[0] for row in ctx.cr.fetchall()}
+            if sap_listnums:
+                odoo_pricelists = ctx.env["product.pricelist"].search(
+                    [("sap_listnum", "!=", False)]
+                )
+                for pl in odoo_pricelists:
+                    if pl.sap_listnum in sap_listnums:
+                        pricelists_by_listnum[pl.sap_listnum] = pl.id
+            _logger.info(
+                f"Built pricelist lookup: {len(pricelists_by_listnum)} SAP listnums → Odoo pricelists."
+            )
+        except Exception:
+            _logger.warning(
+                "Could not build pricelist lookup from OPLN. "
+                "Partner default pricelists will not be set during create.",
+                exc_info=True,
+            )
+
         # Build account lookup: SAP acctcode → OACT formatcode → Odoo account ID
         # SAP stores internal _SYS codes on OCRD.debpayacct; join with OACT to
         # get the human-readable formatcode that matches Odoo's sap_acct_code.
@@ -188,6 +210,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             "company_currency_id": company_currency_id,
             "company_id": company_id,
             "accounts_dict": accounts_dict,
+            "pricelists_by_listnum": pricelists_by_listnum,
         }
         _logger.info("Lookup dictionaries ready.")
 
@@ -215,6 +238,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         users_dict = cache["users_dict"]
         terms_dict = cache["terms_dict"]
         company_id = cache["company_id"]
+        pricelists_by_listnum = cache.get("pricelists_by_listnum", {})
 
         partner_vals = []
         for i, sap_partner in enumerate(sap_partners):
@@ -263,6 +287,22 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             account_id = accounts_dict.get(debpayacct)
             cardtype = sap_partner["cardtype"]
 
+            # Resolve pricelist for customers from SAP OCRD.listnum
+            property_product_pricelist = False
+            if cardtype == "C":
+                listnum = sap_partner.get("listnum")
+                if listnum:
+                    property_product_pricelist = (
+                        pricelists_by_listnum.get(int(listnum)) or False
+                    )
+                    if not property_product_pricelist:
+                        _logger.warning(
+                            "SAP cardcode %s has listnum=%s with no matching "
+                            "Odoo pricelist; pricelist not assigned.",
+                            sap_partner["cardcode"],
+                            listnum,
+                        )
+
             vals = {
                 "sap_card_code": sap_partner["cardcode"],
                 "sap_atcentry": sap_partner["atcentry"],
@@ -284,6 +324,7 @@ class ResPartnerCompanyImporter(models.AbstractModel):
                 "property_purchase_currency_id": currency_id,
                 "property_payment_term_id": property_payment_term_id,
                 "property_supplier_payment_term_id": property_supplier_payment_term_id,
+                "property_product_pricelist": property_product_pricelist,
                 "picking_policy": picking_policy,
             }
 
@@ -310,7 +351,9 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         partner_vals = transformed["transform_companies"]
 
         if partner_vals:
-            partners = ctx.env["res.partner"].create(partner_vals)
+            partners = ctx.env["res.partner"].with_company(ctx.env.company).create(
+                partner_vals
+            )
             _logger.info(f"Created {len(partners)} company partners.")
         else:
             _logger.info("No new companies to create.")
