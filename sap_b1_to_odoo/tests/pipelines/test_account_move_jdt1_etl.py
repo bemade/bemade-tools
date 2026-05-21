@@ -64,15 +64,15 @@ class TestAccountMoveJDT1YearendRedirect(TransactionCase):
         # accounts_dict lookup resolves). Use the format SAP exposes via
         # OACT.formatcode for the JDT1 SELECT.
         cls.income_account = cls._ensure_account(
-            "TEST_INC", "Test Income", "income",
+            "TESTINC", "Test Income", "income",
             sap_acct_code="4000-INC",
         )
         cls.expense_account = cls._ensure_account(
-            "TEST_EXP", "Test Expense", "expense",
+            "TESTEXP", "Test Expense", "expense",
             sap_acct_code="5000-EXP",
         )
         cls.clearing_account = cls._ensure_account(
-            "TEST_CLR", "Retained Earnings Clearing",
+            "TESTCLR", "Retained Earnings Clearing",
             "equity",
             sap_acct_code="3999-CLR",
         )
@@ -159,7 +159,7 @@ class TestAccountMoveJDT1YearendRedirect(TransactionCase):
 
     def _make_jdt1_row(
         self, account_code, acttype, debit, credit, line_id=0,
-        fccurrency=None, fcdebit=0.0, fccredit=0.0,
+        fccurrency=None, fcdebit=0.0, fccredit=0.0, acct_name=None,
     ):
         return {
             "transid": 11111,
@@ -176,16 +176,23 @@ class TestAccountMoveJDT1YearendRedirect(TransactionCase):
             "project": "",
             "acct_formatcode": account_code,
             "acttype": acttype,
+            "acct_name": acct_name or "",
         }
 
     def _build_move_vals(
         self, header, jdt1_lines, unallocated_id=None,
     ):
-        cls = type(self.importer)
         # The static method lives on the AccountMoveJDT1Importer concrete
         # class; route via the importer's class dict.
         from odoo.addons.sap_b1_to_odoo.models.pipelines.\
             account_move_jdt1_etl import AccountMoveJDT1Importer
+        # Compute and annotate _is_closing so _build_generic_entry_vals
+        # can consume the move-level flag (same as transform_journal_entries
+        # does in production).
+        if "_is_closing" not in header:
+            header["_is_closing"] = AccountMoveJDT1Importer._detect_closing(
+                header, jdt1_lines,
+            )
         return AccountMoveJDT1Importer._build_generic_entry_vals(
             header, jdt1_lines, self.accounts_dict, self.partners_dict,
             self.currencies_dict, self.company_currency_id,
@@ -391,7 +398,7 @@ class TestAccountMoveJDT1YearendRedirect(TransactionCase):
         original_code = self.unallocated.code
         try:
             # Need to swap to a code that doesn't collide.
-            self.unallocated.code = "ZZZ999999_TEST"
+            self.unallocated.code = "ZZZ999999TEST"
             with self.assertRaises(UserError) as cm:
                 self.importer._build_lookups()
             self.assertIn("999999", str(cm.exception))
@@ -446,3 +453,211 @@ class TestAccountMoveJDT1YearendRedirect(TransactionCase):
             income_line.get("amount_currency"), 800.0,
             "amount_currency must be preserved across the redirect.",
         )
+
+    # ------------------------------------------------------------------
+    # New AC tests: arm 2 (memo), arm 3 (inferred), unmapped, diagnostic
+    # ------------------------------------------------------------------
+
+    def test_arm2_memo_redirects_pl_leg(self):
+        """Arm 2: transtype='30' + closing memo redirects income leg to 999999."""
+        header = self._make_header(transtype="30", transid=33333)
+        header["memo"] = "For Closing Period 2024"
+        jdt1_lines = [
+            self._make_jdt1_row("4000-INC", "I", debit=2000.0, credit=0.0,
+                                line_id=0),
+            self._make_jdt1_row("3999-CLR", "N", debit=0.0, credit=2000.0,
+                                line_id=1,
+                                acct_name="Retained Earnings Clearing"),
+        ]
+        move_vals = self._build_move_vals(header, jdt1_lines)
+        self.assertIsNotNone(move_vals)
+        line_vals = [
+            cmd[2] for cmd in move_vals["line_ids"]
+            if isinstance(cmd, (list, tuple)) and cmd[0] == 0
+        ]
+        income_line = next(l for l in line_vals if l["debit"] == 2000.0)
+        self.assertEqual(
+            income_line["account_id"], self.unallocated.id,
+            "Arm-2 (memo) closing JE must redirect the income leg to 999999.",
+        )
+
+    def test_arm3_inferred_crossing_redirects(self):
+        """Arm 3 positive: E-type + N-type with clearing acct_name triggers redirect."""
+        header = self._make_header(transtype="30", transid=44444)
+        header["memo"] = "Manual JE"
+        jdt1_lines = [
+            self._make_jdt1_row("5000-EXP", "E", debit=1000.0, credit=0.0,
+                                line_id=0),
+            self._make_jdt1_row("3999-CLR", "N", debit=0.0, credit=1000.0,
+                                line_id=1,
+                                acct_name="Retained Earnings Clearing"),
+        ]
+        move_vals = self._build_move_vals(header, jdt1_lines)
+        self.assertIsNotNone(move_vals)
+        line_vals = [
+            cmd[2] for cmd in move_vals["line_ids"]
+            if isinstance(cmd, (list, tuple)) and cmd[0] == 0
+        ]
+        expense_line = next(l for l in line_vals if l["debit"] == 1000.0)
+        self.assertEqual(
+            expense_line["account_id"], self.unallocated.id,
+            "Arm-3 (inferred) closing JE must redirect the expense leg to 999999.",
+        )
+
+    def test_arm3_non_clearing_name_does_not_redirect(self):
+        """Arm 3 negative: N-type with non-clearing acct_name does NOT trigger redirect."""
+        header = self._make_header(transtype="30", transid=55555)
+        header["memo"] = "Manual JE"
+        jdt1_lines = [
+            self._make_jdt1_row("5000-EXP", "E", debit=1000.0, credit=0.0,
+                                line_id=0),
+            self._make_jdt1_row("3999-CLR", "N", debit=0.0, credit=1000.0,
+                                line_id=1,
+                                acct_name="Accounts Payable"),
+        ]
+        move_vals = self._build_move_vals(header, jdt1_lines)
+        self.assertIsNotNone(move_vals)
+        line_vals = [
+            cmd[2] for cmd in move_vals["line_ids"]
+            if isinstance(cmd, (list, tuple)) and cmd[0] == 0
+        ]
+        expense_line = next(l for l in line_vals if l["debit"] == 1000.0)
+        self.assertNotEqual(
+            expense_line["account_id"], self.unallocated.id,
+            "Non-clearing N-type offset must NOT trigger arm-3 redirect.",
+        )
+        self.assertEqual(expense_line["account_id"], self.expense_account.id)
+
+    def test_unmapped_closing_leg_posts_to_999999(self):
+        """Unmapped-account income leg on arm-2 closing JE redirects to 999999."""
+        header = self._make_header(transtype="30", transid=66666)
+        header["memo"] = "For Closing Period 2024"
+        jdt1_lines = [
+            # acct_formatcode '9999-NOTMAPPED' is NOT in accounts_dict.
+            self._make_jdt1_row("9999-NOTMAPPED", "I", debit=500.0, credit=0.0,
+                                line_id=0),
+            self._make_jdt1_row("3999-CLR", "N", debit=0.0, credit=500.0,
+                                line_id=1,
+                                acct_name="Retained Earnings Clearing"),
+        ]
+        move_vals = self._build_move_vals(header, jdt1_lines)
+        self.assertIsNotNone(
+            move_vals,
+            "Closing JE with unmapped P&L account must still produce a move.",
+        )
+        line_vals = [
+            cmd[2] for cmd in move_vals["line_ids"]
+            if isinstance(cmd, (list, tuple)) and cmd[0] == 0
+        ]
+        account_ids = [l["account_id"] for l in line_vals]
+        self.assertIn(
+            self.unallocated.id, account_ids,
+            "Unmapped-account closing P&L leg must post to 999999 "
+            "rather than being silently dropped.",
+        )
+
+    def test_diagnostic_emitter_called_per_year(self):
+        """ctx.report.warning called once per distinct closing year."""
+        import contextlib
+        from unittest.mock import MagicMock, patch
+        from odoo.addons.sap_b1_to_odoo.models.pipelines.\
+            account_move_jdt1_etl import AccountMoveJDT1Importer
+
+        # Build two 2023 closings and one 2024 closing.
+        def _closing_header(year, transid):
+            return {
+                "transid": transid,
+                "transtype": "30",
+                "refdate": f"{year}-12-31",
+                "memo": "For Closing Period Test",
+                "createdby": 0,
+                "docnum": transid,
+                "_lines": [
+                    self._make_jdt1_row(
+                        "4000-INC", "I", debit=100.0, credit=0.0,
+                        line_id=0,
+                    ),
+                    self._make_jdt1_row(
+                        "3999-CLR", "N", debit=0.0, credit=100.0,
+                        line_id=1, acct_name="Retained Earnings Clearing",
+                    ),
+                ],
+            }
+
+        headers = [
+            _closing_header(2023, 77701),
+            _closing_header(2023, 77702),
+            _closing_header(2024, 77703),
+        ]
+
+        # The transform reads: meta["lookups"] for the nested accounts etc.
+        # and meta["partners"], meta["misc_journal_id"], meta["tax_account_ids"].
+        inner_lookups = {
+            "accounts": self.accounts_dict,
+            "currencies": self.currencies_dict,
+            "company_currency_id": self.company_currency_id,
+            "unallocated_earnings_id": self.unallocated.id,
+        }
+        extracted = {
+            "extract_journal_entries": {
+                "records": headers,
+                "context": {},
+            },
+            "extract_lookups": {
+                "partners": self.partners_dict,
+                "lookups": inner_lookups,
+                "misc_journal_id": self.misc_journal.id,
+                "tax_account_ids": set(),
+                "order_lines_dict": {},
+            },
+        }
+
+        mock_report = MagicMock()
+
+        @contextlib.contextmanager
+        def _pass_through_skippable(_ref):
+            yield
+
+        ctx = MagicMock()
+        ctx.env = self.env
+        ctx.cr = self.env.cr
+        ctx.report = mock_report
+        ctx.skippable = _pass_through_skippable
+
+        # Stub _build_generic_entry_vals to return a minimal non-None vals
+        # dict so the transform doesn't raise "both returned None".
+        def _stub_generic(header, jdt1_lines, *args, **kwargs):
+            return {
+                "move_type": "entry",
+                "date": False,
+                "ref": "stub",
+                "journal_id": self.misc_journal.id,
+                "line_ids": [],
+                "sap_docentry": header.get("transid", 0),
+                "sap_docnum": header.get("docnum", 0),
+                "sap_table": "ojdt",
+            }
+
+        with patch.object(
+            AccountMoveJDT1Importer,
+            "_build_generic_entry_vals",
+            side_effect=_stub_generic,
+        ):
+            self.importer.transform_journal_entries(ctx, extracted)
+
+        # Assert ctx.report.warning was called for 2023 and 2024.
+        warning_calls = mock_report.warning.call_args_list
+        source_refs = [c.kwargs.get("source_ref") for c in warning_calls]
+        self.assertIn("closing-2023", source_refs,
+                      "Diagnostic must emit closing-2023.")
+        self.assertIn("closing-2024", source_refs,
+                      "Diagnostic must emit closing-2024.")
+        # Check counts in messages.
+        for call in warning_calls:
+            msg = call.kwargs.get("message", "")
+            if "2023" in msg:
+                self.assertIn("2", msg,
+                              "2023 count should be 2.")
+            elif "2024" in msg:
+                self.assertIn("1", msg,
+                              "2024 count should be 1.")
