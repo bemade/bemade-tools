@@ -9,7 +9,7 @@
 #
 #    For full license details, see https://www.gnu.org/licenses/lgpl-3.0.en.html.
 #
-"""Tests for ProductPricelistItemImporter house-default pricelist step (Fix A).
+"""Tests for ProductPricelistItemImporter house-default and step-4 pricelist assignment.
 
 Acceptance criteria:
 
@@ -27,7 +27,7 @@ Acceptance criteria:
      active pricelist in the company domain.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
@@ -151,3 +151,122 @@ class TestProductPricelistHouseDefault(TransactionCase):
                 f"house_default.sequence ({house_default.sequence}) must be less "
                 f"than every other active pricelist sequence ({seq}).",
             )
+
+
+@tagged("-at_install", "post_install", "pricelist_partner_assignment")
+class TestProductPricelistStep4(TransactionCase):
+    """Guards Change B: step 4 writes explicit pricelist for every customer.
+
+    Acceptance criteria:
+
+    - test_step4_writes_explicit_pricelist_even_when_equals_house_default:
+      Both C001 (listnum=1, Retail = house default) and C002 (listnum=2,
+      Wholesale) end up with an explicit specific pricelist after
+      load_pricelists_and_blankets is called with the synthetic transformed dict.
+      The skip-house-default branch from the old implementation must NOT exist.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.company = cls.env.company
+        cls.importer = cls.env["product.pricelist.item.importer"]
+
+        # Create two pricelists with SAP listnums
+        cls.retail_pl = cls.env["product.pricelist"].create({
+            "name": "Retail",
+            "sap_listnum": 1,
+            "company_id": cls.company.id,
+        })
+        cls.wholesale_pl = cls.env["product.pricelist"].create({
+            "name": "Wholesale",
+            "sap_listnum": 2,
+            "company_id": cls.company.id,
+        })
+
+        # Create two customer partners
+        cls.partner_c001 = cls.env["res.partner"].create({
+            "name": "Customer C001",
+            "sap_card_code": "C001",
+            "sap_partner_type": "C",
+            "is_company": True,
+            "company_id": cls.company.id,
+        })
+        cls.partner_c002 = cls.env["res.partner"].create({
+            "name": "Customer C002",
+            "sap_card_code": "C002",
+            "sap_partner_type": "C",
+            "is_company": True,
+            "company_id": cls.company.id,
+        })
+
+    def _make_ctx(self):
+        ctx = MagicMock()
+        ctx.env = self.env
+        ctx.report = MagicMock()
+        return ctx
+
+    def _make_transformed(self, customer_listnum_map, partners_map):
+        """Build a minimal transformed dict that load_pricelists_and_blankets can consume."""
+        return {
+            "transform_pricelists_and_blankets": {
+                "base_pricelist_vals": [],
+                "derived_pricelist_vals": [],
+                "customer_pricelist_vals": [],
+                "customer_listnum_map": customer_listnum_map,
+                "partners_map": partners_map,
+            }
+        }
+
+    def test_step4_writes_explicit_pricelist_even_when_equals_house_default(self):
+        """Both customers get explicit pricelist; listnum=1 (Retail/house-default) is NOT skipped.
+
+        Setup:
+          - C001 → listnum=1 → Retail (simulates the house-default pricelist)
+          - C002 → listnum=2 → Wholesale
+
+        The old step 4 would have skipped C001 because Retail might equal
+        house_default.  The new step 4 must write for both.
+        """
+        customer_listnum_map = {
+            "C001": 1,
+            "C002": 2,
+        }
+        partners_map = {
+            "C001": self.partner_c001.id,
+            "C002": self.partner_c002.id,
+        }
+        ctx = self._make_ctx()
+        transformed = self._make_transformed(customer_listnum_map, partners_map)
+
+        # Patch _get_house_default_pricelist to return Retail so the old
+        # skip-house-default branch (if it still existed) would skip C001.
+        with patch.object(
+            type(self.importer),
+            "_get_house_default_pricelist",
+            return_value=self.retail_pl,
+        ):
+            self.importer.load_pricelists_and_blankets(ctx, transformed)
+
+        self.env.flush_all()
+        self.partner_c001.invalidate_recordset()
+        self.partner_c002.invalidate_recordset()
+
+        c001_pl = (
+            self.partner_c001.with_company(self.company).property_product_pricelist
+        )
+        c002_pl = (
+            self.partner_c002.with_company(self.company).property_product_pricelist
+        )
+
+        self.assertEqual(
+            c001_pl,
+            self.retail_pl,
+            "C001 (listnum=1, Retail=house-default) must have Retail pricelist assigned "
+            "explicitly — the house-default skip must NOT occur.",
+        )
+        self.assertEqual(
+            c002_pl,
+            self.wholesale_pl,
+            "C002 (listnum=2, Wholesale) must have Wholesale pricelist assigned.",
+        )
