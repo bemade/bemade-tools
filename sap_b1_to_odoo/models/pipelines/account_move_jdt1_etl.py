@@ -714,7 +714,11 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         for h in headers:
             if not h.get("_is_closing"):
                 continue
-            year = (h.get("refdate") or "????")[:4]
+            refdate = h.get("refdate")
+            if hasattr(refdate, "year"):
+                year = str(refdate.year)
+            else:
+                year = str(refdate or "????")[:4]
             yr_counts[year] += 1
         for year in sorted(yr_counts):
             _logger.info(

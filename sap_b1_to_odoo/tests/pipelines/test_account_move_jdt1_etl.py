@@ -42,6 +42,7 @@ Acceptance criteria (task 3476):
    produces correct currency_id / amount_currency after account redirection.
 """
 
+from datetime import datetime
 from unittest.mock import MagicMock
 
 from odoo.exceptions import UserError
@@ -146,11 +147,14 @@ class TestAccountMoveJDT1YearendRedirect(TransactionCase):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _make_header(self, transtype="-3", transid=11111, docnum=22222):
+    def _make_header(self, transtype="-3", transid=11111, docnum=22222,
+                     refdate=None):
         return {
             "transid": transid,
             "transtype": transtype,
-            "refdate": "2024-12-31",
+            # psycopg2 returns datetime objects for SQL DATE columns; tests
+            # must pass a datetime, not a string, so fix_tz doesn't fail.
+            "refdate": refdate if refdate is not None else datetime(2024, 12, 31),
             "memo": "Period End Closing",
             "createdby": 0,
             "docnum": docnum,
@@ -568,7 +572,9 @@ class TestAccountMoveJDT1YearendRedirect(TransactionCase):
             return {
                 "transid": transid,
                 "transtype": "30",
-                "refdate": f"{year}-12-31",
+                # Use datetime (not str) so fix_tz works in _build_generic_entry_vals.
+                # Year is extracted via [:4] on the string repr for the diagnostic.
+                "refdate": datetime(year, 12, 31),
                 "memo": "For Closing Period Test",
                 "createdby": 0,
                 "docnum": transid,
