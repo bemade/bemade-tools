@@ -407,32 +407,45 @@ class ProductPricelistItemImporter(models.AbstractModel):
         house_default = self._get_house_default_pricelist(ctx)
         self._apply_house_default_pricelist(ctx, house_default)
 
-        # 4. Set customer default pricelists from OCRD.listnum, skipping partners
-        #    whose SAP listnum maps to the house-default pricelist (they resolve
-        #    correctly via the sequence-based resolver; writing explicit = house
-        #    would be a wasted no-op due to _inverse_product_pricelist collapse).
+        # 4. Set/update customer default pricelists from OCRD.listnum for every
+        #    customer with a SAP ListNum, regardless of whether it maps to the
+        #    house-default.  This ensures every SAP-linked customer ends up with
+        #    an explicit specific_property_product_pricelist bound to the RWI
+        #    company context, which is required for AC #8.
         customer_listnum_map = data["customer_listnum_map"]
         partners_map = data["partners_map"]
         if customer_listnum_map:
-            Partner = ctx.env["res.partner"]
             updated_count = 0
-            skipped_count = 0
+            unchanged_count = 0
+            unmapped_count = 0
             for cardcode, listnum in customer_listnum_map.items():
                 partner_id = partners_map.get(cardcode)
-                pricelist_id = listnum_to_id.get(listnum)
-                if not partner_id or not pricelist_id:
-                    skipped_count += 1
+                if partner_id is None:
+                    # Partner was not imported (filtered or missing) — skip
                     continue
-                if house_default and pricelist_id == house_default.id:
-                    # Walk-up/retail customer — let them fall through to the
-                    # house default via the resolver; don't write explicit specific.
-                    skipped_count += 1
+                pricelist_id = listnum_to_id.get(int(listnum))
+                if pricelist_id is None:
+                    ctx.report.warning(
+                        message=(
+                            f"SAP ListNum {listnum} for partner {cardcode} has no "
+                            "matching Odoo pricelist; pricelist assignment skipped."
+                        ),
+                        source_ref=cardcode,
+                    )
+                    unmapped_count += 1
                     continue
-                Partner.browse(partner_id).property_product_pricelist = pricelist_id
+                # Idempotency: read current assignment under the correct company context
+                partner = ctx.env["res.partner"].with_company(ctx.env.company).browse(
+                    partner_id
+                )
+                if partner.property_product_pricelist.id == pricelist_id:
+                    unchanged_count += 1
+                    continue
+                partner.property_product_pricelist = pricelist_id
                 updated_count += 1
             _logger.info(
-                f"Set default pricelists for {updated_count} customers "
-                f"({skipped_count} skipped — missing partner/pricelist or house-default)."
+                f"Customer pricelist assignments: {updated_count} updated, "
+                f"{unchanged_count} unchanged, {unmapped_count} unmapped."
             )
 
         # Set USD pricelist for USD partners
