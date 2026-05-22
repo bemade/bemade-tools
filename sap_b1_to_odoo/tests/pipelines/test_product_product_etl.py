@@ -187,7 +187,8 @@ class TestProductProductEtl(TransactionCase):
         )
         self.assertEqual(after_count, 1, "No duplicate record must be created on re-import.")
         self.assertEqual(existing.default_code, "NEW-SUP")
-        self.assertEqual(existing.description, "New FR Name")
+        # description is an HTML field; Odoo wraps plain text in <p>…</p>
+        self.assertIn("New FR Name", existing.description)
 
     def test_reimport_creates_new_when_absent(self):
         """Previously-unseen sap_item_code creates a new record."""
