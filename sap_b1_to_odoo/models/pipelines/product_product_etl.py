@@ -110,6 +110,9 @@ class ProductImporter(models.AbstractModel):
             # Build product values
             base_price = sap_product.get("base_price") or 0.0
             avg_price = float(sap_product.get("avgprice") or 0.0)
+            description_ecommerce = (
+                fix_quotes(sap_product["u_salesextdescription"]) or False
+            )
             vals = {
                 "sap_item_code": sap_product["itemcode"],
                 "sap_atcentry": sap_product["atcentry"],
@@ -118,6 +121,7 @@ class ProductImporter(models.AbstractModel):
                 "description": description,
                 "list_price": float(base_price),
                 "standard_price": avg_price,
+                "description_ecommerce": description_ecommerce,
                 "sale_ok": sap_product["sellitem"] == "Y",
                 "purchase_ok": sap_product["prchseitem"] == "Y",
                 "active": sap_product["validfor"] == "Y",
