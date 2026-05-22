@@ -2,7 +2,6 @@ import logging
 from typing import Dict, List
 
 from odoo import models
-from odoo.sql_db import SQL
 
 from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
@@ -28,6 +27,8 @@ class ProductImporter(models.AbstractModel):
         """Extract products from SAP OITM table.
 
         Also pre-computes category mapping for use in transform phase.
+        All OITM rows are fetched; load_products performs an upsert by
+        sap_item_code so that re-imports update existing records.
 
         Args:
             ctx: ETL context with SAP cursor and Odoo environment.
@@ -35,35 +36,18 @@ class ProductImporter(models.AbstractModel):
         Returns:
             List of product dictionaries from SAP.
         """
-        # Get existing products to avoid duplicates
-        existing_products = tuple(
-            [
-                p["sap_item_code"]
-                for p in ctx.env["product.product"].search_read(
-                    [
-                        ("sap_item_code", "!=", False),
-                        ("active", "in", [True, False]),
-                    ],
-                    ["sap_item_code"],
-                )
-            ]
-        )
-        _logger.info(f"Found {len(existing_products)} existing products.")
-
         # Query SAP — join ITM1 to get base pricelist price (listnum 3)
+        # No NOT-IN filter: all rows are fetched for upsert behaviour.
         sql = (
             "SELECT oitm.*, itm1.price AS base_price"
             " FROM oitm"
             " LEFT JOIN itm1 ON oitm.itemcode = itm1.itemcode"
             "   AND itm1.pricelist = 3"
         )
-        if existing_products:
-            sql += " WHERE oitm.itemcode NOT IN %s"
-            ctx.cr.execute(SQL(sql, existing_products))
-        else:
-            ctx.cr.execute(sql)
+        ctx.cr.execute(sql)
 
         sap_products = ctx.cr.dictfetchall()
+        _logger.info(f"Fetched {len(sap_products)} products from SAP.")
 
         # Pre-compute category mapping
         categories = ctx.env["product.category"].search(
@@ -111,28 +95,17 @@ class ProductImporter(models.AbstractModel):
                 else False
             )
 
-            # Determine name and default_code based on what's filled
-            # Standard SAP B1: frgnname = display name, itemname = internal reference
-            # If only one is filled, use it as the name and leave default_code empty
+            # Name: prefer frgnname, else itemname, else "N/A"
             itemname = fix_quotes(sap_product["itemname"])
             frgnname = fix_quotes(sap_product["frgnname"])
+            name = frgnname or itemname or "N/A"
 
-            if itemname and frgnname:
-                # Both filled: standard SAP B1 convention
-                name = frgnname
-                default_code = itemname
-            elif frgnname:
-                # Only frgnname filled
-                name = frgnname
-                default_code = False
-            elif itemname:
-                # Only itemname filled
-                name = itemname
-                default_code = False
-            else:
-                # Neither filled (shouldn't happen)
-                name = "N/A"
-                default_code = False
+            # default_code ← suppcatnum (supplier catalog number from SAP)
+            suppcatnum = fix_quotes(sap_product.get("suppcatnum"))
+            default_code = suppcatnum or False
+
+            # description ← frgnname (internal notes field on product form)
+            description = frgnname or False
 
             # Build product values
             base_price = sap_product.get("base_price") or 0.0
@@ -142,6 +115,7 @@ class ProductImporter(models.AbstractModel):
                 "sap_atcentry": sap_product["atcentry"],
                 "name": name,
                 "default_code": default_code,
+                "description": description,
                 "list_price": float(base_price),
                 "standard_price": avg_price,
                 "sale_ok": sap_product["sellitem"] == "Y",
@@ -161,7 +135,9 @@ class ProductImporter(models.AbstractModel):
 
     @ETL.load()
     def load_products(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Load products into Odoo.
+        """Load products into Odoo using upsert by sap_item_code.
+
+        Existing records are updated; new sap_item_codes are created.
 
         Args:
             ctx: ETL context.
@@ -169,8 +145,33 @@ class ProductImporter(models.AbstractModel):
         """
         product_vals = transformed["transform_products"]
 
-        if product_vals:
-            products = ctx.env["product.product"].create(product_vals)
+        if not product_vals:
+            _logger.info("No products to load.")
+            return
+
+        # Build a lookup of existing products keyed by sap_item_code
+        existing = {
+            p["sap_item_code"]: p["id"]
+            for p in ctx.env["product.product"].with_context(active_test=False).search_read(
+                [("sap_item_code", "!=", False)],
+                ["sap_item_code"],
+            )
+        }
+
+        to_create = []
+        to_write = []  # list of (id, vals)
+        for vals in product_vals:
+            sap_item_code = vals["sap_item_code"]
+            if sap_item_code in existing:
+                to_write.append((existing[sap_item_code], vals))
+            else:
+                to_create.append(vals)
+
+        if to_create:
+            products = ctx.env["product.product"].create(to_create)
             _logger.info(f"Created {len(products)} products.")
-        else:
-            _logger.info("No new products to create.")
+
+        if to_write:
+            for product_id, vals in to_write:
+                ctx.env["product.product"].browse(product_id).write(vals)
+            _logger.info(f"Updated {len(to_write)} products.")
