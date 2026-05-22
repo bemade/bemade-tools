@@ -70,14 +70,34 @@ def get_payment_terms(terms_dict, sap_partner):
 
     Returns tuple of (payment_term_id, supplier_payment_term_id) based on partner type.
     Only one value is set depending if cardtype matches a customer or vendor entry in SAP.
+
+    SAP "no term" sentinels (None, 0, -1, False) are treated silently as "no term"
+    and return (False, False).  Non-sentinel groupnums that are absent from
+    terms_dict emit a _logger.warning so the gap is visible without crashing the
+    import.
     """
     groupnum = sap_partner.get("groupnum")
 
+    # SAP "no term" sentinels — return cleanly without logging
+    if groupnum in (None, 0, -1, False):
+        return False, False
+
+    # Resolve groupnum to an Odoo payment term ID
+    term_id = terms_dict.get(groupnum, False)
+    if not term_id:
+        _logger.warning(
+            "SAP cardcode %s has groupnum=%s with no matching "
+            "Odoo payment term; payment term not assigned.",
+            sap_partner.get("cardcode"),
+            groupnum,
+        )
+        return False, False
+
     # Customers (C, L) get payment term, vendors get supplier payment term
     if sap_partner.get("cardtype") in ["C", "L"]:
-        return terms_dict.get(groupnum, False), False
+        return term_id, False
     else:
-        return False, terms_dict.get(groupnum, False)
+        return False, term_id
 
 
 ##################################################################
