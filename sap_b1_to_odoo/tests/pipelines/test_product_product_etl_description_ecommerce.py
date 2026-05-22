@@ -160,8 +160,9 @@ class TestProductDescriptionEcommerce(TransactionCase):
     def test_extended_description_does_not_clobber_other_fields(self):
         """Setting description_ecommerce does not regress name/default_code logic."""
         sap_product = _make_sap_product(
-            itemname="REF-001",
+            itemname="ItemName Internal",
             frgnname="Customer Facing Name",
+            suppcatnum="REF-001",
             u_salesextdescription="Detailed web copy for this product.",
         )
         ctx = self._make_ctx()
@@ -178,11 +179,11 @@ class TestProductDescriptionEcommerce(TransactionCase):
             "Customer Facing Name",
             "name must be frgnname when both itemname and frgnname are filled.",
         )
-        # default_code must come from itemname
+        # default_code must come from suppcatnum (per task 3626 contract)
         self.assertEqual(
             vals["default_code"],
             "REF-001",
-            "default_code must be itemname when both itemname and frgnname are filled.",
+            "default_code must be the supplier catalog number (suppcatnum).",
         )
         # description_ecommerce must be the extended description
         self.assertEqual(

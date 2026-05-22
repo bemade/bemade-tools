@@ -111,7 +111,7 @@ class ProductImporter(models.AbstractModel):
             base_price = sap_product.get("base_price") or 0.0
             avg_price = float(sap_product.get("avgprice") or 0.0)
             description_ecommerce = (
-                fix_quotes(sap_product["u_salesextdescription"]) or False
+                fix_quotes(sap_product.get("u_salesextdescription")) or False
             )
             vals = {
                 "sap_item_code": sap_product["itemcode"],
