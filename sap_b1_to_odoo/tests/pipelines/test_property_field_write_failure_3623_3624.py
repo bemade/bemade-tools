@@ -394,6 +394,119 @@ class TestPartnerETLDeclaresDependencies(TransactionCase):
         )
 
 
+@tagged("-at_install", "post_install", "repro_jsonb_step4_stale_map")
+class TestPricelistStep4StaleListnumMap(TransactionCase):
+    """Test E — pricelist post-pass (task 3624) reproduction.
+
+    product_pricelist_etl.load_pricelists_and_blankets builds listnum_to_id
+    at line 314 — AFTER base pricelists are loaded but BEFORE derived
+    pricelists are created (lines 319-354). When derived pricelists are
+    NEW (not pre-existing), they're created via Pricelist.create(vals) and
+    added to existing_by_listnum, but NOT to listnum_to_id.
+
+    Step 4 (line 426) then uses the stale listnum_to_id to map
+    customer_listnum_map → pricelist_id. For every customer whose
+    SAP ListNum is a DERIVED pricelist (Retail=1, Wholesale=2,
+    Contractors=4, Dealer=7, Cremation Contractors=10 — all the
+    customer-facing ones in RWI), the lookup returns None and the
+    assignment is skipped. Production result: 0 of 3,632 customer
+    assignments land, exactly matching Marc's symptom.
+
+    This test pre-creates ONLY a base pricelist (Listnum=3), passes a
+    derived pricelist (Listnum=1, Retail) via derived_pricelist_vals,
+    and a customer_listnum_map pointing one partner at the derived list.
+    Asserts the partner ends up with the derived pricelist on disk.
+
+    Fails against the unfixed code (stale listnum_to_id) and passes
+    after the fix (rebuild listnum_to_id between step 2 and step 4).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.company = cls.env.company
+        cls.importer = cls.env["product.pricelist.item.importer"]
+
+        # Pre-create ONE base pricelist (simulating the pre-existing Base
+        # pricelist in production).
+        cls.base_pl = cls.env["product.pricelist"].create({
+            "name": "Repro Base",
+            "currency_id": cls.env.ref("base.USD").id,
+            "sap_listnum": 3,
+        })
+        # Pre-create a partner with no pricelist (will be assigned by step 4).
+        cls.partner = cls.env["res.partner"].create({
+            "name": "Repro Customer C001",
+            "sap_card_code": "REPRO_C001",
+            "sap_partner_type": "C",
+            "is_company": True,
+            "company_id": cls.company.id,
+        })
+
+    def test_step4_skips_customers_when_listnum_points_at_derived_pricelist(self):
+        """E — stale listnum_to_id makes step 4 skip every derived-listnum customer."""
+        # Build a transformed dict mimicking what transform_pricelists_and_blankets
+        # would have produced after extracting OPLN rows containing one derived
+        # pricelist (listnum=1 Retail, base=3, factor=1.75) and a customer that
+        # references it.
+        derived_vals = {
+            "name": "Repro Retail",
+            "sap_listnum": 1,
+            "currency_id": self.env.ref("base.USD").id,
+            "active": True,
+            "company_id": self.company.id,
+            "_base_listnum": 3,
+            "_factor": 1.75,
+        }
+        transformed = {
+            "transform_pricelists_and_blankets": {
+                "base_pricelist_vals": [],          # base_pl is pre-existing
+                "derived_pricelist_vals": [derived_vals],
+                "customer_pricelist_vals": [],     # no blanket customer pricelists
+                "customer_listnum_map": {"REPRO_C001": 1},  # ← derived listnum
+                "partners_map": {"REPRO_C001": self.partner.id},
+            }
+        }
+        ctx = MagicMock()
+        ctx.env = self.env
+        # ctx.report.warning is called by step 4 on unmapped → MagicMock handles silently
+
+        self.importer.load_pricelists_and_blankets(ctx, transformed)
+        self.env.flush_all()
+
+        # Find the freshly-created Retail pricelist by sap_listnum.
+        retail = self.env["product.pricelist"].search(
+            [("sap_listnum", "=", 1)], limit=1
+        )
+        self.assertTrue(retail, "Derived pricelist for sap_listnum=1 was not created.")
+
+        # Read raw JSONB — production-truth check.
+        self.env.cr.execute(
+            "SELECT specific_property_product_pricelist FROM res_partner WHERE id = %s",
+            (self.partner.id,),
+        )
+        raw_pl = self.env.cr.fetchone()[0]
+
+        self.assertIsNotNone(
+            raw_pl,
+            "specific_property_product_pricelist JSONB is NULL after step 4 "
+            "ran with a derived-listnum assignment. Production bug confirmed: "
+            "listnum_to_id at line 314 was built before the derived pricelist "
+            "was created, so the lookup at step 4 returned None and the write "
+            "was skipped.",
+        )
+        self.assertIn(
+            str(self.company.id),
+            raw_pl,
+            f"JSONB missing company key. Got {raw_pl!r}.",
+        )
+        self.assertEqual(
+            raw_pl[str(self.company.id)],
+            retail.id,
+            f"JSONB has the wrong pricelist id. Got {raw_pl!r}, expected {retail.id} (Retail).",
+        )
+
+
 @tagged("-at_install", "post_install", "repro_jsonb_live_sap")
 class TestPropertyFieldWriteFailureIntegration(TransactionCase):
     """Test B — integration against the LIVE SAP source on localhost:5433.

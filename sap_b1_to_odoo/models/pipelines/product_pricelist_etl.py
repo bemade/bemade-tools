@@ -415,6 +415,20 @@ class ProductPricelistItemImporter(models.AbstractModel):
         customer_listnum_map = data["customer_listnum_map"]
         partners_map = data["partners_map"]
         if customer_listnum_map:
+            # Rebuild listnum_to_id to include derived pricelists created in
+            # step 2.  The map built at line 314 only contains base pricelists
+            # because derived ones are created via Pricelist.create() at line
+            # 352 and added to existing_by_listnum, not to listnum_to_id.
+            # Without this rebuild every customer whose SAP ListNum points at
+            # a derived pricelist (Retail, Wholesale, Contractors, Dealer,
+            # Cremation Contractors — all the customer-facing ones in RWI)
+            # gets a None lookup and the assignment is silently skipped.
+            listnum_to_id = {
+                pl.sap_listnum: pl.id
+                for pl in Pricelist.with_context(active_test=False).search(
+                    [("sap_listnum", "!=", False)]
+                )
+            }
             updated_count = 0
             unchanged_count = 0
             unmapped_count = 0
