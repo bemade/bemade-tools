@@ -109,7 +109,7 @@ def get_payment_terms(terms_dict, sap_partner):
     target_model="res.partner",
     importer_name="res.partner.company.importer",
     sap_source="ocrd",
-    depends_on=[],
+    depends_on=["account.payment.term.importer"],
     allow_multiprocessing=False,  # Single-process for now due to write contention
 )
 class ResPartnerCompanyImporter(models.AbstractModel):
