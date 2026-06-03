@@ -336,8 +336,31 @@ class XtupleProductImporter(models.AbstractModel):
         )
         return products_to_update
 
+    def _is_purchased_product(self, product: Dict) -> bool:
+        """Return True if the product should use purchased-item name mapping.
+
+        Base implementation reads the ``_is_purchased`` flag that an override
+        (e.g. Verajet) sets on the extracted record dict.  Defaults to ``False``
+        so the base importer and any non-Verajet consumer keeps the
+        ``name = item_number`` mapping unchanged.
+
+        Override this method to supply the flag via a different signal.
+        """
+        return bool(product.get("_is_purchased", False))
+
     def _transform_product(self, product: Dict) -> Dict:
-        """Transform a single xTuple product into Odoo product values."""
+        """Transform a single xTuple product into Odoo product values.
+
+        Name/description mapping depends on whether the item is purchased:
+
+        - Saleable (finished goods, ``_is_purchased=False``):
+          ``name`` ← ``item_number`` (SKU); ``description_sale`` ← ``item_descrip1``
+        - Purchased (raw material / packaging, ``_is_purchased=True``):
+          ``name`` ← ``item_descrip1`` (procurement description)
+
+        ``item_descrip2`` maps to ``description`` (internal notes) for both.
+        ``default_code`` is **not** set on new imports; existing values are kept.
+        """
         item_type = product.get("item_type", "")
         product_type = "consu"
         is_storable = False
@@ -369,12 +392,21 @@ class XtupleProductImporter(models.AbstractModel):
         # Determine if product is sold (based on category)
         is_sold = product.get("item_prodcat_id") in [28, 31, 32, 33, 34]
 
-        # Get product name (from item_number per client requirement)
-        # Client wants: item_number -> name, item_descrip1 -> default_code (Reference)
-        name = product.get("item_number", "")
+        # Conditional name/description mapping based on product type.
+        # Purchased items (RM, PACK, INT, NON-INV): use item_descrip1 as name so
+        # procurement staff see the human-readable description on POs.
+        # Saleable items (FG): keep item_number as name (SKU) and expose
+        # item_descrip1 as description_sale for the sales order line description.
+        is_purchased = self._is_purchased_product(product)
 
-        # Reference field gets the description
-        default_code = product.get("item_descrip1", "")
+        vals: Dict[str, Any] = {}
+        if is_purchased:
+            vals["name"] = product.get("item_descrip1", "")
+        else:
+            vals["name"] = product.get("item_number", "")
+            description_sale = product.get("item_descrip1", "")
+            if description_sale:
+                vals["description_sale"] = description_sale
 
         description = product.get("item_descrip2", "")
 
@@ -388,26 +420,30 @@ class XtupleProductImporter(models.AbstractModel):
         if not standard_price and product.get("item_maxcost"):
             standard_price = product.get("item_maxcost", 0.0)
 
-        return {
-            "name": name,
-            "description": description,
-            "default_code": default_code,
-            "barcode": product.get("item_upccode"),
-            "type": product_type,
-            "tracking": tracking,
-            "is_storable": is_storable,
-            "categ_id": category_id,
-            "uom_id": uom_id,
-            "active": product.get("item_active"),
-            "sale_ok": is_sold,
-            "purchase_ok": item_type in ["P", "M", "F"],
-            "list_price": list_price,
-            "standard_price": standard_price,
-            "xtuple_item_id": product.get("item_id"),
-            "xtuple_item_number": product.get("item_number"),
-            "xtuple_item_type": item_type,
-            "xtuple_classcode": product.get("classcode_code"),
-        }
+        vals.update(
+            {
+                "description": description,
+                # default_code is intentionally NOT set here; existing values are
+                # left intact (AC5) and new imports leave the field empty so it can
+                # be used for Odoo-generated references or future BOM identifiers.
+                "barcode": product.get("item_upccode"),
+                "type": product_type,
+                "tracking": tracking,
+                "is_storable": is_storable,
+                "categ_id": category_id,
+                "uom_id": uom_id,
+                "active": product.get("item_active"),
+                "sale_ok": is_sold,
+                "purchase_ok": item_type in ["P", "M", "F"],
+                "list_price": list_price,
+                "standard_price": standard_price,
+                "xtuple_item_id": product.get("item_id"),
+                "xtuple_item_number": product.get("item_number"),
+                "xtuple_item_type": item_type,
+                "xtuple_classcode": product.get("classcode_code"),
+            }
+        )
+        return vals
 
     @ETL.transform()
     def transform_products(self, ctx: ETLContext, extracted: Dict) -> Dict:

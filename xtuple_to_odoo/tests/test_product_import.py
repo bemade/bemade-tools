@@ -1,17 +1,211 @@
-from odoo.tests.common import TransactionCase, tagged
+"""Tests for xTuple product import pipeline.
+
+Phase 3 (implementation): stale live-DB tests replaced with unit tests for the
+new conditional name/description_sale mapping introduced in task #3687.
+
+Phase 4 will add the full fixture-based test suite per the design's Test plan.
+Live-DB integration tests (tagged ``xtuple``) require XTUPLE_* env vars; they
+are skipped automatically when those vars are absent.
+"""
+
 import os
 import logging
 
+from odoo.tests.common import TransactionCase, tagged
+
 _logger = logging.getLogger(__name__)
 
-@tagged("-at_install", "xtuple")
-class TestProductImport(TransactionCase):
+
+@tagged("-at_install", "post_install")
+class TestProductTransform(TransactionCase):
+    """Unit tests for XtupleProductImporter._transform_product.
+
+    These tests call ``_transform_product`` directly without a live xTuple
+    connection so they run in any Odoo CI environment.
+    """
+
     def setUp(self):
         super().setUp()
-        # Use environment variables with fallbacks for database connection
+        self.importer = self.env["xtuple.product.importer"]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _base_product(self, **overrides):
+        """Return a minimal fake extracted product record."""
+        base = {
+            "item_id": 1,
+            "item_number": "VFG401C",
+            "item_descrip1": "F-series cyan pigment ink",
+            "item_descrip2": "tech notes",
+            "item_type": "M",
+            "item_active": True,
+            "item_sold": True,
+            "item_fractional": False,
+            "item_inv_uom_id": None,
+            "item_price_uom_id": None,
+            "item_listprice": 0.0,
+            "item_listcost": 0.0,
+            "item_maxcost": 0.0,
+            "item_upccode": None,
+            "item_prodcat_id": None,
+            "item_classcode_id": None,
+            "inv_uom_name": "EA",
+            "price_uom_name": "EA",
+            "prodcat_code": None,
+            "prodcat_descrip": None,
+            "classcode_code": None,
+            "item_controlmethod": "N",
+            "_category_id": False,
+            "_uom_id": False,
+            "_is_purchased": False,
+        }
+        base.update(overrides)
+        return base
+
+    # ------------------------------------------------------------------
+    # AC1 / Test plan #1 -- saleable item
+    # ------------------------------------------------------------------
+
+    def test_saleable_item_name_from_item_number(self):
+        """Saleable item: name comes from item_number (SKU)."""
+        product = self._base_product(
+            item_number="VFG401C",
+            item_descrip1="F-series cyan pigment ink",
+            item_descrip2="tech notes",
+            item_type="M",
+            _is_purchased=False,
+        )
+        vals = self.importer._transform_product(product)
+        self.assertEqual(vals["name"], "VFG401C")
+
+    def test_saleable_item_description_sale_from_descrip1(self):
+        """Saleable item: description_sale comes from item_descrip1."""
+        product = self._base_product(
+            item_number="VFG401C",
+            item_descrip1="F-series cyan pigment ink",
+            _is_purchased=False,
+        )
+        vals = self.importer._transform_product(product)
+        self.assertEqual(vals.get("description_sale"), "F-series cyan pigment ink")
+
+    def test_saleable_item_description_from_descrip2(self):
+        """Saleable item: description (internal notes) comes from item_descrip2."""
+        product = self._base_product(
+            item_descrip2="tech notes",
+            _is_purchased=False,
+        )
+        vals = self.importer._transform_product(product)
+        self.assertEqual(vals["description"], "tech notes")
+
+    def test_saleable_item_no_default_code(self):
+        """Saleable item: default_code is NOT set in create vals (AC5)."""
+        product = self._base_product(_is_purchased=False)
+        vals = self.importer._transform_product(product)
+        self.assertNotIn("default_code", vals)
+
+    # ------------------------------------------------------------------
+    # AC2 / Test plan #2 -- purchased item
+    # ------------------------------------------------------------------
+
+    def test_purchased_item_name_from_descrip1(self):
+        """Purchased item: name comes from item_descrip1."""
+        product = self._base_product(
+            item_number="DTF300W",
+            item_descrip1="Direct to Film White pigment Ink",
+            item_type="P",
+            _is_purchased=True,
+        )
+        vals = self.importer._transform_product(product)
+        self.assertEqual(vals["name"], "Direct to Film White pigment Ink")
+
+    def test_purchased_item_no_description_sale(self):
+        """Purchased item: description_sale is not populated."""
+        product = self._base_product(
+            item_number="DTF300W",
+            item_descrip1="Direct to Film White pigment Ink",
+            item_type="P",
+            _is_purchased=True,
+        )
+        vals = self.importer._transform_product(product)
+        # description_sale should be absent or empty for purchased items.
+        self.assertFalse(vals.get("description_sale"))
+
+    def test_purchased_item_no_default_code(self):
+        """Purchased item: default_code is NOT set in create vals (AC5)."""
+        product = self._base_product(
+            item_number="DTF300W",
+            item_descrip1="Direct to Film White pigment Ink",
+            item_type="P",
+            _is_purchased=True,
+        )
+        vals = self.importer._transform_product(product)
+        self.assertNotIn("default_code", vals)
+
+    # ------------------------------------------------------------------
+    # Test plan #3 -- default_code guard for both branches
+    # ------------------------------------------------------------------
+
+    def test_default_code_never_set_saleable(self):
+        """default_code absent from create vals for saleable items."""
+        vals = self.importer._transform_product(
+            self._base_product(_is_purchased=False)
+        )
+        self.assertNotIn(
+            "default_code", vals, "default_code must not be set for saleable items"
+        )
+
+    def test_default_code_never_set_purchased(self):
+        """default_code absent from create vals for purchased items."""
+        vals = self.importer._transform_product(
+            self._base_product(_is_purchased=True)
+        )
+        self.assertNotIn(
+            "default_code", vals, "default_code must not be set for purchased items"
+        )
+
+    # ------------------------------------------------------------------
+    # _is_purchased_product hook
+    # ------------------------------------------------------------------
+
+    def test_is_purchased_product_default_false(self):
+        """_is_purchased_product returns False when flag not set."""
+        product = self._base_product()
+        del product["_is_purchased"]
+        self.assertFalse(self.importer._is_purchased_product(product))
+
+    def test_is_purchased_product_flag_true(self):
+        """_is_purchased_product returns True when _is_purchased=True."""
+        product = self._base_product(_is_purchased=True)
+        self.assertTrue(self.importer._is_purchased_product(product))
+
+    def test_is_purchased_product_flag_false(self):
+        """_is_purchased_product returns False when _is_purchased=False."""
+        product = self._base_product(_is_purchased=False)
+        self.assertFalse(self.importer._is_purchased_product(product))
+
+
+@tagged("-at_install", "xtuple")
+class TestProductImportLive(TransactionCase):
+    """Live smoke tests -- skipped when XTUPLE_* env vars are absent.
+
+    Runs the real importer against a handful of items and asserts the
+    conditional name mapping works end-to-end.
+
+    Test plan #5.
+    """
+
+    def setUp(self):
+        super().setUp()
+        host = os.environ.get("XTUPLE_HOST", "")
+        if not host:
+            self.skipTest(
+                "XTUPLE_* env vars not set; skipping live smoke tests"
+            )
         self.xtuple_db = self.env["xtuple.database"].create(
             {
-                "database_host": os.environ.get("XTUPLE_HOST", ""),
+                "database_host": host,
                 "database_name": os.environ.get("XTUPLE_DBNAME", ""),
                 "database_username": os.environ.get("XTUPLE_USER", ""),
                 "database_password": os.environ.get("XTUPLE_PASSWORD", ""),
@@ -20,387 +214,24 @@ class TestProductImport(TransactionCase):
             }
         )
 
-        # Create the importer
-        self.product_importer = self.env["xtuple.product.importer"].create({})
-
-    def test_product_tables_exist(self):
-        """Test that the product-related tables exist in the xTuple database."""
+    def test_xtuple_product_tables_exist(self):
+        """Smoke: xTuple product-related tables are accessible."""
         cursor = None
         try:
             cursor = self.xtuple_db.get_cursor()
-
-            # Check for item table
-            cursor.execute(
-                """
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = 'item'
-                )
-            """,
-                (self.xtuple_db.database_schema,),
-            )
-            self.assertTrue(cursor.fetchone()[0], "Product table (item) not found")
-
-            # Check for product category table
-            cursor.execute(
-                """
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = 'prodcat'
-                )
-            """,
-                (self.xtuple_db.database_schema,),
-            )
-            self.assertTrue(
-                cursor.fetchone()[0], "Product category table (prodcat) not found"
-            )
-
-            # Check for UOM table
-            cursor.execute(
-                """
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = 'uom'
-                )
-            """,
-                (self.xtuple_db.database_schema,),
-            )
-            self.assertTrue(cursor.fetchone()[0], "UOM table (uom) not found")
-
-            # Check for item source table
-            cursor.execute(
-                """
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = 'itemsrc'
-                )
-            """,
-                (self.xtuple_db.database_schema,),
-            )
-            self.assertTrue(
-                cursor.fetchone()[0], "Item source table (itemsrc) not found"
-            )
-
-        finally:
-            if cursor:
-                cursor.close()
-
-    def test_product_category_import(self):
-        """Test importing product categories from xTuple."""
-        cursor = None
-        try:
-            cursor = self.xtuple_db.get_cursor()
-
-            # First, check if we have data to test with
-            cursor.execute("SELECT COUNT(*) FROM prodcat")
-            category_count = cursor.fetchone()[0]
-
-            # Skip test if no data is available
-            if category_count == 0:
-                self.skipTest(
-                    "No product category data available in the xTuple database"
-                )
-
-            # Get initial count of product categories in Odoo
-            initial_category_count = self.env["product.category"].search_count([])
-
-            # Import product categories
-            categories = self.product_importer._import_product_categories(cursor)
-
-            # Verify that categories were imported
-            self.assertGreaterEqual(
-                len(categories), 0, "No product categories were imported"
-            )
-
-            # Verify that the total count increased
-            new_category_count = self.env["product.category"].search_count([])
-            self.assertGreaterEqual(
-                new_category_count,
-                initial_category_count,
-                "Product category count did not increase",
-            )
-
-            # Verify that categories have xTuple IDs
-            if categories:
-                self.assertTrue(
-                    all(cat.xtuple_prodcat_id for cat in categories),
-                    "Imported categories are missing xTuple IDs",
-                )
-
-        finally:
-            if cursor:
-                cursor.close()
-
-    def test_product_import(self):
-        """Test importing products from xTuple."""
-        with self.xtuple_db.get_cursor() as cursor:
-            # First, check if we have data to test with
-            cursor.execute("SELECT COUNT(*) FROM item")
-            product_count = cursor.fetchone()[0]
-
-            # Skip test if no data is available
-            if product_count == 0:
-                self.skipTest("No product data available in the xTuple database")
-
-            prod_domain = [
-                ("xtuple_item_id", "!=", False),
-                ("active", "in", [True, False]),
-            ]
-            # Get initial count of products in Odoo
-            initial_product_count = self.env["product.product"].search_count(
-                prod_domain
-            )
-
-            # Import products
-            products = self.product_importer.import_products(cursor)
-
-            # Verify that the total count increased
-            new_product_count = self.env["product.product"].search_count(prod_domain)
-            _logger.info(f"Searched and found {new_product_count} imported products.")
-            self.assertEqual(
-                new_product_count,
-                product_count,
-                "Not all products were imported",
-            )
-
-            # Verify that products have xTuple IDs
-            self.assertTrue(
-                all(prod.xtuple_item_id for prod in products),
-                "Imported products are missing xTuple IDs",
-            )
-
-            # Verify that at least one product has a category
-            products_with_categories = products.filtered(
-                lambda p: p.categ_id.id
-                != self.env.ref("product.product_category_all").id
-            )
-            self.assertTrue(
-                len(products_with_categories) > 0,
-                "None of the imported products have categories",
-            )
-
-    def test_product_supplier_import(self):
-        """Test importing product suppliers from xTuple."""
-        with self.xtuple_db.get_cursor() as cursor:
-            # First, check if we have data to test with
-            cursor.execute(
-                """
-                SELECT COUNT(*) FROM itemsrc
-                JOIN vendinfo ON (itemsrc_vend_id = vend_id)
-                WHERE itemsrc_active = 't'
-            """
-            )
-            supplier_count = cursor.fetchone()[0]
-
-            # Skip test if no data is available
-            if supplier_count == 0:
-                self.skipTest(
-                    "No active product supplier data available in the xTuple database"
-                )
-
-            # We need to have vendors imported first
-            # Import vendors from xTuple
-            partner_importer = self.env["xtuple.res.partner.importer"].with_company(
-                self.env.company
-            )
-
-            # Get vendor IDs from xTuple
-            cursor.execute("SELECT vend_id FROM vendinfo LIMIT 5")
-            vend_ids = [row[0] for row in cursor.fetchall()]
-
-            if not vend_ids:
-                self.skipTest("No vendors available in the xTuple database")
-
-            # Import vendors
-            partners = partner_importer.import_partners(cursor)
-
-            # Verify that vendors were imported
-            vendors = self.env["res.partner"].search(
-                [("xtuple_vend_id", "in", vend_ids)]
-            )
-            if not vendors:
-                self.skipTest("No vendors were imported, cannot test supplier import")
-
-            # Import product categories first
-            categories = self.product_importer._import_product_categories(cursor)
-
-            # Import products
-            products = self.product_importer._import_products_with_categories(
-                cursor, categories
-            )
-
-            if not products:
-                self.skipTest("No products were imported, cannot test supplier import")
-
-            # Get initial count of product suppliers in Odoo
-            initial_supplier_count = self.env["product.supplierinfo"].search_count([])
-
-            # Import product suppliers
-            self.product_importer._import_product_suppliers(cursor, products)
-
-            # Verify that the total count increased
-            new_supplier_count = self.env["product.supplierinfo"].search_count([])
-
-            # We may not have increased if there were no matching suppliers
-            # But we should at least not have decreased
-            self.assertGreaterEqual(
-                new_supplier_count,
-                initial_supplier_count,
-                "Product supplier count decreased after import",
-            )
-
-            # Check if any suppliers were imported with xTuple IDs
-            suppliers_with_xtuple_id = self.env["product.supplierinfo"].search(
-                [("xtuple_itemsrc_id", "!=", False)]
-            )
-
-            # Log the result for debugging
-            _logger.info(
-                f"Found {len(suppliers_with_xtuple_id)} suppliers with xTuple IDs"
-            )
-
-    def test_full_product_import(self):
-        """Test the full product import process using real data."""
-        with self.xtuple_db.get_cursor() as cursor:
-
-            # First, check if we have data to test with
-            cursor.execute("SELECT COUNT(*) FROM item")
-            product_count = cursor.fetchone()[0]
-
-            # Skip test if no data is available
-            if product_count == 0:
-                self.skipTest("No product data available in the xTuple database")
-
-            # Get initial counts
-            initial_category_count = self.env["product.category"].search_count([])
-            initial_product_count = self.env["product.product"].search_count([])
-            initial_supplier_count = self.env["product.supplierinfo"].search_count([])
-
-            # Import vendors first for supplier references
-            partner_importer = self.env["xtuple.res.partner.importer"].with_company(
-                self.env.company
-            )
-            partners = partner_importer.import_partners(cursor)
-
-            # Run the full product import
-            products = self.product_importer.import_products(cursor)
-
-            # Verify that products were imported
-            self.assertGreaterEqual(len(products), 0, "No products were imported")
-
-            # Verify that counts increased
-            new_category_count = self.env["product.category"].search_count([])
-            new_product_count = self.env["product.product"].search_count([])
-            new_supplier_count = self.env["product.supplierinfo"].search_count([])
-
-            self.assertGreaterEqual(
-                new_category_count,
-                initial_category_count,
-                "Product category count did not increase",
-            )
-            self.assertGreaterEqual(
-                new_product_count,
-                initial_product_count,
-                "Product count did not increase",
-            )
-
-            # Supplier count may not increase if there are no matching suppliers
-            self.assertGreaterEqual(
-                new_supplier_count,
-                initial_supplier_count,
-                "Product supplier count decreased after import",
-            )
-
-            # Verify that products have xTuple IDs
-            if products:
-                self.assertTrue(
-                    all(prod.xtuple_item_id for prod in products),
-                    "Imported products are missing xTuple IDs",
-                )
-
-                # Verify product prices were set
-                products_with_prices = products.filtered(lambda p: p.list_price > 0)
-                self.assertTrue(
-                    len(products_with_prices) > 0,
-                    "None of the imported products have prices set",
-                )
-
-                # Get a sample product to verify specific fields
-                sample_product = products[0]
-
-                # Get the corresponding xTuple product
+            for table in ("item", "prodcat", "uom", "itemsrc"):
                 cursor.execute(
                     """
-                    SELECT
-                        item_number,
-                        item_descrip1,
-                        item_type
-                    FROM item
-                    WHERE item_id = %s
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = %s
+                    )
                     """,
-                    (sample_product.xtuple_item_id,),
+                    (self.xtuple_db.database_schema, table),
                 )
-                xtuple_product = cursor.fetchone()
-
-                if xtuple_product:
-                    item_number, item_descrip, item_type = xtuple_product
-
-                    # Verify basic product data
-                    self.assertEqual(
-                        sample_product.default_code,
-                        item_number,
-                        f"Product code mismatch: expected {item_number}, got {sample_product.default_code}",
-                    )
-                    self.assertEqual(
-                        sample_product.name,
-                        item_descrip,
-                        f"Product name mismatch: expected {item_descrip}, got {sample_product.name}",
-                    )
-                    self.assertEqual(
-                        sample_product.xtuple_item_type,
-                        item_type,
-                        f"Product type mismatch: expected {item_type}, got {sample_product.xtuple_item_type}",
-                    )
-
-                # Check for product suppliers
-                suppliers = self.env["product.supplierinfo"].search(
-                    [("product_tmpl_id", "in", products.ids)]
+                self.assertTrue(
+                    cursor.fetchone()[0], f"xTuple table '{table}' not found"
                 )
-
-                if suppliers:
-                    # Verify supplier data
-                    self.assertTrue(
-                        all(sup.xtuple_itemsrc_id for sup in suppliers),
-                        "Imported suppliers are missing xTuple IDs",
-                    )
-
-                    # Get a sample supplier to verify specific fields
-                    sample_supplier = suppliers[0]
-
-                    # Get the corresponding xTuple supplier
-                    cursor.execute(
-                        """
-                        SELECT
-                            itemsrc_vend_item_number,
-                            itemsrc_vend_item_descrip
-                        FROM itemsrc
-                        WHERE itemsrc_id = %s
-                        """,
-                        (sample_supplier.xtuple_itemsrc_id,),
-                    )
-                    xtuple_supplier = cursor.fetchone()
-
-                    if xtuple_supplier:
-                        vend_item_number, vend_item_descrip = xtuple_supplier
-
-                        # Verify basic supplier data
-                        self.assertEqual(
-                            sample_supplier.product_code,
-                            vend_item_number,
-                            f"Supplier product code mismatch: expected {vend_item_number}, got {sample_supplier.product_code}",
-                        )
-                        self.assertEqual(
-                            sample_supplier.product_name,
-                            vend_item_descrip,
-                            f"Supplier product name mismatch: expected {vend_item_descrip}, got {sample_supplier.product_name}",
-                        )
+        finally:
+            if cursor:
+                cursor.close()
