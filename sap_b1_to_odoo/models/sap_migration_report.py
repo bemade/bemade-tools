@@ -243,16 +243,54 @@ class SapMigrationReport(models.Model):
     # -- SAP queries --
 
     def _get_sap_trial_balance(self):
-        # Mirror the import-time rewrite of SAP B1 Period-End-Closing
-        # JEs (OJDT.transtype='-3'): P&L legs (OACT.acttype in I/E)
-        # are redirected to Odoo account 999999 (equity_unaffected).
-        # Exclude those legs from their original account and aggregate
-        # them under a synthetic '999999' row so the comparison TB
-        # represents the same accounting treatment as Odoo.
+        # Mirror the import-time handling of SAP B1 closing JEs:
+        #
+        # 1. P&L close JEs (transtype='-3' with any I/E leg): SKIPPED
+        #    on import.  Odoo's balance-sheet report auto-accumulates
+        #    P&L into equity_unaffected (999999) via cross_report, so
+        #    importing these would double-count.  Exclude them entirely
+        #    from the SAP TB.
+        #
+        # 2. Transfer JEs (transtype='-3' with no I/E leg, only N legs
+        #    where one is "Retained Earnings Clearing"): the RE Clearing
+        #    leg is rewritten to Odoo 999999 on import.  Mirror that by
+        #    moving those legs to the synthetic '999999' row in the SAP
+        #    TB.  Year-N RE legs pass through to their own rows.
+        #
+        # Closing JEs are also detected by memo pattern "(for) closing
+        # period" for the rare cases where transtype isn't set, to keep
+        # the SAP TB exactly aligned with the import logic.
         sap_cr = self.sap_database_id.get_cursor()
         try:
             sap_cr.execute(
                 """
+                WITH closing_headers AS (
+                    -- Closing JE detection: transtype='-3' OR memo match.
+                    -- P&L detection via OACT.groupmask (4=Revenue,
+                    -- 5=COGS, 6=Expense); acttype is unreliable in
+                    -- RWI's chart (COGS accounts carry acttype='N').
+                    SELECT h.transid,
+                           BOOL_OR(a.groupmask IN (4, 5, 6)) AS has_pl
+                      FROM ojdt h
+                      JOIN jdt1 j ON h.transid = j.transid
+                      JOIN oact a ON j.account = a.acctcode
+                     WHERE h.refdate <= %s
+                       AND (
+                           h.transtype = '-3'
+                           OR LOWER(h.memo) ~ '^\\s*(for\\s+)?closing\\s+period'
+                       )
+                     GROUP BY h.transid
+                ),
+                skipped AS (
+                    -- P&L close JEs: don't import, exclude from TB
+                    SELECT transid FROM closing_headers WHERE has_pl
+                ),
+                transfers AS (
+                    -- Transfer JEs: rewrite "clearing"-named legs to 999999
+                    SELECT transid FROM closing_headers WHERE NOT has_pl
+                )
+                -- Normal lines: not in a skipped JE, and not a
+                -- clearing leg of a transfer JE
                 SELECT a.formatcode AS code,
                        a.acctname AS name,
                        COALESCE(SUM(j.debit), 0) AS debit,
@@ -262,11 +300,16 @@ class SapMigrationReport(models.Model):
                   JOIN oact a ON j.account = a.acctcode
                  WHERE h.refdate <= %s
                    AND a.postable = 'Y'
-                   AND NOT (h.transtype = '-3' AND a.acttype IN ('I', 'E'))
+                   AND j.transid NOT IN (SELECT transid FROM skipped)
+                   AND NOT (
+                       j.transid IN (SELECT transid FROM transfers)
+                       AND LOWER(a.acctname) LIKE '%%clearing%%'
+                   )
                  GROUP BY a.formatcode, a.acctname
 
                  UNION ALL
 
+                -- Rewritten RE Clearing legs from transfer JEs
                 SELECT '999999' AS code,
                        'Unallocated Earnings' AS name,
                        COALESCE(SUM(j.debit), 0) AS debit,
@@ -276,30 +319,60 @@ class SapMigrationReport(models.Model):
                   JOIN oact a ON j.account = a.acctcode
                  WHERE h.refdate <= %s
                    AND a.postable = 'Y'
-                   AND h.transtype = '-3'
-                   AND a.acttype IN ('I', 'E')
+                   AND j.transid IN (
+                       SELECT h2.transid
+                         FROM ojdt h2
+                         JOIN jdt1 j2 ON h2.transid = j2.transid
+                         JOIN oact a2 ON j2.account = a2.acctcode
+                        WHERE h2.refdate <= %s
+                          AND (
+                              h2.transtype = '-3'
+                              OR LOWER(h2.memo) ~
+                                 '^\\s*(for\\s+)?closing\\s+period'
+                          )
+                        GROUP BY h2.transid
+                       HAVING NOT BOOL_OR(
+                           a2.groupmask IN (4, 5, 6)
+                       )
+                   )
+                   AND LOWER(a.acctname) LIKE '%%clearing%%'
                 HAVING COALESCE(SUM(j.debit), 0) <> 0
                     OR COALESCE(SUM(j.credit), 0) <> 0
                 """,
-                (self.cutoff_date, self.cutoff_date),
+                (
+                    self.cutoff_date,  # closing_headers refdate
+                    self.cutoff_date,  # normal lines refdate
+                    self.cutoff_date,  # rewrite block refdate
+                    self.cutoff_date,  # nested transfers subquery refdate
+                ),
             )
             result = {}
             for row in sap_cr.dictfetchall():
                 code = row["code"].strip()
-                result[code] = {
-                    "name": row["name"].strip(),
-                    "debit": float(row["debit"]),
-                    "credit": float(row["credit"]),
-                }
+                if code in result:
+                    # Same SAP account aggregated across multiple rows
+                    # (shouldn't happen for normal lines, but the
+                    # '999999' synthetic row may collide if a real
+                    # acctname '999999' exists).  Sum defensively.
+                    result[code]["debit"] += float(row["debit"])
+                    result[code]["credit"] += float(row["credit"])
+                else:
+                    result[code] = {
+                        "name": row["name"].strip(),
+                        "debit": float(row["debit"]),
+                        "credit": float(row["credit"]),
+                    }
             return result
         finally:
             sap_cr.close()
 
     def _get_sap_transactions(self, sap_acct_code):
-        # The synthetic '999999' code holds the redirected P&L legs of
-        # SAP B1 Period-End-Closing JEs (transtype='-3', acttype I/E).
-        # SAP itself has no 999999 account, so for that code we filter
-        # by transtype/acttype instead of formatcode.
+        # The synthetic '999999' code holds the rewritten RE Clearing
+        # legs from closing transfer JEs (closing JE with no I/E leg,
+        # at least one acctname-matches-"clearing" N leg).  For 999999,
+        # filter accordingly.  For all other codes, exclude lines from
+        # skipped P&L close JEs and exclude the rewritten clearing legs
+        # of transfer JEs.
         sap_cr = self.sap_database_id.get_cursor()
         try:
             if sap_acct_code == "999999":
@@ -317,12 +390,27 @@ class SapMigrationReport(models.Model):
                       FROM jdt1 j
                       JOIN ojdt h ON h.transid = j.transid
                       JOIN oact a ON j.account = a.acctcode
-                     WHERE h.transtype = '-3'
-                       AND a.acttype IN ('I', 'E')
-                       AND h.refdate <= %s
+                     WHERE h.refdate <= %s
+                       AND LOWER(a.acctname) LIKE '%%clearing%%'
+                       AND j.transid IN (
+                           SELECT h2.transid
+                             FROM ojdt h2
+                             JOIN jdt1 j2 ON h2.transid = j2.transid
+                             JOIN oact a2 ON j2.account = a2.acctcode
+                            WHERE h2.refdate <= %s
+                              AND (
+                                  h2.transtype = '-3'
+                                  OR LOWER(h2.memo) ~
+                                     '^\\s*(for\\s+)?closing\\s+period'
+                              )
+                            GROUP BY h2.transid
+                           HAVING NOT BOOL_OR(
+                               a2.groupmask IN (4, 5, 6)
+                           )
+                       )
                      ORDER BY h.refdate, h.transid, j.line_id
                     """,
-                    (self.cutoff_date,),
+                    (self.cutoff_date, self.cutoff_date),
                 )
             else:
                 sap_cr.execute(
@@ -341,10 +429,52 @@ class SapMigrationReport(models.Model):
                       JOIN oact a ON j.account = a.acctcode
                      WHERE a.formatcode = %s
                        AND h.refdate <= %s
-                       AND NOT (h.transtype = '-3' AND a.acttype IN ('I', 'E'))
+                       -- Exclude skipped P&L close JEs entirely
+                       AND j.transid NOT IN (
+                           SELECT h2.transid
+                             FROM ojdt h2
+                             JOIN jdt1 j2 ON h2.transid = j2.transid
+                             JOIN oact a2 ON j2.account = a2.acctcode
+                            WHERE h2.refdate <= %s
+                              AND (
+                                  h2.transtype = '-3'
+                                  OR LOWER(h2.memo) ~
+                                     '^\\s*(for\\s+)?closing\\s+period'
+                              )
+                            GROUP BY h2.transid
+                           HAVING BOOL_OR(
+                               a2.groupmask IN (4, 5, 6)
+                           )
+                       )
+                       -- Exclude RE Clearing legs of transfer JEs (those
+                       -- show up under '999999' instead)
+                       AND NOT (
+                           LOWER(a.acctname) LIKE '%%clearing%%'
+                           AND j.transid IN (
+                               SELECT h3.transid
+                                 FROM ojdt h3
+                                 JOIN jdt1 j3 ON h3.transid = j3.transid
+                                 JOIN oact a3 ON j3.account = a3.acctcode
+                                WHERE h3.refdate <= %s
+                                  AND (
+                                      h3.transtype = '-3'
+                                      OR LOWER(h3.memo) ~
+                                         '^\\s*(for\\s+)?closing\\s+period'
+                                  )
+                                GROUP BY h3.transid
+                               HAVING NOT BOOL_OR(
+                                   a3.groupmask IN (4, 5, 6)
+                               )
+                           )
+                       )
                      ORDER BY h.refdate, h.transid, j.line_id
                     """,
-                    (sap_acct_code, self.cutoff_date),
+                    (
+                        sap_acct_code,
+                        self.cutoff_date,
+                        self.cutoff_date,
+                        self.cutoff_date,
+                    ),
                 )
             return sap_cr.dictfetchall()
         finally:

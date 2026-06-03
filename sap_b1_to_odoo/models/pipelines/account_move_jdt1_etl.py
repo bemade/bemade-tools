@@ -57,15 +57,48 @@ _TRANSTYPE_CONFIG = {
 
 _ENRICHABLE_TYPES = {"13", "14", "18", "19"}
 
+# Memo pattern for SAP B1 Period-End-Closing utility output.  Tight match
+# on the system-generated phrase only; the broader `\bye\b` / `year-end`
+# patterns we previously used caught real accountant accrual JEs as
+# false positives (e.g. "YE BONUS 2024", "YE AJE PER FIDELIS 2024") whose
+# offset is a liability/accrual account, not RE Clearing.
 _CLOSING_MEMO_RE = re.compile(
-    r"^\s*(for\s+closing\s+period|ye\b|year[\s-]?end|"
-    r"record\s+.*\s+year\s+end|reclassify\s+.*\s+ye)",
-    re.IGNORECASE,
+    r"^\s*(for\s+)?closing\s+period", re.IGNORECASE,
 )
 
-_CLEARING_NAME_RE = re.compile(
-    r"(retained\s+earn|clearing|unallocated)", re.IGNORECASE,
-)
+# Strict "clearing" regex — used to identify ONLY the Retained Earnings
+# Clearing leg of a transfer JE for rewriting to 999999.  Matches
+# "Retained Earnings Clearing" but NOT "2024 Retained Earnings" or
+# "Retained Earnings" (those are destination equity accounts, not the
+# transit clearing account).
+_RE_CLEARING_NAME_RE = re.compile(r"clearing", re.IGNORECASE)
+
+# SAP B1 P&L groupmasks.  OACT.groupmask is SAP's canonical account
+# category and is reliable where OACT.acttype is not (RWI's chart has
+# COGS accounts at groupmask=5 with acttype='N', not 'E' — so we can't
+# detect P&L by acttype alone).
+#   1 = Assets       2 = Liabilities   3 = Capital/Equity
+#   4 = Revenue      5 = Sales Cost    6 = Expenditures
+# Groupmasks 4, 5, 6 are P&L; 1, 2, 3 are balance sheet; 7+ are
+# template/non-postable categories.
+_PL_GROUPMASKS = (4, 5, 6)
+
+# P&L account detection by SAP formatcode prefix.  RWI's SAP chart uses
+# OACT.acttype unreliably -- prefix-5 accounts (COGS) and many prefix-6
+# accounts (Expense) carry acttype='N' rather than 'E', so we can't
+# rely on the acttype column alone.  The formatcode convention is:
+#   4xxxx = Revenue (income)
+#   5xxxx = COGS (expense_direct_cost)
+#   6xxxx = Operating expense (expense)
+# Any line whose acct_formatcode starts with one of these prefixes is
+# treated as a P&L leg for closing-JE classification purposes.
+_PL_FORMATCODE_PREFIXES = ("4", "5", "6")
+
+
+def _is_pl_line(jdt1):
+    """True iff the JDT1 row references a P&L account by formatcode prefix."""
+    fc = (jdt1.get("acct_formatcode") or "").lstrip()
+    return bool(fc) and fc[0] in _PL_FORMATCODE_PREFIXES
 
 
 def _fix_taxes_pre_posting_sap(cr, moves_tax_data, tax_account_ids=None):
@@ -458,6 +491,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                    j.ref1, j.ref2, j.project,
                    a.formatcode AS acct_formatcode,
                    a.acttype AS acttype,
+                   a.groupmask AS acct_groupmask,
                    a.acctname AS acct_name
               FROM jdt1 j
               JOIN oact a ON j.account = a.acctcode
@@ -610,13 +644,25 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         companion_count = 0
         generic_count = 0
 
+        skipped_closing_count = 0
         for header in headers:
             ref = f"ojdt#{header.get('transid')}"
             with ctx.skippable(ref):
                 jdt1_lines = header.pop("_lines", [])
-                header["_is_closing"] = self._detect_closing(
+                classification = self._classify_closing_je(
                     header, jdt1_lines,
                 )
+                header["_closing_class"] = classification
+                # Back-compat flag for any downstream code paths that
+                # only need to know "is this a closing JE in some sense".
+                header["_is_closing"] = classification != "normal"
+                if classification == "skip":
+                    # P&L close JE.  Don't import — Odoo's balance
+                    # sheet report auto-accumulates P&L into
+                    # equity_unaffected (999999) via cross-report
+                    # without any posted JE.
+                    skipped_closing_count += 1
+                    continue
                 doc = header.pop("_doc", None)
                 doc_lines = header.pop("_doc_lines", [])
                 if not jdt1_lines:
@@ -704,30 +750,38 @@ class AccountMoveJDT1Importer(models.AbstractModel):
 
         _logger.info(
             "Transformed %d journal entries "
-            "(%d enriched, %d with cogs, %d generic).",
+            "(%d enriched, %d with cogs, %d generic, %d closing-skipped).",
             len(move_vals_list), enriched_count,
-            companion_count, generic_count,
+            companion_count, generic_count, skipped_closing_count,
         )
 
-        # Per-year diagnostic: emit one warning per year that has closing JEs.
+        # Per-year diagnostic: emit one warning per year with closing JEs.
+        # Tracks both skipped (P&L close) and transfer (RE Clearing rewrite)
+        # categories so the user can see what was reclassified.
         yr_counts = Counter()
         for h in headers:
-            if not h.get("_is_closing"):
+            cls = h.get("_closing_class") or "normal"
+            if cls == "normal":
                 continue
             refdate = h.get("refdate")
             if hasattr(refdate, "year"):
                 year = str(refdate.year)
             else:
                 year = str(refdate or "????")[:4]
-            yr_counts[year] += 1
-        for year in sorted(yr_counts):
+            yr_counts[(year, cls)] += 1
+        years = sorted({yr for yr, _cls in yr_counts})
+        for year in years:
+            skipped = yr_counts.get((year, "skip"), 0)
+            transfers = yr_counts.get((year, "transfer"), 0)
             _logger.info(
-                "Closing-JE diagnostic %s: detected=%d",
-                year, yr_counts[year],
+                "Closing-JE diagnostic %s: P&L skipped=%d, "
+                "transfers (clearing→999999 rewritten)=%d",
+                year, skipped, transfers,
             )
             ctx.report.warning(
                 message=(
-                    f"Year-end closings {year}: detected={yr_counts[year]}"
+                    f"Year-end closings {year}: P&L skipped={skipped}, "
+                    f"transfers rewritten={transfers}"
                 ),
                 source_ref=f"closing-{year}",
             )
@@ -1156,35 +1210,67 @@ class AccountMoveJDT1Importer(models.AbstractModel):
     # ----------------------------------------------------------------
 
     @staticmethod
-    def _detect_closing(header, jdt1_lines):
-        """Return True iff this OJDT header is a year-end closing JE.
+    def _classify_closing_je(header, jdt1_lines):
+        """Classify a JE as 'normal', 'skip', or 'transfer'.
 
-        Three OR'd arms — transtype '-3', memo-pattern match,
-        or inferred P&L↔equity crossing.  See 02-design.md for rationale.
+        Year-end accounting in SAP B1 emits two kinds of JEs:
+
+        1.  P&L close JEs — pair a Revenue or Expense line with a
+            Retained Earnings Clearing line to zero out the P&L
+            account at year-end.  Odoo handles this AUTOMATICALLY:
+            its balance-sheet report cross-references P&L activity
+            into the ``equity_unaffected`` (Odoo code 999999) line
+            display, without any posted JE.  Importing SAP's P&L
+            close JEs into Odoo would double-count, so we SKIP them
+            entirely.
+
+        2.  RE Clearing → Year-N RE transfer JEs — move the year's
+            accumulated profit/loss from Retained Earnings Clearing
+            into the per-year Retained Earnings account.  Odoo's
+            chart has no Retained Earnings Clearing equivalent
+            (``equity_unaffected`` / 999999 plays that role), so we
+            REWRITE the RE Clearing leg of these transfer JEs to
+            point at 999999.  The Year-N RE leg passes through.
+
+        Detection arms (OR'd):
+        - ``transtype == '-3'``: SAP's Period-End Closing utility tag
+          (catches ~4630 of 4634 closing JEs in RWI's source data).
+        - Memo matches "(for) closing period": SAP-generated label,
+          catches the remaining ~4 closing JEs without the transtype
+          tag.
+
+        A structural fallback ("has P&L leg + clearing-named N leg +
+        no asset/liability legs") was deliberately removed: it
+        over-fires on RWI's data because the SAP chart's
+        ``OACT.acttype`` is unreliable -- COGS accounts (prefix 5)
+        carry ``acttype='N'`` rather than 'E', so any heuristic based
+        on acttype mis-classifies adjustments touching Retained
+        Earnings accounts.
+
+        Among detected closing JEs, presence of any P&L leg
+        (``OACT.groupmask`` in {4, 5, 6}) means "skip" (P&L close);
+        else "transfer" (rewrite clearing → 999999).  ``groupmask``
+        is SAP B1's canonical account-category column and is reliable
+        across the full chart.
+
+        Returns one of "normal" | "skip" | "transfer".
         """
-        if header.get("transtype") == "-3":
-            return True
-        memo = header.get("memo") or ""
-        if _CLOSING_MEMO_RE.match(memo):
-            return True
-        # Inferred arm: P&L leg + retained-earnings/clearing leg.
-        has_pl = False
-        has_clearing = False
-        for j in jdt1_lines:
-            debit = float(j.get("debit") or 0)
-            credit = float(j.get("credit") or 0)
-            if debit == 0 and credit == 0:
-                continue
-            at = (j.get("acttype") or "").strip()
-            if at not in ("I", "E", "N"):
-                return False  # bail: assets/liab present, not a P&L close
-            if at in ("I", "E"):
-                has_pl = True
-            elif at == "N":
-                name = (j.get("acct_name") or "")
-                if _CLEARING_NAME_RE.search(name):
-                    has_clearing = True
-        return has_pl and has_clearing
+        # Detection
+        is_closing = (
+            header.get("transtype") == "-3"
+            or bool(_CLOSING_MEMO_RE.match(header.get("memo") or ""))
+        )
+
+        if not is_closing:
+            return "normal"
+
+        # Classify by SAP groupmask (not acttype — see docstring)
+        has_pl = any(
+            j.get("acct_groupmask") in _PL_GROUPMASKS
+            for j in jdt1_lines
+            if (float(j.get("debit") or 0) or float(j.get("credit") or 0))
+        )
+        return "skip" if has_pl else "transfer"
 
     # ----------------------------------------------------------------
     # Generic JDT1 builder
@@ -1197,24 +1283,27 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                                   unallocated_earnings_id=None):
         """Build move_type='entry' from JDT1 lines.
 
-        For SAP B1 Period-End-Closing journal entries
-        (``OJDT.transtype = '-3'``), every line whose source SAP
-        account is income/expense (``OACT.acttype IN ('I','E')``) is
-        redirected to the Odoo "Unallocated Earnings" clearing account
-        (code ``999999``, ``account_type='equity_unaffected'``).  This
-        matches SAP B1's Period-End Closing utility output, where each
-        closing JE pairs one P&L line with one offset to the Retained
-        Earnings Clearing account; redirecting only the P&L leg keeps
-        the move balanced by construction.  Balance-sheet legs
-        (``acttype='N'``) pass through untouched.
+        Closing-JE handling depends on ``header["_closing_class"]``:
 
-        Note: unmapped P&L accounts (no ``sap_acct_code`` row) that
-        previously warn-and-skipped will now resolve to 999999 and
-        post -- which is correct for closing entries, since the only
-        purpose of the line is to drain the period's P&L into
-        unallocated earnings.
+        - ``"normal"`` — no transformation.  Each JDT1 line is built
+          against its mapped Odoo account as-is.
+        - ``"skip"`` — handled upstream in the transform loop; this
+          method should never be called for skip-class JEs.
+        - ``"transfer"`` — RE Clearing → Year-N RE transfer JE.  The
+          line whose SAP source account name matches the strict
+          "clearing" regex is rewritten to point at the Odoo
+          ``equity_unaffected`` account (code 999999, the Odoo
+          conceptual equivalent of SAP's Retained Earnings Clearing).
+          The Year-N RE leg passes through untouched.
+
+        This mirrors Odoo's built-in handling of P&L → equity_unaffected
+        on the balance sheet report (cross_report subtracts the
+        equity_unaffected balance from the P&L net result, so all
+        retained earnings flow naturally end up in the per-year RE
+        accounts with 999999 holding the cumulative allocation).
         """
-        is_closing = header.get("_is_closing") or header.get("transtype") == "-3"
+        classification = header.get("_closing_class") or "normal"
+        rewrite_clearing = classification == "transfer"
         line_commands = []
         partner_id = False
 
@@ -1222,7 +1311,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
             line_vals = AccountMoveJDT1Importer._build_jdt1_line_vals(
                 jdt1, accounts_dict, partners_dict,
                 currencies_dict, company_currency_id,
-                is_closing=is_closing,
+                rewrite_clearing=rewrite_clearing,
                 unallocated_earnings_id=unallocated_earnings_id,
             )
             if line_vals:
@@ -1275,17 +1364,19 @@ class AccountMoveJDT1Importer(models.AbstractModel):
     @staticmethod
     def _build_jdt1_line_vals(jdt1, accounts_dict, partners_dict,
                               currencies_dict, company_currency_id,
-                              is_closing=False,
+                              rewrite_clearing=False,
                               unallocated_earnings_id=None):
         """Build account.move.line vals from a single JDT1 row.
 
-        When ``is_closing`` is True (header ``transtype='-3'``) and the
-        JDT1 row's ``OACT.acttype`` is ``'I'`` (income) or ``'E'``
-        (expense), the line's ``account_id`` and ``sap_acct_id`` are
-        redirected to ``unallocated_earnings_id`` (Odoo code 999999,
-        ``equity_unaffected``).  Debit/credit/currency/amount are
-        preserved exactly -- only the account changes.  Balance-sheet
-        legs (``acttype='N'``) and non-closing JEs are unaffected.
+        When ``rewrite_clearing`` is True (the parent JE is a closing
+        transfer — RE Clearing → Year-N RE), any line whose SAP source
+        account NAME matches the strict ``_RE_CLEARING_NAME_RE``
+        ("clearing") is rewritten to point at ``unallocated_earnings_id``
+        (Odoo code 999999, ``equity_unaffected``).  This replaces the
+        Retained Earnings Clearing transit account with Odoo's
+        conceptual equivalent.  Debit/credit/currency/amount are
+        preserved exactly -- only the account changes.  All other
+        legs (Year-N RE accounts) pass through untouched.
         """
         debit = float(jdt1.get("debit") or 0)
         credit = float(jdt1.get("credit") or 0)
@@ -1293,22 +1384,25 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         if debit == 0 and credit == 0:
             return None
 
-        acttype = (jdt1.get("acttype") or "").strip()
-        is_pl_redirect = (
-            is_closing
-            and acttype in ("I", "E")
+        # In a transfer JE, the RE Clearing leg is identified by the
+        # SAP source account NAME containing "clearing" (strict
+        # regex).  Year-N RE accounts ("YYYY Retained Earnings",
+        # "Retained Earnings") don't match and pass through.
+        sap_acct_name = (jdt1.get("acct_name") or "")
+        is_re_clearing_rewrite = (
+            rewrite_clearing
             and unallocated_earnings_id
+            and _RE_CLEARING_NAME_RE.search(sap_acct_name)
         )
 
         acct_formatcode = (jdt1.get("acct_formatcode") or "").strip()
         account_info = accounts_dict.get(acct_formatcode)
         if not account_info:
-            if is_pl_redirect:
-                # Closing-entry P&L leg with no Odoo mapping: still
-                # redirect to 999999 so the closing JE posts and
-                # balances against its Retained Earnings Clearing
-                # offset.  This is the intended behaviour -- the
-                # original P&L account doesn't matter for closing.
+            if is_re_clearing_rewrite:
+                # RE Clearing leg with no Odoo mapping: still rewrite
+                # to 999999 so the transfer JE posts.  RE Clearing
+                # itself doesn't need to exist in Odoo's chart -- 999999
+                # plays the role.
                 account_id = unallocated_earnings_id
             else:
                 _logger.warning(
@@ -1320,7 +1414,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 return None
         else:
             account_id, _account_type = account_info
-            if is_pl_redirect:
+            if is_re_clearing_rewrite:
                 account_id = unallocated_earnings_id
 
         shortname = (jdt1.get("shortname") or "").strip()
