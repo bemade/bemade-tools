@@ -134,12 +134,9 @@ class ProductSupplierinfoImporter(models.AbstractModel):
                 skipped_no_price += 1
                 continue
 
-            # Resolve currency
-            sap_curr = row.get("lastpurcur") or ""
-            odoo_curr = _SAP_CURRENCY_MAP.get(sap_curr)
-            currency_id = currency_map.get(odoo_curr) if odoo_curr else None
-            if not currency_id:
-                currency_id = company_currency_id
+            currency_id = self._get_vendor_currency_id(
+                row, currency_map, company_currency_id
+            )
 
             vals = {
                 "partner_id": partner_id,
@@ -181,6 +178,30 @@ class ProductSupplierinfoImporter(models.AbstractModel):
             Vendor price as float, or 0.0 if unavailable.
         """
         return float(row.get("lastpurprc") or 0.0)
+
+    def _get_vendor_currency_id(
+        self, row: Dict, currency_map: Dict, company_currency_id: int
+    ) -> int:
+        """Return the currency id for a given ITM2+OITM row.
+
+        Base implementation maps OITM.lastpurcur (last purchase currency)
+        via _SAP_CURRENCY_MAP, falling back to the company currency.
+        Override in subclass to change currency resolution.
+
+        Args:
+            row: Dict with at least 'lastpurcur'.
+            currency_map: Mapping of currency name -> res.currency id.
+            company_currency_id: Fallback currency id.
+
+        Returns:
+            res.currency id.
+        """
+        sap_curr = row.get("lastpurcur") or ""
+        odoo_curr = _SAP_CURRENCY_MAP.get(sap_curr)
+        currency_id = currency_map.get(odoo_curr) if odoo_curr else None
+        if not currency_id:
+            currency_id = company_currency_id
+        return currency_id
 
     @ETL.load()
     def load_supplierinfo(self, ctx: ETLContext, transformed: Dict) -> None:
