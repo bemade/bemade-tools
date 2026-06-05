@@ -40,12 +40,12 @@ class TestAccountArchivalTaxGuard(TransactionCase):
         # Create two test accounts; one will be tax-referenced, one will not.
         cls.tax_ref_account = cls.env["account.account"].create({
             "name": "QBO Tax Payable Test",
-            "code": "TEST-TAX-REF-001",
+            "code": "TEST.TAX.REF.001",
             "account_type": "liability_current",
         })
         cls.control_account = cls.env["account.account"].create({
             "name": "QBO Control Archive Test",
-            "code": "TEST-CTRL-001",
+            "code": "TEST.CTRL.001",
             "account_type": "expense",
         })
 
@@ -152,7 +152,7 @@ class TestAccountArchivalTaxGuard(TransactionCase):
         # Create a non-referenced account to serve as the "default Odoo account"
         default_like = self.env["account.account"].create({
             "name": "Default Odoo Account (no QBO id)",
-            "code": "TEST-DEFAULT-001",
+            "code": "TEST.DEFAULT.001",
             "account_type": "expense",
         })
 
