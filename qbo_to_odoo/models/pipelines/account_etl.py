@@ -146,6 +146,9 @@ class QboAccountImporter(models.AbstractModel):
                     f"({company.transfer_account_id.code}) active"
                 )
             odoo_default_accounts -= keep_accounts
+            odoo_default_accounts = QboAccountFinalizer._filter_tax_referenced(
+                ctx, odoo_default_accounts
+            )
 
             _logger.info(
                 f"Found {len(odoo_default_accounts)} Odoo default accounts to archive "
@@ -576,11 +579,45 @@ class QboAccountFinalizer(models.AbstractModel):
             )
 
         if to_archive:
+            to_archive = self._filter_tax_referenced(ctx, to_archive)
+
+        if to_archive:
             to_archive.write({"active": False})
             _logger.info(
                 f"Archived {len(to_archive)} QBO-imported accounts that are "
                 f"inactive in QBO: {', '.join(to_archive.mapped('code'))}"
             )
+
+    @staticmethod
+    def _filter_tax_referenced(ctx: ETLContext, accounts):
+        """Return *accounts* minus any account referenced by a tax repartition line.
+
+        Searches ``account.tax.repartition.line`` with ``active_test=False`` so
+        that repartition lines belonging to an inactive ``account.tax`` are still
+        counted (the tax carries the active flag; the repartition line has none).
+        Logs the excluded account codes at INFO level.
+
+        :param ctx: ETL context carrying the ORM environment.
+        :param accounts: ``account.account`` recordset to filter.
+        :return: The input recordset minus any tax-referenced accounts.
+        """
+        if not accounts:
+            return accounts
+        referenced_ids = set(
+            ctx.env["account.tax.repartition.line"]
+            .with_context(active_test=False)
+            .search([("account_id", "in", accounts.ids)])
+            .mapped("account_id")
+            .ids
+        )
+        skipped = accounts.filtered(lambda a: a.id in referenced_ids)
+        if skipped:
+            _logger.info(
+                "Not archiving %d tax-referenced account(s): %s",
+                len(skipped),
+                ", ".join(skipped.mapped("code")),
+            )
+        return accounts - skipped
 
     @staticmethod
     def _retry_credit_reconciliation(ctx: ETLContext):
