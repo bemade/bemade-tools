@@ -438,7 +438,7 @@ def load_and_post_invoice_moves(ctx, move_vals_list: List[Dict]) -> None:
                             str(move.invoice_date or move.date),
                             truth["fx_qbo_rate"],
                         )
-                    move.action_post()
+                    move.with_context(skip_cogs_generation=True).action_post()
                     posted += 1
 
     _logger.info(f"Posted {posted} moves")

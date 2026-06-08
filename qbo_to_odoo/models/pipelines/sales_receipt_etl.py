@@ -225,7 +225,7 @@ class QboSalesReceiptImporter(models.AbstractModel):
                     with ctx.skippable(
                         f"post sales receipt QBO#{move.qbo_sales_receipt_id or '?'}"
                     ):
-                        move.action_post()
+                        move.with_context(skip_cogs_generation=True).action_post()
                         posted += 1
 
         _logger.info(f"Posted {posted} sales receipts")
