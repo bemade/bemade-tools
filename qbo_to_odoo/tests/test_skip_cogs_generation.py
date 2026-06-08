@@ -49,19 +49,28 @@ def _build_anglo_saxon_storable(env):
         "property_cost_method": "standard",
     })
 
-    # Create a storable product with a nonzero standard cost
-    product = env["product.product"].create({
+    # Create a storable product with a nonzero standard cost.
+    # In Odoo 19+, type='consu' is a consumable by default; inventory tracking
+    # (i.e. "storable") requires is_storable=True on the template.  In older
+    # Odoo the field does not exist and type='product' was the storable type.
+    # We attempt to set is_storable=True when the field is available, and fall
+    # back to type='product' for older versions.
+    product_vals = {
         "name": "Test COGS Storable Product",
-        "type": "consu",  # Odoo 17+ uses 'consu' for storable; fallback below
+        "type": "consu",
         "categ_id": categ.id,
         "standard_price": 50.0,
         "list_price": 100.0,
-    })
+    }
+    ProductTemplate = env["product.template"]
+    if "is_storable" in ProductTemplate._fields:
+        product_vals["is_storable"] = True
 
-    # Odoo 17 split 'product' into 'consu' (storable) and 'service'.
-    # In older versions, 'product' means storable.  Normalise.
-    if product.type not in ("consu", "product"):
-        product.type = "product"
+    product = env["product.product"].create(product_vals)
+
+    # For Odoo versions that use type='product' as the storable type (pre-17).
+    if not product.is_storable if "is_storable" in product._fields else product.type not in ("consu", "product"):
+        product.product_tmpl_id.type = "product"
 
     partner = env["res.partner"].create({
         "name": "Test COGS Customer",
