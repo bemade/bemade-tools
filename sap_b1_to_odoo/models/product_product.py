@@ -15,6 +15,11 @@ class ProductTemplate(models.Model):
     )
 
 
+class ProductProduct(models.Model):
+    _inherit = "product.product"
+    _rec_names_search = ["name", "default_code", "barcode", "sap_item_code"]
+
+
 class ProductCategory(models.Model):
     _inherit = "product.category"
 
