@@ -24,9 +24,22 @@ def get_countries_dict(env):
 
 
 def get_states_dict(env):
-    """Get a dictionary of state IDs by SAP code."""
+    """Get a dictionary of state IDs keyed on (country_id, value.upper()).
+
+    Both state.code and state.name are added as keys so SAP state values
+    supplied as either a code or a full name resolve correctly.  Keying on
+    the composite (country_id, value) prevents cross-country collisions
+    (e.g. US "CO" = Colorado vs. UY "CO" = Colonia).
+
+    When two states in the same country share the same code or name (rare),
+    last-write wins — same behaviour as the previous single-key dict.
+    """
     states = env["res.country.state"].search([])
-    return {state.code: state.id for state in states}
+    result = {}
+    for state in states:
+        result[(state.country_id.id, state.code.upper())] = state.id
+        result[(state.country_id.id, state.name.upper())] = state.id
+    return result
 
 
 def get_users_dict(env):
@@ -51,10 +64,44 @@ def get_payment_terms_dict(env):
 def extract_sap_state_country(country_code, state_code, countries_dict, states_dict):
     """Extract country and state IDs from SAP codes.
 
-    Returns tuple of (country_id, state_id).
+    Resolution order:
+    1. Resolve ``country_id`` from ``countries_dict`` using ``country_code``.
+    2. If ``country_id`` is falsy (unknown/blank country), return
+       ``(False, False)`` immediately and log a WARNING naming the SAP value.
+    3. Look up ``states_dict[(country_id, state_code.upper())]`` to resolve
+       ``state_id`` within the already-known country, preventing cross-country
+       collisions (e.g. US "CO" = Colorado vs. UY "CO" = Colonia).
+    4. On a state miss, log a WARNING and return ``state_id=False``.
+
+    :param country_code: SAP country code string (e.g. ``'US'``, ``'CA'``).
+    :param state_code: SAP state code or name string (e.g. ``'CO'``, ``'Quebec'``).
+    :param countries_dict: Mapping ``{country_code: country_id}`` as produced
+        by :func:`get_countries_dict`.
+    :param states_dict: Mapping ``{(country_id, value.upper()): state_id}`` as
+        produced by :func:`get_states_dict`.
+    :returns: ``(country_id, state_id)`` — either value is ``False`` on miss.
     """
     country_id = countries_dict.get(country_code, False)
-    state_id = states_dict.get(state_code, False)
+    if not country_id:
+        if country_code:
+            _logger.warning(
+                "res.partner ETL: no res.country matches SAP code %r; "
+                "country_id and state_id left unset.",
+                country_code,
+            )
+        return False, False
+
+    if not state_code:
+        return country_id, False
+
+    state_id = states_dict.get((country_id, state_code.upper()), False)
+    if not state_id:
+        _logger.warning(
+            "res.partner ETL: no res.country.state matches SAP value %r "
+            "within country_id=%s; state_id left unset.",
+            state_code,
+            country_id,
+        )
     return country_id, state_id
 
 
@@ -154,9 +201,9 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         countries = ctx.env["res.country"].search([])
         countries_dict = {country.code: country.id for country in countries}
 
-        # Get states as {code: id}
-        states = ctx.env["res.country.state"].search([])
-        states_dict = {state.code: state.id for state in states}
+        # Get states as {(country_id, value.upper()): id} — country-scoped to
+        # prevent cross-country code collisions (e.g. US "CO" vs. UY "CO").
+        states_dict = get_states_dict(ctx.env)
 
         # Get users as {sap_code: id}
         users_dict = get_users_dict(ctx.env)
