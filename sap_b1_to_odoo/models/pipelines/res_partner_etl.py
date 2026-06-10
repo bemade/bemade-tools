@@ -444,6 +444,10 @@ class ResPartnerAddressImporter(models.AbstractModel):
         Also pre-computes lookup dictionaries passed to the transform phase
         via ChunkableData.context.
 
+        Reports an INFO summary of extracted vs skipped rows, and emits a
+        WARNING (via ctx.report) for any CRD1 rows whose (cardcode, linenum)
+        key is a duplicate within SAP — these would silently collide on import.
+
         Args:
             ctx: ETL context with SAP cursor and Odoo environment.
 
@@ -455,8 +459,8 @@ class ResPartnerAddressImporter(models.AbstractModel):
         ctx.env.cr.execute(
             """
             SELECT DISTINCT sap_parent_card, sap_address_linenum
-            FROM res_partner 
-            WHERE sap_parent_card IS NOT NULL 
+            FROM res_partner
+            WHERE sap_parent_card IS NOT NULL
             AND sap_address_linenum IS NOT NULL
             """
         )
@@ -467,22 +471,51 @@ class ResPartnerAddressImporter(models.AbstractModel):
         ctx.cr.execute("SELECT * FROM crd1")
         all_addresses = ctx.cr.dictfetchall()
 
+        # Detect duplicate (cardcode, linenum) keys within CRD1 itself and
+        # report them so silent collision drops are visible in the run report.
+        seen_keys: set = set()
+        for addr in all_addresses:
+            key = (addr["cardcode"], addr["linenum"])
+            if key in seen_keys:
+                source_ref = f"{addr['cardcode']}:{addr['linenum']}"
+                msg = (
+                    f"CRD1 duplicate key {source_ref}: multiple rows share the same "
+                    f"(cardcode, linenum); only the first will be imported — "
+                    f"remaining rows are silently dropped."
+                )
+                _logger.warning(msg)
+                ctx.report.warning(message=msg, source_ref=source_ref)
+            else:
+                seen_keys.add(key)
+
         # Filter out existing addresses based on cardcode + linenum
         sap_addresses = [
             addr
             for addr in all_addresses
             if (addr["cardcode"], addr["linenum"]) not in existing_addresses
         ]
+        skipped_count = len(all_addresses) - len(sap_addresses)
 
         _logger.info(
-            f"Extracted {len(sap_addresses)} new addresses from SAP CRD1 (filtered from {len(all_addresses)} total)."
+            f"Extracted {len(sap_addresses)} of {len(all_addresses)} CRD1 addresses "
+            f"(skipped {skipped_count} already-present)."
         )
 
         # Pre-compute lookup dictionaries for use in the transform phase
         _logger.info("Pre-computing lookup dictionaries for transform phase...")
+
+        # Collect known company cardcodes so transform can detect orphan rows
+        # (addresses whose parent company was never imported).
+        ctx.env.cr.execute(
+            "SELECT DISTINCT sap_card_code FROM res_partner "
+            "WHERE sap_card_code IS NOT NULL"
+        )
+        known_cardcodes = set(row[0] for row in ctx.env.cr.fetchall())
+
         cache = {
             "countries_dict": get_countries_dict(ctx.env),
             "states_dict": get_states_dict(ctx.env),
+            "known_cardcodes": known_cardcodes,
         }
         _logger.info("Lookup dictionaries ready.")
 
@@ -493,6 +526,15 @@ class ResPartnerAddressImporter(models.AbstractModel):
         """Transform SAP addresses into Odoo partner values.
 
         Uses pre-computed lookup dictionaries from extract phase.
+
+        Emits a WARNING (via _logger and ctx.report) for any row that cannot
+        become a valid address:
+        - Unresolvable country code (a code was present but matched no
+          res.country) — the row is kept with country_id=False so data is not
+          silently lost, but the warning flags it for review.
+        - Parent cardcode absent from Odoo (no res.partner with that
+          sap_card_code) — the address will orphan in post-process; surfaced
+          so ops can decide whether to re-run the company importer first.
 
         Args:
             ctx: ETL context.
@@ -507,6 +549,7 @@ class ResPartnerAddressImporter(models.AbstractModel):
 
         countries_dict = cache["countries_dict"]
         states_dict = cache["states_dict"]
+        known_cardcodes = cache.get("known_cardcodes", set())
 
         def extract_name_street_street2(address, address2, address3, street, block):
             """Intelligently concatenate address lines."""
@@ -521,6 +564,10 @@ class ResPartnerAddressImporter(models.AbstractModel):
 
         partner_vals = []
         for sap_address in sap_addresses:
+            cardcode = sap_address["cardcode"]
+            linenum = sap_address["linenum"]
+            source_ref = f"{cardcode}:{linenum}"
+
             name, street, street2 = extract_name_street_street2(
                 sap_address["address"],
                 sap_address["address2"],
@@ -538,7 +585,7 @@ class ResPartnerAddressImporter(models.AbstractModel):
                 # Use address type as fallback name
                 name = f"{address_type.title()} Address"
                 _logger.debug(
-                    f"Using fallback name '{name}' for address: cardcode={sap_address['cardcode']}"
+                    f"Using fallback name '{name}' for address: cardcode={cardcode}"
                 )
 
             country_id, state_id = extract_sap_state_country(
@@ -548,6 +595,29 @@ class ResPartnerAddressImporter(models.AbstractModel):
                 states_dict,
             )
 
+            # Warn if a country code was provided but could not be resolved —
+            # the row will still be written (with country_id=False) so data is
+            # not silently discarded, but the gap is surfaced for review.
+            if sap_address["country"] and not country_id:
+                msg = (
+                    f"Address {source_ref}: country code {sap_address['country']!r} "
+                    f"could not be resolved to a res.country; "
+                    f"country_id and state_id will be unset on the created record."
+                )
+                _logger.warning(msg)
+                ctx.report.warning(message=msg, source_ref=source_ref)
+
+            # Warn if the parent company is not yet in Odoo — the address will
+            # be created but post-process cannot link it to a parent partner.
+            if known_cardcodes and cardcode not in known_cardcodes:
+                msg = (
+                    f"Address {source_ref}: parent cardcode {cardcode!r} has no "
+                    f"matching res.partner with sap_card_code; the address record "
+                    f"will be created as an orphan (post-process cannot link it)."
+                )
+                _logger.warning(msg)
+                ctx.report.warning(message=msg, source_ref=source_ref)
+
             partner_vals.append(
                 {
                     "name": name,
@@ -556,8 +626,8 @@ class ResPartnerAddressImporter(models.AbstractModel):
                     "city": sap_address["city"],
                     "country_id": country_id or False,
                     "state_id": state_id or False,
-                    "sap_parent_card": sap_address["cardcode"],
-                    "sap_address_linenum": sap_address["linenum"],
+                    "sap_parent_card": cardcode,
+                    "sap_address_linenum": linenum,
                     "type": address_type,
                     "is_company": False,
                     "user_id": False,
@@ -580,6 +650,7 @@ class ResPartnerAddressImporter(models.AbstractModel):
 
         if partner_vals:
             partners = ctx.env["res.partner"].create(partner_vals)
+            ctx.report.success(len(partners))
             _logger.info(f"Created {len(partners)} address partners.")
         else:
             _logger.info("No new addresses to create.")
