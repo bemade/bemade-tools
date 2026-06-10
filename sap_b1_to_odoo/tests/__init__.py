@@ -7,6 +7,7 @@ from .pipelines import (
     test_jdt1_sale_link,
     test_product_pricelist_etl,
     test_product_product_etl,
+    test_product_search,
     test_property_field_write_failure_3623_3624,
     test_product_product_etl_description_ecommerce,
     test_res_partner_payment_term,

@@ -57,13 +57,37 @@ class StockQuantImporter(models.AbstractModel):
         ctx.cr.execute(sql)
         sap_quants = ctx.cr.dictfetchall()
 
-        # Filter for products and warehouses that exist in Odoo
-        filtered_quants = [
-            quant
-            for quant in sap_quants
-            if quant["itemcode"] in product_map
-            and quant["whscode"] in warehouse_location_map
-        ]
+        # Filter for products and warehouses that exist in Odoo;
+        # collect skipped rows (onhand > 0) so they are not silently lost.
+        filtered_quants = []
+        skipped_no_product = []
+        skipped_no_warehouse = []
+        for quant in sap_quants:
+            if quant["itemcode"] not in product_map:
+                skipped_no_product.append(quant)
+            elif quant["whscode"] not in warehouse_location_map:
+                skipped_no_warehouse.append(quant)
+            else:
+                filtered_quants.append(quant)
+
+        if skipped_no_product:
+            sample = [q["itemcode"] for q in skipped_no_product[:5]]
+            _logger.warning(
+                "stock_quant extract: skipped %d onhand>0 row(s) — item code not in "
+                "product map (no matching sap_item_code in Odoo). Sample: %s",
+                len(skipped_no_product),
+                sample,
+            )
+        if skipped_no_warehouse:
+            sample = [
+                (q["itemcode"], q["whscode"]) for q in skipped_no_warehouse[:5]
+            ]
+            _logger.warning(
+                "stock_quant extract: skipped %d onhand>0 row(s) — warehouse code not in "
+                "warehouse_location_map (no matching sap_whs_code in Odoo). Sample: %s",
+                len(skipped_no_warehouse),
+                sample,
+            )
 
         _logger.info(f"Extracted {len(filtered_quants)} stock quants from SAP OITW.")
         return {
@@ -91,11 +115,15 @@ class StockQuantImporter(models.AbstractModel):
         company_id = data.get("company_id")
 
         quant_vals = []
+        transform_skipped = []
         for sap_quant in sap_quants:
             product_id = product_map.get(sap_quant["itemcode"])
             location_id = warehouse_location_map.get(sap_quant["whscode"])
 
             if not product_id or not location_id:
+                transform_skipped.append(
+                    (sap_quant["itemcode"], sap_quant["whscode"])
+                )
                 continue
 
             vals = {
@@ -107,6 +135,13 @@ class StockQuantImporter(models.AbstractModel):
             }
             quant_vals.append(vals)
 
+        if transform_skipped:
+            _logger.warning(
+                "stock_quant transform: skipped %d row(s) — product or location "
+                "missing from maps (should have been caught at extract). Sample: %s",
+                len(transform_skipped),
+                transform_skipped[:5],
+            )
         _logger.info(f"Transformed {len(quant_vals)} stock quant records.")
         return quant_vals
 

@@ -87,13 +87,13 @@ class ProductImporter(models.AbstractModel):
         company_id = cache["company_id"]
 
         product_vals = []
+        category_miss_codes = []
         for sap_product in sap_products:
             # Determine category
-            categ_id = (
-                categories_map.get(sap_product["itmsgrpcod"])
-                if sap_product["itmsgrpcod"]
-                else False
-            )
+            itmsgrpcod = sap_product["itmsgrpcod"]
+            categ_id = categories_map.get(itmsgrpcod) if itmsgrpcod else False
+            if itmsgrpcod and not categ_id:
+                category_miss_codes.append((sap_product["itemcode"], itmsgrpcod))
 
             # Name: prefer frgnname, else itemname, else "N/A"
             itemname = fix_quotes(sap_product["itemname"])
@@ -135,6 +135,14 @@ class ProductImporter(models.AbstractModel):
 
             product_vals.append(vals)
 
+        if category_miss_codes:
+            _logger.warning(
+                "product_product transform: %d product(s) had itmsgrpcod not found in "
+                "categories_map — categ_id left False (product still created). "
+                "Sample (itemcode, itmsgrpcod): %s",
+                len(category_miss_codes),
+                category_miss_codes[:5],
+            )
         return product_vals
 
     @ETL.load()

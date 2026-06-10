@@ -7,6 +7,8 @@ class ProductTemplate(models.Model):
     sap_item_code = fields.Char(index="btree", copy=False)
     sap_atcentry = fields.Integer(copy=False)
 
+    _rec_names_search = ["name", "default_code", "barcode", "sap_item_code"]
+
     _sap_item_code_unique = models.Constraint(
         "unique (sap_item_code)",
         "A product with that SAP item code already exists.",
