@@ -21,13 +21,15 @@ Acceptance criteria:
    works (regression guard).
 4. (test_name_search_by_barcode_still_works) name_search by barcode still works
    (regression guard).
-5. (test_stock_quant_extract_warns_on_product_miss) stock_quant extract emits a WARNING
+5. (test_template_name_search_by_sap_item_code) product.template name_search on a SAP
+   item code returns the matching template (template-level Many2one findability).
+6. (test_stock_quant_extract_warns_on_product_miss) stock_quant extract emits a WARNING
    when a SAP row's itemcode is absent from the product map.
-6. (test_stock_quant_extract_warns_on_warehouse_miss) stock_quant extract emits a WARNING
+7. (test_stock_quant_extract_warns_on_warehouse_miss) stock_quant extract emits a WARNING
    when a SAP row's whscode is absent from the warehouse location map.
-7. (test_stock_quant_extract_no_warning_when_all_matched) No WARNING is emitted when all
+8. (test_stock_quant_extract_no_warning_when_all_matched) No WARNING is emitted when all
    rows map successfully.
-8. (test_product_etl_warns_on_category_miss) product_product transform emits a WARNING
+9. (test_product_etl_warns_on_category_miss) product_product transform emits a WARNING
    when itmsgrpcod is not in categories_map, and the product is still created with
    categ_id=False.
 """
@@ -140,6 +142,22 @@ class TestSapProductSearch(TransactionCase):
             self.product.id,
             result_ids,
             "name_search by barcode must still work after adding sap_item_code.",
+        )
+
+    def test_template_name_search_by_sap_item_code(self):
+        """product.template.name_search returns the template when searching by sap_item_code.
+
+        Many2one fields that point to product.template (e.g. product_tmpl_id on sale
+        order lines) call name_search on product.template, not product.product.
+        This test guards that those fields can also find products by SAP item code.
+        """
+        results = self.env["product.template"].name_search("ZZTEST1")
+        result_ids = [r[0] for r in results]
+        self.assertIn(
+            self.product.product_tmpl_id.id,
+            result_ids,
+            "product.template.name_search must return the template when searching "
+            "by its sap_item_code.",
         )
 
 
