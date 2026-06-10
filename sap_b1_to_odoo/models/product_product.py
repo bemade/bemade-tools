@@ -1,4 +1,5 @@
-from odoo import fields, models
+from odoo import api, fields, models
+from odoo.fields import Domain
 
 
 class ProductTemplate(models.Model):
@@ -17,7 +18,25 @@ class ProductTemplate(models.Model):
 
 class ProductProduct(models.Model):
     _inherit = "product.product"
-    _rec_names_search = ["name", "default_code", "barcode", "sap_item_code"]
+
+    @api.model
+    def name_search(self, name='', domain=None, operator='ilike', limit=100):
+        # Odoo 19 defines a fully custom name_search on product.product that
+        # hardcodes searches on default_code / barcode / name and never reads
+        # _rec_names_search.  We extend it here to also cover sap_item_code.
+        results = super().name_search(name, domain, operator, limit)
+        positive_operators = ['=', 'ilike', '=ilike', 'like', '=like']
+        if name and operator in positive_operators:
+            existing_ids = {r[0] for r in results}
+            sap_domain = Domain(domain or Domain.TRUE) & Domain('sap_item_code', operator, name)
+            sap_products = self.search_fetch(sap_domain, ['display_name'], limit=limit)
+            for product in sap_products.sudo():
+                if product.id not in existing_ids:
+                    results.append((product.id, product.display_name))
+                    existing_ids.add(product.id)
+            if limit:
+                results = results[:limit]
+        return results
 
 
 class ProductCategory(models.Model):
