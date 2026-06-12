@@ -37,8 +37,11 @@ Acceptance criteria:
 import logging
 from unittest.mock import MagicMock, patch
 
+from lxml import etree
+
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
+from odoo.tools.safe_eval import safe_eval
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +161,107 @@ class TestSapProductSearch(TransactionCase):
             result_ids,
             "product.template.name_search must return the template when searching "
             "by its sap_item_code.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Default-facet search (type-and-Enter in the list-view search box)
+# ---------------------------------------------------------------------------
+
+@tagged("-at_install", "post_install", "sap_default_facet_search")
+class TestSapDefaultFacetSearch(TransactionCase):
+    """Guards that the search-view default facet (plain type-and-Enter) includes
+    sap_item_code, so typing a SAP item code in Sales/Inventory → Products and
+    pressing Enter returns the product without picking an explicit facet.
+
+    Unlike TestSapProductSearch (which covers name_search, powering many2one
+    dropdowns), this exercises the list-view search box, which runs the search
+    view's default `name` field filter_domain — not name_search.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # name/default_code/barcode deliberately do NOT contain the SAP code, so a
+        # match on the SAP code can only come from the sap_item_code term.
+        cls.product = cls.env["product.product"].create({
+            "name": "Widget Alpha",
+            "default_code": "WA-001",
+            "barcode": "9990001112223",
+            "sap_item_code": "GP42155X00P",
+        })
+
+    def _default_filter_domain(self, model, view_xmlid):
+        """Pull the rendered default-facet filter_domain string from a search view."""
+        view = self.env.ref(view_xmlid)
+        arch = self.env[model].get_view(view.id, "search")["arch"]
+        node = etree.fromstring(arch.encode()).xpath("//search/field[@name='name']")[0]
+        return node.get("filter_domain")
+
+    def test_template_search_view_default_facet_finds_sap_code(self):
+        """Sales (product.template) default facet matches by sap_item_code."""
+        filter_domain = self._default_filter_domain(
+            "product.template", "product.product_template_search_view"
+        )
+        self.assertIn(
+            "sap_item_code",
+            filter_domain,
+            "product.template default search facet must include sap_item_code "
+            "(filter_domain override not applied).",
+        )
+        domain = safe_eval(filter_domain, {"self": "GP42155X00P"})
+        results = self.env["product.template"].search(domain)
+        self.assertIn(
+            self.product.product_tmpl_id,
+            results,
+            "Default-facet search by SAP item code must return the template.",
+        )
+
+    def test_stock_search_view_default_facet_finds_sap_code(self):
+        """Inventory (product.product) default facet matches by sap_item_code."""
+        filter_domain = self._default_filter_domain(
+            "product.product", "stock.stock_product_search_form_view"
+        )
+        self.assertIn(
+            "sap_item_code",
+            filter_domain,
+            "product.product (stock) default search facet must include sap_item_code "
+            "(filter_domain override not applied).",
+        )
+        domain = safe_eval(filter_domain, {"self": "GP42155X00P"})
+        results = self.env["product.product"].search(domain)
+        self.assertIn(
+            self.product,
+            results,
+            "Default-facet search by SAP item code must return the product.",
+        )
+
+    def test_default_facet_still_matches_name_code_barcode(self):
+        """The Sales default facet still matches by default_code, name, barcode
+        (regression guard — existing terms preserved, not clobbered)."""
+        filter_domain = self._default_filter_domain(
+            "product.template", "product.product_template_search_view"
+        )
+        for probe in ("WA-001", "Widget Alpha", "9990001112223"):
+            domain = safe_eval(filter_domain, {"self": probe})
+            results = self.env["product.template"].search(domain)
+            self.assertIn(
+                self.product.product_tmpl_id,
+                results,
+                "Default-facet search by %r must still return the template." % probe,
+            )
+
+    def test_default_facet_does_not_match_unrelated(self):
+        """An unrelated probe returns nothing (the domain is not a tautology)."""
+        filter_domain = self._default_filter_domain(
+            "product.template", "product.product_template_search_view"
+        )
+        domain = safe_eval(filter_domain, {"self": "ZZZ-NOPE-XYZ"})
+        results = self.env["product.template"].search(domain)
+        self.assertNotIn(
+            self.product.product_tmpl_id,
+            results,
+            "Unrelated probe must not match the product.",
         )
 
 
