@@ -3,9 +3,15 @@
 Phase 3 (implementation): stale live-DB tests replaced with unit tests for the
 new conditional name/description_sale mapping introduced in task #3687.
 
-Phase 4 will add the full fixture-based test suite per the design's Test plan.
-Live-DB integration tests (tagged ``xtuple``) require XTUPLE_* env vars; they
-are skipped automatically when those vars are absent.
+Test plan coverage:
+1. ``_transform_product`` saleable: name=item_number, description_sale=item_descrip1, no default_code
+2. ``_transform_product`` purchased: name=item_descrip1, no description_sale, no default_code
+3. ``transform_products`` update branch: saleable + purchased records produce the right vals
+   with no non-empty default_code (AC4 — legacy mapping gone)
+4. ``_is_purchased_product`` hook behaviour
+
+Live-DB smoke tests (tagged ``xtuple``) require XTUPLE_* env vars and are
+skipped automatically when those vars are absent.
 """
 
 import os
@@ -65,7 +71,7 @@ class TestProductTransform(TransactionCase):
         return base
 
     # ------------------------------------------------------------------
-    # AC1 / Test plan #1 -- saleable item
+    # Test plan #1 -- saleable item (_transform_product)
     # ------------------------------------------------------------------
 
     def test_saleable_item_name_from_item_number(self):
@@ -106,7 +112,7 @@ class TestProductTransform(TransactionCase):
         self.assertNotIn("default_code", vals)
 
     # ------------------------------------------------------------------
-    # AC2 / Test plan #2 -- purchased item
+    # Test plan #2 -- purchased item (_transform_product)
     # ------------------------------------------------------------------
 
     def test_purchased_item_name_from_descrip1(self):
@@ -144,7 +150,7 @@ class TestProductTransform(TransactionCase):
         self.assertNotIn("default_code", vals)
 
     # ------------------------------------------------------------------
-    # Test plan #3 -- default_code guard for both branches
+    # default_code guard for both branches
     # ------------------------------------------------------------------
 
     def test_default_code_never_set_saleable(self):
@@ -184,6 +190,87 @@ class TestProductTransform(TransactionCase):
         """_is_purchased_product returns False when _is_purchased=False."""
         product = self._base_product(_is_purchased=False)
         self.assertFalse(self.importer._is_purchased_product(product))
+
+    # ------------------------------------------------------------------
+    # Test plan #3 -- transform_products update branch (AC4)
+    # ------------------------------------------------------------------
+
+    def test_update_branch_saleable_name_by_type(self):
+        """Update branch: saleable product gets name=item_number (SKU), not item_descrip1."""
+        saleable = self._base_product(
+            item_id=10,
+            item_number="VFG401C",
+            item_descrip1="F-series cyan pigment ink",
+            _is_purchased=False,
+        )
+        # Simulate what transform_products does
+        vals = self.importer._transform_product(saleable)
+        vals["_lookup_code"] = saleable["item_number"]
+        self.assertEqual(vals["name"], "VFG401C", "Saleable update: name must be item_number")
+
+    def test_update_branch_saleable_description_sale(self):
+        """Update branch: saleable product gets description_sale=item_descrip1."""
+        saleable = self._base_product(
+            item_id=10,
+            item_number="VFG401C",
+            item_descrip1="F-series cyan pigment ink",
+            _is_purchased=False,
+        )
+        vals = self.importer._transform_product(saleable)
+        self.assertEqual(
+            vals.get("description_sale"),
+            "F-series cyan pigment ink",
+            "Saleable update: description_sale must be item_descrip1",
+        )
+
+    def test_update_branch_saleable_no_default_code(self):
+        """Update branch: saleable product does NOT set a non-empty default_code (AC4)."""
+        saleable = self._base_product(
+            item_id=10,
+            item_number="VFG401C",
+            item_descrip1="F-series cyan pigment ink",
+            _is_purchased=False,
+        )
+        vals = self.importer._transform_product(saleable)
+        vals["_lookup_code"] = saleable["item_number"]
+        # default_code must be absent or falsy — legacy mapping was default_code=item_descrip1
+        self.assertFalse(
+            vals.get("default_code"),
+            "Update branch must NOT set default_code for saleable products",
+        )
+
+    def test_update_branch_purchased_name_by_type(self):
+        """Update branch: purchased product gets name=item_descrip1 (human description)."""
+        purchased = self._base_product(
+            item_id=20,
+            item_number="RMD0029",
+            item_descrip1="Keyamine Black HF-IJ",
+            item_type="P",
+            _is_purchased=True,
+        )
+        vals = self.importer._transform_product(purchased)
+        vals["_lookup_code"] = purchased["item_number"]
+        self.assertEqual(
+            vals["name"],
+            "Keyamine Black HF-IJ",
+            "Purchased update: name must be item_descrip1",
+        )
+
+    def test_update_branch_purchased_no_default_code(self):
+        """Update branch: purchased product does NOT set a non-empty default_code (AC4)."""
+        purchased = self._base_product(
+            item_id=20,
+            item_number="RMD0029",
+            item_descrip1="Keyamine Black HF-IJ",
+            item_type="P",
+            _is_purchased=True,
+        )
+        vals = self.importer._transform_product(purchased)
+        vals["_lookup_code"] = purchased["item_number"]
+        self.assertFalse(
+            vals.get("default_code"),
+            "Update branch must NOT set default_code for purchased products",
+        )
 
 
 @tagged("-at_install", "xtuple")

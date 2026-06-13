@@ -19,18 +19,19 @@
 #
 {
     "name": "xTuple to Odoo",
-    "version": "19.0.0.0.1",
+    "version": "19.0.0.0.2",
     "summary": "Migrate xTuple data to Odoo",
     "description": """
-Migrate xTuple data to Odoo including:
+    Migrate xTuple data to Odoo including:
 
-* Users
-* Vendors
-* Customers
-* Products
-* Bills of Materials
-* Manufacturing Orders
-""",
+    * Users
+    * Vendors
+    * Customers
+    * Products
+    * Bills of Materials
+    * Manufacturing Orders
+
+    """,
     "category": "Data Migration",
     "author": "Bemade Inc.",
     "website": "http://www.bemade.org",
