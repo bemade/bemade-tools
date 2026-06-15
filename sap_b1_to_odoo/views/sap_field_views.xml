@@ -74,6 +74,9 @@
             <field name="product_tag_ids" position="before">
                 <field name="sap_item_code"/>
             </field>
+            <field name="name" position="attributes">
+                <attribute name="filter_domain">['|', '|', '|', '|', ('default_code', 'ilike', self), ('product_variant_ids.default_code', 'ilike', self), ('name', 'ilike', self), ('barcode', 'ilike', self), ('sap_item_code', 'ilike', self)]</attribute>
+            </field>
         </field>
     </record>
 
@@ -84,6 +87,9 @@
         <field name="arch" type="xml">
             <field name="name" position="after">
                 <field name="sap_item_code"/>
+            </field>
+            <field name="name" position="attributes">
+                <attribute name="filter_domain">['|', '|', '|', ('default_code', 'ilike', self), ('name', 'ilike', self), ('barcode', 'ilike', self), ('sap_item_code', 'ilike', self)]</attribute>
             </field>
         </field>
     </record>
