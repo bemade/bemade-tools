@@ -8,6 +8,7 @@ import logging
 from typing import Dict, List
 
 from odoo import api, models
+from odoo.fields import Command
 
 from odoo.addons.etl_framework.framework import ETL, ETLContext
 
@@ -373,3 +374,195 @@ class XtupleMrpConsumptionImporter(models.AbstractModel):
             ctx.env["stock.move"].with_context(tracking_disable=True).create(move_vals)
         )
         _logger.info(f"Created {len(moves)} component stock moves")
+
+
+# =============================================================================
+# Component PICK generator (task 3810)
+# =============================================================================
+#
+# xTuple-imported MOs are created without their component PICK because the MO
+# importer writes ``state`` directly and never calls ``action_confirm()`` /
+# ``button_plan()`` (which would regenerate/double the separately-imported raw
+# moves). For a multi-step manufacture warehouse (``manufacture_steps`` in
+# ``('pbm', 'pbm_sam')``) the component PICK is a *separate* set of stock moves
+# running ``lot_stock -> pbm_loc`` (picking type ``pbm_type_id``) whose
+# ``move_dest_ids`` chain forward into the MO's raw moves (``pbm_loc ->
+# production``). This pipeline generates that missing PICK for open/in-progress
+# imported MOs, wrapping the already-imported raw moves without confirming the
+# MO.
+#
+# It is its own pipeline (``depends_on=['xtuple.mrp.consumption.importer']``)
+# so the executor runs it AFTER the consumption moves are loaded and committed,
+# and it is idempotent + re-runnable: the real route config happens AFTER the
+# migration, so the first ``action_import_all`` run is a correct no-op (every
+# warehouse is still 1-step) and the PICKs are created by RE-RUNNING the step
+# after the warehouse is flipped to ``pbm``.
+
+
+@ETL.pipeline(
+    target_model="stock.picking",
+    importer_name="xtuple.mrp.pick.generator",
+    depends_on=[
+        "xtuple.mrp.consumption.importer",
+    ],
+)
+class XtupleMrpPickGenerator(models.AbstractModel):
+    """Generate the component PICK for open/in-progress imported MOs.
+
+    Wraps the already-imported raw (consumption) moves in an upstream
+    ``pbm`` PICK without confirming the MO, so imported MOs become actionable
+    after route config without manual re-confirmation. Idempotent and
+    re-runnable.
+    """
+
+    _name = "xtuple.mrp.pick.generator"
+    _description = "xTuple MO Component PICK Generator"
+
+    # In-scope MO states (open / in-progress). Excludes draft, done, cancel.
+    _IN_SCOPE_STATES = ("confirmed", "progress", "to_close")
+
+    @ETL.load()
+    def generate_component_pickings(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Generate the component PICK for every in-scope imported MO.
+
+        Queries ``mrp.production`` from the DB (does not trust any transform
+        payload) so it is independently invocable and re-runnable.
+        """
+        prods = ctx.env["mrp.production"].search(
+            [
+                ("xtuple_wo_id", "!=", False),
+                ("state", "in", list(self._IN_SCOPE_STATES)),
+            ]
+        )
+        _logger.info(
+            "Pick generator: %d in-scope imported MO(s) to evaluate", len(prods)
+        )
+
+        pick_count = 0
+        for production in prods:
+            if self._generate_pick_for_production(ctx, production):
+                pick_count += 1
+
+        _logger.info("Pick generator: generated PICKs for %d MO(s)", pick_count)
+
+    def _generate_pick_for_production(self, ctx: ETLContext, production) -> bool:
+        """Generate (if needed) the component PICK for a single MO.
+
+        Returns True if a PICK was generated, False if the MO was skipped
+        (no pick step, already has a PICK, or no wrappable raw moves).
+        """
+        # 1. Resolve the LIVE warehouse + pbm params at run time. Never trust
+        #    the (frozen) raw-move location_id.
+        wh = production.warehouse_id
+
+        # 2. Skip if no pick step (1-step warehouse, or pbm params unset).
+        #    This is also the correct pre-route-config no-op.
+        if (
+            not wh
+            or wh.manufacture_steps == "mrp_one_step"
+            or not wh.pbm_type_id
+            or not wh.pbm_loc_id
+        ):
+            return False
+
+        pbm_type = wh.pbm_type_id
+        pbm_loc = wh.pbm_loc_id
+        lot_stock = wh.lot_stock_id
+        pick_loc_src = pbm_type.default_location_src_id or lot_stock
+
+        # 3. Idempotency — skip if a pbm-type PICK already exists for this MO.
+        #    Search directly on the moves (not the cached picking_ids compute)
+        #    so a re-run within the same transaction is correctly detected.
+        existing_pick_move = ctx.env["stock.move"].search(
+            [
+                ("production_group_id", "=", production.production_group_id.id),
+                ("picking_type_id", "=", pbm_type.id),
+                ("picking_id", "!=", False),
+            ],
+            limit=1,
+        )
+        if existing_pick_move:
+            return False
+
+        # 4. Select the imported raw moves and classify their source location
+        #    against the live warehouse.
+        raw = production.move_raw_ids.filtered(lambda m: m.xtuple_womatl_id)
+        if not raw:
+            return False  # E1 — nothing to wrap
+
+        to_realign = raw.filtered(lambda m: m.location_id == lot_stock)
+        already_ok = raw.filtered(lambda m: m.location_id == pbm_loc)
+        anomalous = raw - to_realign - already_ok
+
+        if anomalous:
+            locs = anomalous.mapped("location_id").mapped("complete_name")
+            _logger.warning(
+                "MO %s: %d raw move(s) with unexpected location_id %s — "
+                "skipped, needs human review",
+                production.name,
+                len(anomalous),
+                locs,
+            )
+            ctx.report.warning(
+                message=(
+                    "Unexpected raw-move source location(s) %s — skipped, "
+                    "not realigned, excluded from the component PICK."
+                    % (locs,)
+                ),
+                source_ref=production.name,
+            )
+
+        wrap = to_realign | already_ok
+        if not wrap:
+            return False  # every raw move was anomalous — nothing safe to wrap
+
+        # Realign the frozen lot_stock raw moves so the pbm -> production leg
+        # is geographically correct. Touches ONLY location_id, ONLY for moves
+        # currently at lot_stock_id.
+        if to_realign:
+            to_realign.write({"location_id": pbm_loc.id})
+
+        # Back-propagate the MO's group + refs onto the raw moves so the PICK
+        # surfaces on mo.picking_ids and groups via _assign_picking.
+        wrap.write(
+            {
+                "production_group_id": production.production_group_id.id,
+                "reference_ids": [Command.set(production.reference_ids.ids)],
+            }
+        )
+
+        # 5. Build one upstream pick move per wrapped raw move (state draft),
+        #    chained to the raw move via move_dest_ids.
+        pick_move_vals = []
+        for rm in wrap:
+            pick_move_vals.append(
+                {
+                    "product_id": rm.product_id.id,
+                    "product_uom": rm.product_uom.id,
+                    "product_uom_qty": rm.product_uom_qty,
+                    "location_id": pick_loc_src.id,
+                    "location_dest_id": pbm_loc.id,
+                    "picking_type_id": pbm_type.id,
+                    "company_id": production.company_id.id,
+                    "warehouse_id": wh.id,
+                    "production_group_id": production.production_group_id.id,
+                    "reference_ids": [
+                        Command.set(production.reference_ids.ids)
+                    ],
+                    "origin": production.name,
+                    "move_dest_ids": [Command.link(rm.id)],
+                    "state": "draft",
+                }
+            )
+        pick_moves = (
+            ctx.env["stock.move"]
+            .with_context(tracking_disable=True)
+            .create(pick_move_vals)
+        )
+
+        # 6. Attach to a PICK via Odoo's own grouping (works on draft moves;
+        #    all share the key tuple so they group into one PICK per MO).
+        #    We do NOT confirm — pick moves ship draft.
+        pick_moves._assign_picking()
+
+        return True
