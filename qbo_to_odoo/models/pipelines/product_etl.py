@@ -228,9 +228,100 @@ class QboItemImporter(models.AbstractModel):
             _logger.info("No new items to create")
             return
 
-        products = ctx.env["product.product"].create(product_vals)
-        _logger.info(f"Created {len(products)} products")
+        # name / description_sale / description_purchase are translate=True.
+        # Without an explicit lang context the ORM writes the value under the
+        # session's active language, which resolves to Odoo's hardcoded default
+        # 'en_US'. On a DB whose active langs don't include en_US (e.g. Verajet:
+        # en_CA + fr_FR), name->>'<active locale>' then reads NULL — products
+        # show a blank Name and locale-keyed dedup/name-matching breaks. Pin the
+        # company's configured language so translatable fields land under the
+        # locale the rest of the system reads.
+        lang = ctx.env.company.partner_id.lang or ctx.env.lang or "en_US"
+        products = (
+            ctx.env["product.product"]
+            .with_context(lang=lang)
+            .create(product_vals)
+        )
+        _logger.info(f"Created {len(products)} products under lang={lang}")
 
+
+@ETL.pipeline(
+    target_model="product.product",
+    importer_name="qbo.product.name.locale.fixer",
+    sap_source="Item",
+    depends_on=["qbo.item.importer"],
+)
+class QboProductNameLocaleFixer(models.AbstractModel):
+    """Backfill QBO product names mis-keyed under en_US into the active locale.
+
+    Historic imports wrote name / description_sale under Odoo's default 'en_US'
+    JSONB key (no lang context), so on a DB whose active langs don't include
+    en_US the locale-keyed read (e.g. name->>'en_CA') returns NULL — blank
+    Names and broken dedup. This one-shot, idempotent fixer copies the en_US
+    value into the company-locale key for QBO-imported products that are blank
+    under that locale. Re-running is safe: rows already populated under the
+    locale are skipped.
+    """
+
+    _name = "qbo.product.name.locale.fixer"
+    _description = "QBO Product Name Locale Fixer"
+
+    @staticmethod
+    def _backfill_locale_key(cr, column: str, lang: str) -> int:
+        """Copy translate=True `column`'s en_US value into `lang` where blank.
+
+        Only touches QBO-imported products (qbo_item_id IS NOT NULL) whose
+        `column->>lang` is NULL/empty while `column->>'en_US'` is populated.
+        Returns the number of templates updated. Idempotent.
+        """
+        cr.execute(
+            f"""
+            UPDATE product_template pt
+            SET {column} = jsonb_set(
+                COALESCE(pt.{column}, '{{}}'::jsonb),
+                %s,
+                pt.{column} -> 'en_US'
+            )
+            FROM product_product pp
+            WHERE pp.product_tmpl_id = pt.id
+              AND pp.qbo_item_id IS NOT NULL AND pp.qbo_item_id != 0
+              AND pt.{column} ? 'en_US'
+              AND COALESCE(pt.{column} ->> 'en_US', '') != ''
+              AND COALESCE(pt.{column} ->> %s, '') = ''
+            """,
+            ["{" + lang + "}", lang],
+        )
+        return cr.rowcount
+
+    @ETL.extract("NameLocaleFix")
+    def extract_locale(self, ctx: ETLContext) -> Dict:
+        """Resolve the company's active locale (the key the system reads)."""
+        lang = ctx.env.company.partner_id.lang or ctx.env.lang or "en_US"
+        return {"lang": lang}
+
+    @ETL.transform()
+    def transform_locale(self, ctx: ETLContext, extracted: Dict) -> Dict:
+        """Pass the resolved locale through to the load step."""
+        return extracted.get("extract_locale", {"lang": "en_US"})
+
+    @ETL.load()
+    def load_locale_backfill(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Backfill name + description_sale into the active locale key."""
+        lang = transformed.get("transform_locale", {}).get("lang", "en_US")
+        if lang == "en_US":
+            _logger.info(
+                "Active locale is en_US; no QBO product name backfill needed"
+            )
+            return
+
+        n_name = self._backfill_locale_key(ctx.env.cr, "name", lang)
+        n_desc = self._backfill_locale_key(ctx.env.cr, "description_sale", lang)
+        _logger.info(
+            "Backfilled %s product names and %s sale descriptions into '%s'",
+            n_name,
+            n_desc,
+            lang,
+        )
 
 
 @ETL.pipeline(
