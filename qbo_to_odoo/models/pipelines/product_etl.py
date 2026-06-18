@@ -180,9 +180,21 @@ class QboItemImporter(models.AbstractModel):
             if not categ_id and income_account_id:
                 categ_id = income_to_categ.get(income_account_id)
 
+            sale_ok = item_type in ("Service", "NonInventory", "Inventory")
+            description = item.get("Description", "")
+            # Saleable products use the human-readable sales description as their
+            # name (clients identify them by description, not the internal SKU),
+            # while still populating description_sale.  Non-saleable products keep
+            # the QBO Item Name.  Fall back to Name when Description is blank so
+            # the required `name` field is never empty.
+            if sale_ok:
+                name = description or item.get("Name", "")
+            else:
+                name = item.get("Name", "")
+
             vals = {
-                "name": item.get("Name", ""),
-                "description_sale": item.get("Description", ""),
+                "name": name,
+                "description_sale": description,
                 "description_purchase": item.get("PurchaseDesc", ""),
                 "default_code": item.get("Sku") or None,
                 "type": product_type,
@@ -190,7 +202,7 @@ class QboItemImporter(models.AbstractModel):
                 "list_price": float(item.get("UnitPrice", 0) or 0),
                 "standard_price": float(item.get("PurchaseCost", 0) or 0),
                 "active": item.get("Active", True),
-                "sale_ok": item_type in ("Service", "NonInventory", "Inventory"),
+                "sale_ok": sale_ok,
                 "purchase_ok": bool(item.get("PurchaseCost")),
                 "qbo_item_id": int(item.get("Id")),
             }
