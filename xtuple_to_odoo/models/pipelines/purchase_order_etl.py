@@ -245,3 +245,61 @@ class XtuplePurchaseOrderLineImporter(models.AbstractModel):
                 .create(line_vals)
             )
             _logger.info(f"Created {len(lines)} purchase order lines")
+        # Imported POs are written with state='purchase' directly (no
+        # button_confirm), so no incoming pickings exist and the native
+        # purchase_stock._compute_receipt_status (derived from picking_ids.state)
+        # leaves receipt_status blank on every confirmed PO. Bake the line-based
+        # fill into this automatic load step so receipt_status is reproducible on
+        # every migration with no manual recompute (task #3814).
+        self._recompute_receipt_status(ctx)
+
+    def _recompute_receipt_status(self, ctx: ETLContext) -> None:
+        """Set receipt_status from line ordered-vs-received qty for imported POs.
+
+        Mirrors purchase_stock._compute_receipt_status' full/partial/pending
+        semantics from line quantities instead of pickings, because the import
+        writes ``state='purchase'`` without ``button_confirm`` so no pickings are
+        ever generated. Scoped to confirmed (``state='purchase'``) xTuple POs:
+        draft POs correctly keep a blank receipt_status (nothing to receive yet),
+        matching the native behaviour for POs with no pickings.
+
+        Run as raw SQL (the field is a stored compute whose only trigger is
+        picking_ids, which never fire here) and keyed on ``xtuple_pohead_id`` so
+        it only touches imported orders.
+        """
+        ctx.env.flush_all()
+        ctx.env.cr.execute(
+            """
+            UPDATE purchase_order po
+            SET receipt_status = CASE
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM purchase_order_line pol
+                    WHERE pol.order_id = po.id
+                )
+                THEN NULL
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM purchase_order_line pol
+                    WHERE pol.order_id = po.id
+                      AND pol.qty_received < pol.product_qty
+                )
+                THEN 'full'
+                WHEN EXISTS (
+                    SELECT 1 FROM purchase_order_line pol
+                    WHERE pol.order_id = po.id
+                      AND pol.qty_received > 0
+                )
+                THEN 'partial'
+                ELSE 'pending'
+            END
+            WHERE po.xtuple_pohead_id IS NOT NULL
+              AND po.state = 'purchase'
+            """
+        )
+        row_count = ctx.env.cr.rowcount
+        # receipt_status was written via raw SQL, bypassing the ORM cache; drop
+        # any cached value so subsequent reads in the same transaction are correct.
+        ctx.env["purchase.order"].invalidate_model(["receipt_status"])
+        _logger.info(
+            "Recomputed receipt_status on %s confirmed xTuple POs from line qty",
+            row_count,
+        )
