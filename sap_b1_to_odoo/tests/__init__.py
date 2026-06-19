@@ -13,4 +13,5 @@ from .pipelines import (
     test_res_partner_address_etl,
     test_res_partner_payment_term,
     test_res_partner_pricelist,
+    test_stock_location_etl,
 )
