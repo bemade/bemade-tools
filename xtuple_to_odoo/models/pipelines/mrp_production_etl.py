@@ -373,3 +373,158 @@ class XtupleMrpConsumptionImporter(models.AbstractModel):
             ctx.env["stock.move"].with_context(tracking_disable=True).create(move_vals)
         )
         _logger.info(f"Created {len(moves)} component stock moves")
+
+
+# =============================================================================
+# Component PICK generation (task 3810)
+# =============================================================================
+#
+# The MO importer (above) writes ``state`` directly and only ``.create()``s the
+# MO; the consumption importer ``.create()``s the component (raw) moves.  Neither
+# confirms the MO, so std Odoo never runs the manufacture/pbm procurement that
+# generates the upstream component PICK (the ``stock -> pre-production`` transfer
+# a 2-step ``pbm`` warehouse needs before the components can be picked).
+#
+# Per the full-import sequence in ``scripts/test_import.py`` the warehouse cycle
+# is configured (``manufacture_steps='pbm'``, ``pbm_loc_id``/``pbm_type_id`` and
+# the pbm pull rules) by ``verajet.configurator.action_run_pre_import`` *before*
+# ``xtuple.database.action_import_all`` runs.  So by the time MOs/raw moves are
+# materialised the warehouse is already ``pbm`` and each imported open/in-progress
+# MO already has its ``location_src_id`` at the pbm location and its raw moves
+# carrying the MO's ``production_group_id`` / ``reference_ids``
+# (``mrp/models/stock_move.py`` create override).  The *only* missing piece is
+# the confirmation that runs procurement.
+#
+# This pipeline closes that gap AUTOMATICALLY as the final step of a full import:
+# it calls the MO's native ``action_confirm()`` on each open/in-progress imported
+# MO.  ``action_confirm`` confirms the MO's *existing* raw moves and runs the pbm
+# pull rule via procurement (``_action_confirm(create_proc=True)``), generating
+# exactly the component PICK std Odoo would have created on a normal confirm —
+# correctly grouped onto ``mo.picking_ids`` because the procurement carries
+# ``production_group_id`` (``mrp/models/stock_move._prepare_procurement_values``).
+#
+# Why this does NOT double the imported raw moves:
+#   * ``_compute_move_raw_ids`` early-returns for any non-draft MO
+#     (``mrp/models/mrp_production.py``: ``if production.state != 'draft'``), so
+#     the BOM is never re-exploded for an imported confirmed/progress/to_close MO.
+#   * ``action_confirm`` operates on the MO's *existing* ``move_raw_ids`` — it
+#     confirms them, it does not create a second consumption set.
+#   * ``stock.move._action_confirm`` skips moves whose state is not ``draft``
+#     (``if move.state != 'draft': continue``), so re-running is idempotent at the
+#     move level too; and we additionally skip any MO that already has a pbm PICK.
+#
+# This supersedes the rejected approach (hand-building pick moves + a deliberate
+# "no-op at import, re-run after route config"): here PICK generation is native
+# and happens automatically within ``action_import_all``, no manual re-run.
+
+
+@ETL.pipeline(
+    target_model="mrp.production",
+    importer_name="xtuple.mrp.pick.generator",
+    depends_on=[
+        "xtuple.mrp.consumption.importer",
+    ],
+)
+class XtupleMrpPickGenerator(models.AbstractModel):
+    """Confirm imported open/in-progress MOs so their component PICK is
+    generated natively (task 3810).
+
+    Runs after the consumption importer (its component moves must exist first)
+    and is auto-included in ``action_import_all`` via the ``xtuple_to_odoo``
+    module filter.  Load-only: it has no xTuple payload to extract/transform —
+    its work is a DB query over already-imported MOs, which also makes it
+    idempotent and safe to re-run.
+    """
+
+    _name = "xtuple.mrp.pick.generator"
+    _description = "xTuple MO Component PICK Generator"
+
+    # xTuple-status -> Odoo-state mapping (see transform_productions) yields
+    # these "open / in-progress" states for MOs that should have a live PICK.
+    _OPEN_STATES = ("confirmed", "progress", "to_close")
+
+    @ETL.load()
+    def generate_component_pickings(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Confirm every open/in-progress imported MO that still lacks its PICK.
+
+        Queries the DB directly (does not trust any transform payload) so the
+        step is re-runnable and order-independent.
+        """
+        productions = ctx.env["mrp.production"].search(
+            [
+                ("xtuple_wo_id", "!=", False),
+                ("state", "in", self._OPEN_STATES),
+            ]
+        )
+        confirmed = 0
+        skipped = 0
+        for production in productions:
+            if self._confirm_imported_mo(ctx, production):
+                confirmed += 1
+            else:
+                skipped += 1
+        _logger.info(
+            "PICK generation: confirmed %d MO(s), skipped %d already-PICKed/empty",
+            confirmed,
+            skipped,
+        )
+
+    def _confirm_imported_mo(self, ctx: ETLContext, production) -> bool:
+        """Confirm one imported MO so Odoo generates its component PICK natively.
+
+        Returns True if the MO was confirmed (PICK generated), False if it was
+        skipped (no pick step, already has a PICK, or has no raw moves).
+        """
+        warehouse = production.warehouse_id
+
+        # Skip if the warehouse has no pick step — std Odoo has no component PICK
+        # in a 1-step manufacture warehouse (components are consumed straight from
+        # stock).  This is the correct no-op if the cycle was not configured to
+        # ``pbm``.  With the test_import.py sequence (pre-import config) the
+        # warehouse IS ``pbm`` here, so this does not short-circuit the feature.
+        if (
+            warehouse.manufacture_steps not in ("pbm", "pbm_sam")
+            or not warehouse.pbm_type_id
+        ):
+            _logger.debug(
+                "MO %s: warehouse %s has no pick step — skipping PICK generation",
+                production.name,
+                warehouse.name,
+            )
+            return False
+
+        # Idempotency: skip if a pbm-type PICK already exists for this MO.
+        # Search stock.move directly (cache-independent within a transaction) for
+        # a pbm-type move pointing at this MO's production group with a picking.
+        existing_pick_move = ctx.env["stock.move"].search_count(
+            [
+                ("production_group_id", "=", production.production_group_id.id),
+                ("picking_type_id", "=", warehouse.pbm_type_id.id),
+                ("picking_id", "!=", False),
+            ]
+        )
+        if existing_pick_move:
+            _logger.debug(
+                "MO %s already has a %s PICK — skipping",
+                production.name,
+                warehouse.pbm_type_id.name,
+            )
+            return False
+
+        # Nothing to wrap if the MO has no imported component moves.
+        if not production.move_raw_ids.filtered(lambda m: m.xtuple_womatl_id):
+            _logger.debug("MO %s has no imported raw moves — skipping", production.name)
+            return False
+
+        # Native confirm: confirms the MO's EXISTING raw moves and runs the pbm
+        # pull rule via procurement, generating the component PICK.  Does NOT
+        # re-explode the BOM (the MO is non-draft, so _compute_move_raw_ids is a
+        # no-op) and does NOT touch the MO's state for non-draft MOs
+        # (action_confirm only flips draft -> confirmed).
+        production.action_confirm()
+        _logger.info(
+            "MO %s: confirmed -> generated component PICK on %s",
+            production.name,
+            warehouse.pbm_type_id.name,
+        )
+        return True

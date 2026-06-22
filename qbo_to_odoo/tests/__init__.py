@@ -3,3 +3,5 @@ from . import test_partner_etl_addresses
 from . import test_account_archival_tax_guard
 from . import test_skip_cogs_generation
 from . import test_archive_deleted_journals
+from . import test_product_name_sales_description
+from . import test_product_name_locale
