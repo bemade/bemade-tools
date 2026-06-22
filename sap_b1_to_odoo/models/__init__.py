@@ -11,6 +11,7 @@ from . import carrier_account
 from . import product_pricelist
 from . import stock_picking
 from . import stock_warehouse
+from . import stock_location
 from . import res_users
 from . import account_payment_term
 from . import ir_attachment
