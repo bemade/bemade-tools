@@ -118,17 +118,52 @@ class QboBankJournalProcessor(models.AbstractModel):
 
     @ETL.load()
     def load_journals(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Create bank journals."""
+        """Create bank journals, then archive QBO 'deleted' journals.
+
+        Journal creation is followed by an instance-wide cleanup step that
+        archives any ``account.journal`` whose name contains "deleted"
+        (case-insensitive). This pipeline is the journal-owning pipeline and
+        runs as part of the orchestrated import, so this is the correct
+        end-of-import point to clean up QBO's carried-over deleted journals.
+        """
         journal_vals = transformed.get("transform_journals", [])
 
         if not journal_vals:
             _logger.info("No new bank journals to create")
+        else:
+            created = 0
+            for vals in journal_vals:
+                ctx.env["account.journal"].create(vals)
+                created += 1
+                _logger.info(f"Created bank journal '{vals['name']}'")
+
+            _logger.info(f"Created {created} bank journals")
+
+        self._archive_deleted_journals(ctx)
+
+    @staticmethod
+    def _archive_deleted_journals(ctx: ETLContext) -> None:
+        """Archive every active ``account.journal`` whose name contains "deleted".
+
+        QBO carries over journals for deactivated-in-QBO accounts; their names
+        contain "deleted" (e.g. "Old Bank (deleted)"). These should not remain
+        in the active journal set after a migration import.
+
+        Idempotent: the search domain filters on ``active = True``, so journals
+        already archived on a previous import are not re-touched and the write
+        is a no-op when nothing matches. Matching is case-insensitive
+        (``ilike``) because QBO's "(deleted)" suffix casing is not guaranteed.
+        """
+        to_archive = ctx.env["account.journal"].search(
+            [("name", "ilike", "deleted"), ("active", "=", True)]
+        )
+        if not to_archive:
+            _logger.info("No 'deleted' journals to archive")
             return
 
-        created = 0
-        for vals in journal_vals:
-            ctx.env["account.journal"].create(vals)
-            created += 1
-            _logger.info(f"Created bank journal '{vals['name']}'")
-
-        _logger.info(f"Created {created} bank journals")
+        to_archive.write({"active": False})
+        _logger.info(
+            "Archived %d 'deleted' journal(s): %s",
+            len(to_archive),
+            ", ".join(to_archive.mapped("name")),
+        )
