@@ -5,3 +5,4 @@ from . import test_skip_cogs_generation
 from . import test_archive_deleted_journals
 from . import test_product_name_sales_description
 from . import test_product_name_locale
+from . import test_bank_journal_suspense
