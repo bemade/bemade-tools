@@ -102,12 +102,19 @@ class XtuplePurchaseOrderImporter(models.AbstractModel):
         orders = extracted.get("extract_orders", {}).get("orders", [])
         vendor_map = extracted.get("extract_orders", {}).get("vendor_map", {})
 
-        # Map xTuple status to Odoo state
-        # Odoo 19 states: draft, sent, to approve, purchase, cancel
+        # Map xTuple status to Odoo state.
+        # Odoo 19 states: draft, sent, to approve, purchase, cancel.
+        # Per the client (task #3814): xTuple's open/working POs live as
+        # Unreleased ('U') and must import as CONFIRMED so they get real incoming
+        # pickings; the released/closed history ('O'/'C') also imports confirmed
+        # and is closed out as fully delivered + invoiced. So all three import as
+        # 'purchase'; the open-vs-historical split is preserved on
+        # xtuple_pohead_status (below) for the post-import receipt step, NOT on
+        # the Odoo state.
         status_map = {
-            "U": "draft",  # Unreleased
-            "O": "purchase",  # Open
-            "C": "purchase",  # Closed -> purchase (no 'done' state in Odoo 19)
+            "U": "purchase",  # Unreleased -> confirmed open PO (real pickings)
+            "O": "purchase",  # Open -> historical, closed out full
+            "C": "purchase",  # Closed -> historical, closed out full
         }
 
         order_vals = []
@@ -119,7 +126,8 @@ class XtuplePurchaseOrderImporter(models.AbstractModel):
                 )
                 continue
 
-            state = status_map.get(order.get("pohead_status", "").strip(), "draft")
+            xtuple_status = order.get("pohead_status", "").strip()
+            state = status_map.get(xtuple_status, "draft")
 
             vals = {
                 "name": order.get("pohead_number"),
@@ -127,6 +135,7 @@ class XtuplePurchaseOrderImporter(models.AbstractModel):
                 "date_order": order.get("pohead_orderdate"),
                 "state": state,
                 "xtuple_pohead_id": order.get("pohead_id"),
+                "xtuple_pohead_status": xtuple_status or False,
             }
             # Add comments if present (note is Html field in Odoo 19)
             if order.get("pohead_comments"):
@@ -245,54 +254,48 @@ class XtuplePurchaseOrderLineImporter(models.AbstractModel):
                 .create(line_vals)
             )
             _logger.info(f"Created {len(lines)} purchase order lines")
-        # Imported POs are written with state='purchase' directly (no
-        # button_confirm), so no incoming pickings exist and the native
-        # purchase_stock._compute_receipt_status (derived from picking_ids.state)
-        # leaves receipt_status blank on every confirmed PO. Bake the line-based
-        # fill into this automatic load step so receipt_status is reproducible on
-        # every migration with no manual recompute (task #3814).
-        self._recompute_receipt_status(ctx)
+        # Make receipt_status reproducible on every migration with no manual
+        # recompute (task #3814). Two distinct populations, handled differently:
+        #
+        #   * HISTORICAL POs (xTuple 'O'/'C') are just history; the client wants
+        #     them closed out as fully delivered regardless of actual qty. They
+        #     get a direct-write receipt_status='full' (no pickings — Marc
+        #     reviewed and APPROVED this SQL path).
+        #
+        #   * OPEN POs (xTuple 'U' — the client's working orders) need a REAL
+        #     incoming stock.picking so the receipt picture is reproducible AND
+        #     correct stock results: native purchase_stock._compute_receipt_status
+        #     then derives the status from the picking, exactly as for a PO the
+        #     user confirmed by hand. For partially-received open POs we use a
+        #     back-order protocol (see _generate_open_po_receipts).
+        #
+        # ORDERING: receipt generation writes stock moves, so it MUST run before
+        # the stock-adjustment pipeline (xtuple.stock.quant.importer) that sets
+        # final on-hand levels — otherwise the receipts would stack on top of the
+        # adjusted quantities. That ordering is guaranteed by stock_quant_etl's
+        # depends_on listing this importer (see stock_quant_etl.py).
+        self._close_out_historical_pos(ctx)
+        self._generate_open_po_receipts(ctx)
 
-    def _recompute_receipt_status(self, ctx: ETLContext) -> None:
-        """Set receipt_status from line ordered-vs-received qty for imported POs.
+    def _close_out_historical_pos(self, ctx: ETLContext) -> None:
+        """Mark historical (xTuple 'O'/'C') imported POs fully delivered.
 
-        Mirrors purchase_stock._compute_receipt_status' full/partial/pending
-        semantics from line quantities instead of pickings, because the import
-        writes ``state='purchase'`` without ``button_confirm`` so no pickings are
-        ever generated. Scoped to confirmed (``state='purchase'``) xTuple POs:
-        draft POs correctly keep a blank receipt_status (nothing to receive yet),
-        matching the native behaviour for POs with no pickings.
-
-        Run as raw SQL (the field is a stored compute whose only trigger is
-        picking_ids, which never fire here) and keyed on ``xtuple_pohead_id`` so
-        it only touches imported orders.
+        These are migration history only: per the client they are closed out as
+        fully delivered + fully invoiced regardless of the real received qty, so
+        we force ``receipt_status='full'`` directly. The field is a stored
+        compute whose only trigger is ``picking_ids`` (none exist here), so a raw
+        SQL write is safe and stable. Scoped by ``xtuple_pohead_status`` so it
+        never touches the open POs (handled via real pickings) or non-imported
+        orders.
         """
         ctx.env.flush_all()
         ctx.env.cr.execute(
             """
-            UPDATE purchase_order po
-            SET receipt_status = CASE
-                WHEN NOT EXISTS (
-                    SELECT 1 FROM purchase_order_line pol
-                    WHERE pol.order_id = po.id
-                )
-                THEN NULL
-                WHEN NOT EXISTS (
-                    SELECT 1 FROM purchase_order_line pol
-                    WHERE pol.order_id = po.id
-                      AND pol.qty_received < pol.product_qty
-                )
-                THEN 'full'
-                WHEN EXISTS (
-                    SELECT 1 FROM purchase_order_line pol
-                    WHERE pol.order_id = po.id
-                      AND pol.qty_received > 0
-                )
-                THEN 'partial'
-                ELSE 'pending'
-            END
-            WHERE po.xtuple_pohead_id IS NOT NULL
-              AND po.state = 'purchase'
+            UPDATE purchase_order
+            SET receipt_status = 'full'
+            WHERE xtuple_pohead_id IS NOT NULL
+              AND xtuple_pohead_status IN ('O', 'C')
+              AND state = 'purchase'
             """
         )
         row_count = ctx.env.cr.rowcount
@@ -300,6 +303,132 @@ class XtuplePurchaseOrderLineImporter(models.AbstractModel):
         # any cached value so subsequent reads in the same transaction are correct.
         ctx.env["purchase.order"].invalidate_model(["receipt_status"])
         _logger.info(
-            "Recomputed receipt_status on %s confirmed xTuple POs from line qty",
-            row_count,
+            "Closed out %s historical xTuple POs as fully delivered", row_count
         )
+
+    def _generate_open_po_receipts(self, ctx: ETLContext) -> None:
+        """Generate real incoming pickings for OPEN (xTuple 'U') imported POs.
+
+        Why pickings rather than a direct receipt_status write: open POs are the
+        client's live, working orders, so their receipt picture must be real and
+        editable in Odoo (so further receipts/back-orders work). The native
+        ``purchase_stock._compute_receipt_status`` derives status from the
+        picking, so once a correct picking exists the status is reproduced with
+        no manual step.
+
+        INVESTIGATION (the crux of the design): for storable products
+        ``purchase.order.line.qty_received_method`` is forced to ``'stock_moves'``
+        the moment a line has stock moves, and ``_compute_qty_received`` then
+        OVERWRITES qty_received with the sum of the *done* moves' quantities
+        (purchase_stock/models/purchase_order_line.py). So receiving a picking
+        recomputes qty_received from the picking — a manually-imported value does
+        NOT survive once moves exist. Therefore for a partially-received order we
+        cannot just receive "everything"; we must receive exactly the historical
+        qty and keep the rest open. We do that with a BACK-ORDER protocol:
+
+          1. ``_create_picking`` builds the incoming picking with moves for the
+             FULL ordered qty (no prior moves exist, so it uses product_qty).
+          2. Set each move's done quantity to that line's historical received
+             qty (captured BEFORE the picking exists, while the value is still
+             the imported one).
+          3. Validate with back-order creation ENABLED, so the unreceived
+             remainder stays open as a back-order picking. qty_received then
+             recomputes to exactly the historical received qty, and the native
+             receipt_status comes out 'partial'.
+
+        Per-PO cases handled:
+          * nothing received  -> picking left ready (assigned), nothing
+            validated -> receipt_status 'pending'.
+          * partially received -> validate partial + back-order -> 'partial'.
+          * fully received -> validate in full (no back-order) -> 'full'.
+        """
+        ctx.env.flush_all()
+        Order = ctx.env["purchase.order"]
+        open_orders = Order.search(
+            [
+                ("xtuple_pohead_id", "!=", False),
+                ("xtuple_pohead_status", "=", "U"),
+                ("state", "=", "purchase"),
+            ]
+        )
+        if not open_orders:
+            _logger.info("No open xTuple POs to generate receipts for")
+            return
+
+        generated = 0
+        for order in open_orders:
+            if order.picking_ids:
+                # Idempotent: a re-run (or a partially completed prior run)
+                # already produced the picking; do not double-generate.
+                continue
+            # Snapshot the imported received qty per line BEFORE any moves exist
+            # (after _create_picking the line flips to stock_moves method and
+            # qty_received recomputes from done moves, losing the imported value).
+            received_by_line = {
+                line.id: line.qty_received for line in order.order_line
+            }
+            order._create_picking()
+            picking = order.picking_ids.filtered(
+                lambda p: p.state not in ("done", "cancel")
+            )[:1]
+            if not picking:
+                # No storable lines -> no picking created. Nothing to receive;
+                # the order simply has no receipt picture (correct).
+                continue
+            self._receive_picking_to_history(picking, received_by_line)
+            generated += 1
+
+        # qty_received / receipt_status were driven through the ORM by the
+        # validation above; flush so they are persisted before the stock-quant
+        # adjustment pipeline reads stock levels.
+        ctx.env.flush_all()
+        _logger.info(
+            "Generated incoming receipts for %s open xTuple POs", generated
+        )
+
+    @staticmethod
+    def _receive_picking_to_history(picking, received_by_line: Dict) -> None:
+        """Validate ``picking`` to the historical received qty, back-ordering the rest.
+
+        ``received_by_line`` maps purchase.order.line id -> historical received
+        qty. Sets each move's done quantity to its line's received qty, then:
+          * total received == 0  -> leave the picking ready (pending), unvalidated.
+          * 0 < received < demand -> validate with a back-order for the remainder.
+          * received >= demand    -> validate in full (no back-order).
+        """
+        total_demand = 0.0
+        total_received = 0.0
+        for move in picking.move_ids:
+            demand = move.product_uom_qty
+            received = received_by_line.get(move.purchase_line_id.id, 0.0) or 0.0
+            # Never receive more than was ordered on this move; the over-receipt
+            # case (received > ordered) still closes the move as full.
+            done = min(received, demand)
+            total_demand += demand
+            total_received += done
+            # Setting move.quantity drives the inverse (_set_quantity), which
+            # rewrites the reserved move lines to the historical done qty.
+            move.quantity = done
+            # picked=True is what _action_done uses to know a move was actually
+            # received (an unpicked qty>0 move would not be validated). Only mark
+            # moves with something received; the rest are left for the back-order.
+            move.picked = bool(done)
+
+        if total_received <= 0:
+            # Nothing was received yet: keep the picking open and ready so the
+            # native receipt_status resolves to 'pending'.
+            return
+
+        if total_received < total_demand:
+            # Partial: validate and force a back-order for the remainder so the
+            # unreceived qty stays open. cancel_backorder=False => back-order is
+            # created; skip_backorder=True / skip_sanity_check bypass the
+            # interactive validation wizards (this runs unattended).
+            picking.with_context(
+                skip_backorder=True, skip_sanity_check=True, cancel_backorder=False
+            )._action_done()
+        else:
+            # Fully received: validate the whole picking, no back-order.
+            picking.with_context(
+                skip_backorder=True, skip_sanity_check=True, cancel_backorder=True
+            )._action_done()
