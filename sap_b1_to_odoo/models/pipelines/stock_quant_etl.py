@@ -15,6 +15,7 @@ _logger = logging.getLogger(__name__)
     depends_on=[
         "product.product.importer",
         "stock.warehouse.importer",
+        "stock.location.importer",
         # Run after all transactional imports that create stock moves
         "sale.order.post.processor",
         "purchase.order.post.processor",
@@ -46,12 +47,21 @@ class StockQuantImporter(models.AbstractModel):
             wh.sap_whs_code: wh.lot_stock_id.id for wh in warehouses if wh.sap_whs_code
         }
 
-        # Query SAP OITW (warehouse item stock)
+        # Build sww → location_id map keyed on sap_sww_code (set up by
+        # stock.location.importer which runs before us via depends_on).
+        sww_locations = ctx.env["stock.location"].search_read(
+            [("sap_sww_code", "!=", False)],
+            ["sap_sww_code"],
+        )
+        sww_location_map = {loc["sap_sww_code"]: loc["id"] for loc in sww_locations}
+
+        # Query SAP OITW (warehouse item stock), joining OITM to get sww
         sql = """
-            SELECT w.whscode, w.itemcode, w.onhand, w.iscommited, w.avgprice
+            SELECT w.whscode, w.itemcode, w.onhand, w.iscommited, w.avgprice,
+                   i.sww
             FROM oitw w
             INNER JOIN oitm i ON w.itemcode = i.itemcode
-            WHERE w.onhand > 0 
+            WHERE w.onhand > 0
             AND i.validfor = 'Y'
         """
         ctx.cr.execute(sql)
@@ -94,6 +104,7 @@ class StockQuantImporter(models.AbstractModel):
             "quants": filtered_quants,
             "product_map": product_map,
             "warehouse_location_map": warehouse_location_map,
+            "sww_location_map": sww_location_map,
             "company_id": ctx.env.company.id,
         }
 
@@ -112,13 +123,31 @@ class StockQuantImporter(models.AbstractModel):
         sap_quants = data.get("quants", [])
         product_map = data.get("product_map", {})
         warehouse_location_map = data.get("warehouse_location_map", {})
+        sww_location_map = data.get("sww_location_map", {})
         company_id = data.get("company_id")
 
         quant_vals = []
         transform_skipped = []
+        sww_fallback_count = 0
         for sap_quant in sap_quants:
             product_id = product_map.get(sap_quant["itemcode"])
-            location_id = warehouse_location_map.get(sap_quant["whscode"])
+
+            # Resolve location: prefer the sww-specific location; fall back to the
+            # warehouse lot_stock_id when sww is blank or has no Odoo location yet.
+            sww = (sap_quant.get("sww") or "").strip()
+            if sww and sww in sww_location_map:
+                location_id = sww_location_map[sww]
+            else:
+                location_id = warehouse_location_map.get(sap_quant["whscode"])
+                if sww:
+                    # sww was set but not found in the map — log and fall back
+                    sww_fallback_count += 1
+                    _logger.debug(
+                        "stock_quant transform: sww %r for item %r not in "
+                        "sww_location_map; falling back to warehouse lot_stock_id.",
+                        sww,
+                        sap_quant["itemcode"],
+                    )
 
             if not product_id or not location_id:
                 transform_skipped.append(
@@ -135,6 +164,12 @@ class StockQuantImporter(models.AbstractModel):
             }
             quant_vals.append(vals)
 
+        if sww_fallback_count:
+            _logger.warning(
+                "stock_quant transform: %d row(s) had a non-empty sww not found in "
+                "sww_location_map; fell back to warehouse lot_stock_id.",
+                sww_fallback_count,
+            )
         if transform_skipped:
             _logger.warning(
                 "stock_quant transform: skipped %d row(s) — product or location "
