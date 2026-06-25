@@ -40,16 +40,25 @@ class QboBankJournalProcessor(models.AbstractModel):
             ]
         )
 
-        # Find which ones don't have a bank journal
+        # Find which ones don't have a bank journal. Search with
+        # active_test=False: a journal may have been archived by
+        # _archive_deleted_journals (e.g. a "(deleted)" QBO account whose
+        # account record stays active). Without this, re-runs flag such an
+        # account as needing a journal and then collide with the archived
+        # journal on the (company_id, code) unique constraint.
         accounts_needing_journals = []
         for account in bank_accounts:
-            existing_journal = ctx.env["account.journal"].search(
-                [
-                    ("type", "=", "bank"),
-                    ("default_account_id", "=", account.id),
-                    ("company_id", "=", company.id),
-                ],
-                limit=1,
+            existing_journal = (
+                ctx.env["account.journal"]
+                .with_context(active_test=False)
+                .search(
+                    [
+                        ("type", "=", "bank"),
+                        ("default_account_id", "=", account.id),
+                        ("company_id", "=", company.id),
+                    ],
+                    limit=1,
+                )
             )
 
             if not existing_journal:
@@ -61,9 +70,14 @@ class QboBankJournalProcessor(models.AbstractModel):
                     }
                 )
 
-        # Collect existing journal codes to avoid duplicates in transform
+        # Collect existing journal codes to avoid duplicates in transform.
+        # active_test=False so archived journals' codes are reserved too: the
+        # (company_id, code) unique constraint spans archived rows, so a new
+        # account whose code matches an archived journal's code would otherwise
+        # collide at create time.
         existing_codes = set(
             ctx.env["account.journal"]
+            .with_context(active_test=False)
             .search([("company_id", "=", company.id)])
             .mapped("code")
         )
