@@ -1,10 +1,32 @@
 from odoo.tests.common import TransactionCase, tagged
 from odoo import Command
+from odoo.addons.etl_framework import ETLContext
 import os
 import logging
 from odoo.addons.xtuple_to_odoo.tools import normalize_country_code
 
 _logger = logging.getLogger(__name__)
+
+
+class _FakeXtupleCursor:
+    """Stand-in for the xTuple source cursor (`ctx.cr`) so the vendor
+    extract's crmacct-matching logic can be exercised without a live xTuple
+    Postgres connection.
+
+    `_get_vendor_base_query` calls ``ctx.cr.execute(sql)`` followed by
+    ``ctx.cr.dictfetchall()``; this fake ignores the SQL (it isn't run
+    against a real xTuple DB in these tests) and simply returns the
+    pre-built vendor rows handed to it.
+    """
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, *args, **kwargs):
+        pass
+
+    def dictfetchall(self):
+        return self._rows
 
 @tagged("-at_install", "xtuple")
 class TestPartnerImport(TransactionCase):
@@ -409,4 +431,114 @@ class TestPartnerMerge(TransactionCase):
         self.env["base.partner.merge.automatic.wizard"].create({
             "partner_ids": [Command.set([self.partner_non_xtuple.id, self.partner_xtuple.id])],
             "dst_partner_id": self.partner_non_xtuple.id,
-        }).action_merge() # Should fail with vanilla Odoo        
+        }).action_merge() # Should fail with vanilla Odoo
+
+
+# Regression coverage for #3816: the vendor importer must match a vendor to
+# an existing customer partner by shared xTuple CRM account (crmacct), never
+# by vend_id happening to numerically equal an unrelated customer's cust_id.
+class TestVendorCrmacctMatching(TransactionCase):
+    def setUp(self):
+        super().setUp()
+        self.vendor_importer = self.env["xtuple.partner.vendor.importer"].with_company(
+            self.env.company
+        )
+
+    def _run_vendor_base_query(self, vendor_rows):
+        """Drive `_get_vendor_base_query` with simulated xTuple vendor rows,
+        while the crmacct->partner map is built from real seeded
+        `res.partner` records via the real Odoo cursor (`ctx.env.cr`)."""
+        ctx = ETLContext(cr=_FakeXtupleCursor(vendor_rows), env=self.env)
+        vendors, _existing_names, _existing_count = (
+            self.vendor_importer._get_vendor_base_query(ctx)
+        )
+        return vendors
+
+    def test_vendor_id_equal_to_unrelated_customer_id_does_not_collide(self):
+        """Collision regression: a vendor whose vend_id numerically equals an
+        unrelated customer's cust_id, but with a DIFFERENT crmacct, must NOT
+        be matched to that customer partner (mirrors vendor 168/TML vs.
+        customer 168/Spectracorp, crmacct 133 vs. 128)."""
+        customer = self.env["res.partner"].create(
+            {
+                "name": "Spectracorp Inc.",
+                "xtuple_cust_id": 168,
+                "xtuple_crmacct_id": 128,
+            }
+        )
+
+        vendors = self._run_vendor_base_query(
+            [
+                {
+                    "vend_id": 168,
+                    "vend_name": "TML Industries",
+                    "vend_crmacct_id": 133,
+                }
+            ]
+        )
+
+        self.assertEqual(len(vendors), 1)
+        self.assertNotIn("_existing_customer_partner_id", vendors[0])
+
+        # Downstream transform would therefore create TML as a new vendor
+        # partner rather than stamping xtuple_vend_id onto Spectracorp.
+        self.assertFalse(customer.xtuple_vend_id)
+
+    def test_vendor_matches_existing_partner_by_shared_crmacct(self):
+        """Legitimate merge preserved: a vendor sharing the same crmacct as an
+        existing customer partner (unrelated numeric ids) IS matched to that
+        partner, so it flows into the customer/vendor update path."""
+        customer = self.env["res.partner"].create(
+            {
+                "name": "Shared Account Inc.",
+                "xtuple_cust_id": 500,
+                "xtuple_crmacct_id": 900,
+            }
+        )
+
+        vendors = self._run_vendor_base_query(
+            [
+                {
+                    "vend_id": 777,
+                    "vend_name": "Shared Account Inc.",
+                    "vend_crmacct_id": 900,
+                }
+            ]
+        )
+
+        self.assertEqual(len(vendors), 1)
+        self.assertEqual(
+            vendors[0].get("_existing_customer_partner_id"), customer.id
+        )
+
+    def test_null_crmacct_does_not_false_match(self):
+        """A vendor with a NULL/falsy crmacct must never be matched to any
+        partner, even one that also has no crmacct recorded (guards against
+        falsy-on-falsy collapsing in the map/lookup). The existing partner
+        below leaves `xtuple_crmacct_id` entirely unset, which Postgres
+        stores as real SQL NULL (no DDL default on a plain Integer column),
+        so it is excluded by the map query's `WHERE xtuple_crmacct_id IS NOT
+        NULL` already; the vendor-side Python truthiness guard on
+        `vend_crmacct_id` in `_get_vendor_base_query` is the second,
+        independent line of defense this test exercises (e.g. against a
+        stray `0` sneaking into the map)."""
+        self.env["res.partner"].create(
+            {
+                "name": "No CRM Account Customer",
+                "xtuple_cust_id": 42,
+                # xtuple_crmacct_id intentionally left unset (stored as NULL)
+            }
+        )
+
+        vendors = self._run_vendor_base_query(
+            [
+                {
+                    "vend_id": 42,
+                    "vend_name": "No CRM Account Vendor",
+                    "vend_crmacct_id": None,
+                }
+            ]
+        )
+
+        self.assertEqual(len(vendors), 1)
+        self.assertNotIn("_existing_customer_partner_id", vendors[0])        
