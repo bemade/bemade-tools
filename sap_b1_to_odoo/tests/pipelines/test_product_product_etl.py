@@ -14,14 +14,16 @@
 Acceptance criteria:
 
 1. (test_suppcatnum_maps_to_default_code) suppcatnum is written to default_code.
-2. (test_frgnname_maps_to_description) frgnname is written to description and name.
+2. (test_itemname_drives_name) itemname drives name; frgnname is written to
+   description_sale, not name.
 3. (test_frgnname_not_in_default_code) frgnname is NOT written to default_code.
 4. (test_missing_suppcatnum_default_code_blank) None suppcatnum → default_code is False.
 5. (test_empty_suppcatnum_default_code_blank) "" suppcatnum → default_code is False.
-6. (test_missing_frgnname_description_blank) None frgnname → description is False,
-   name falls back to itemname, default_code still comes from suppcatnum.
+6. (test_missing_frgnname_description_sale_blank) None frgnname → description_sale is
+   False, name comes from itemname, default_code still comes from suppcatnum.
 7. (test_reimport_updates_existing_default_code) Re-import with same sap_item_code
-   updates default_code and description on the existing record without duplication.
+   updates default_code and description_sale on the existing record without
+   duplication.
 8. (test_reimport_creates_new_when_absent) Previously-unseen sap_item_code creates
    a new record.
 9. (test_quotes_are_fixed_in_suppcatnum) fix_quotes is applied to suppcatnum before
@@ -102,11 +104,14 @@ class TestProductProductEtl(TransactionCase):
         vals = self._transform([_make_sap_row(suppcatnum="SUP-001")])
         self.assertEqual(vals[0]["default_code"], "SUP-001")
 
-    def test_frgnname_maps_to_description(self):
-        """frgnname is written to description and used as name."""
-        vals = self._transform([_make_sap_row(frgnname="Widget FR")])
-        self.assertEqual(vals[0]["description"], "Widget FR")
-        self.assertEqual(vals[0]["name"], "Widget FR")
+    def test_itemname_drives_name(self):
+        """itemname drives name; frgnname is written to description_sale, not name."""
+        vals = self._transform(
+            [_make_sap_row(itemname="Widget Internal", frgnname="Widget FR")]
+        )
+        self.assertEqual(vals[0]["name"], "Widget Internal")
+        self.assertEqual(vals[0]["description_sale"], "Widget FR")
+        self.assertNotIn("description", vals[0])
 
     def test_frgnname_not_in_default_code(self):
         """frgnname must NOT be written to default_code."""
@@ -123,13 +128,13 @@ class TestProductProductEtl(TransactionCase):
         vals = self._transform([_make_sap_row(suppcatnum="")])
         self.assertIs(vals[0]["default_code"], False)
 
-    def test_missing_frgnname_description_blank(self):
-        """None frgnname → description is False; name falls back to itemname."""
+    def test_missing_frgnname_description_sale_blank(self):
+        """None frgnname → description_sale is False; name comes from itemname."""
         vals = self._transform([
             _make_sap_row(frgnname=None, itemname="Only Internal", suppcatnum="SUP-002")
         ])
         self.assertEqual(vals[0]["name"], "Only Internal")
-        self.assertIs(vals[0]["description"], False)
+        self.assertIs(vals[0]["description_sale"], False)
         self.assertEqual(vals[0]["default_code"], "SUP-002")
 
     def test_quotes_are_fixed_in_suppcatnum(self):
@@ -156,6 +161,7 @@ class TestProductProductEtl(TransactionCase):
             "name": "Old Name",
             "sap_item_code": "ITM9",
             "default_code": "OLD",
+            "description_sale": "Old FR Name",
         })
         before_count = self.env["product.product"].with_context(active_test=False).search_count(
             [("sap_item_code", "=", "ITM9")]
@@ -167,7 +173,7 @@ class TestProductProductEtl(TransactionCase):
             "sap_item_code": "ITM9",
             "name": "New Name",
             "default_code": "NEW-SUP",
-            "description": "New FR Name",
+            "description_sale": "New FR Name",
             "list_price": 0.0,
             "standard_price": 0.0,
             "sale_ok": True,
@@ -187,8 +193,7 @@ class TestProductProductEtl(TransactionCase):
         )
         self.assertEqual(after_count, 1, "No duplicate record must be created on re-import.")
         self.assertEqual(existing.default_code, "NEW-SUP")
-        # description is an HTML field; Odoo wraps plain text in <p>…</p>
-        self.assertIn("New FR Name", existing.description)
+        self.assertEqual(existing.description_sale, "New FR Name")
 
     def test_reimport_creates_new_when_absent(self):
         """Previously-unseen sap_item_code creates a new record."""
@@ -201,7 +206,7 @@ class TestProductProductEtl(TransactionCase):
             "sap_item_code": "ITM_NEW",
             "name": "Brand New",
             "default_code": "NEW-001",
-            "description": False,
+            "description_sale": False,
             "list_price": 0.0,
             "standard_price": 0.0,
             "sale_ok": True,

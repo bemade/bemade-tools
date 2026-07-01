@@ -194,7 +194,7 @@ class SapDatabase(models.Model):
         )
 
     def action_import_carrier_accounts(self) -> dict:
-        """Import SAP delivery carriers and carrier accounts."""
+        """Import SAP delivery carriers and transporters."""
         return self._execute_pipeline("delivery.carrier.importer")
 
     def action_import_products(self) -> dict:

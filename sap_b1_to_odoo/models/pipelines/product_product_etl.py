@@ -95,17 +95,17 @@ class ProductImporter(models.AbstractModel):
             if itmsgrpcod and not categ_id:
                 category_miss_codes.append((sap_product["itemcode"], itmsgrpcod))
 
-            # Name: prefer frgnname, else itemname, else "N/A"
+            # Name: itemname, else "N/A"
             itemname = fix_quotes(sap_product["itemname"])
             frgnname = fix_quotes(sap_product["frgnname"])
-            name = frgnname or itemname or "N/A"
+            name = itemname or "N/A"
 
             # default_code ← suppcatnum (supplier catalog number from SAP)
             suppcatnum = fix_quotes(sap_product.get("suppcatnum"))
             default_code = suppcatnum or False
 
-            # description ← frgnname (internal notes field on product form)
-            description = frgnname or False
+            # description_sale ← frgnname (Sales tab "Sales Description" field)
+            description_sale = frgnname or False
 
             # Build product values
             base_price = sap_product.get("base_price") or 0.0
@@ -118,7 +118,7 @@ class ProductImporter(models.AbstractModel):
                 "sap_atcentry": sap_product["atcentry"],
                 "name": name,
                 "default_code": default_code,
-                "description": description,
+                "description_sale": description_sale,
                 "list_price": float(base_price),
                 "standard_price": avg_price,
                 "description_ecommerce": description_ecommerce,
