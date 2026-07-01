@@ -40,16 +40,25 @@ class QboBankJournalProcessor(models.AbstractModel):
             ]
         )
 
-        # Find which ones don't have a bank journal
+        # Find which ones don't have a bank journal. Search with
+        # active_test=False: a journal may have been archived by
+        # _archive_deleted_journals (e.g. a "(deleted)" QBO account whose
+        # account record stays active). Without this, re-runs flag such an
+        # account as needing a journal and then collide with the archived
+        # journal on the (company_id, code) unique constraint.
         accounts_needing_journals = []
         for account in bank_accounts:
-            existing_journal = ctx.env["account.journal"].search(
-                [
-                    ("type", "=", "bank"),
-                    ("default_account_id", "=", account.id),
-                    ("company_id", "=", company.id),
-                ],
-                limit=1,
+            existing_journal = (
+                ctx.env["account.journal"]
+                .with_context(active_test=False)
+                .search(
+                    [
+                        ("type", "=", "bank"),
+                        ("default_account_id", "=", account.id),
+                        ("company_id", "=", company.id),
+                    ],
+                    limit=1,
+                )
             )
 
             if not existing_journal:
@@ -61,9 +70,14 @@ class QboBankJournalProcessor(models.AbstractModel):
                     }
                 )
 
-        # Collect existing journal codes to avoid duplicates in transform
+        # Collect existing journal codes to avoid duplicates in transform.
+        # active_test=False so archived journals' codes are reserved too: the
+        # (company_id, code) unique constraint spans archived rows, so a new
+        # account whose code matches an archived journal's code would otherwise
+        # collide at create time.
         existing_codes = set(
             ctx.env["account.journal"]
+            .with_context(active_test=False)
             .search([("company_id", "=", company.id)])
             .mapped("code")
         )
@@ -140,6 +154,131 @@ class QboBankJournalProcessor(models.AbstractModel):
             _logger.info(f"Created {created} bank journals")
 
         self._archive_deleted_journals(ctx)
+
+        # Point the company default, the active bank journals, and their
+        # in/out payment method lines at the Clearing (1005) suspense account.
+        # Runs unconditionally (even when 0 journals were created this pass) so
+        # an orchestrated import always converges on the correct suspense config.
+        self._configure_suspense_accounts(ctx)
+
+    def _ensure_clearing_suspense_account(self, ctx: ETLContext):
+        """Resolve (or create) the Clearing ``account.account`` used as suspense.
+
+        Resolution order, scoped to the current company (account.account is
+        multi-company via the ``company_ids`` M2M in 19.0):
+
+        1. code == "1005";
+        2. else name ilike "Clearing" AND account_type == "asset_current";
+        3. else create a new {code 1005, name "Clearing", asset_current,
+           reconcile} account.
+
+        We deliberately NEVER select or create the "Bank Suspense" account
+        (account 343 / "111312 Bank Suspense Account"): the directive is to use
+        Clearing (1005) for suspense everywhere, and no id is hardcoded.
+        """
+        company = ctx.env.company
+        Account = ctx.env["account.account"].with_context(active_test=False)
+
+        account = Account.search(
+            [("code", "=", "1005"), ("company_ids", "in", [company.id])],
+            limit=1,
+        )
+        if not account:
+            account = Account.search(
+                [
+                    ("name", "ilike", "Clearing"),
+                    ("account_type", "=", "asset_current"),
+                    ("company_ids", "in", [company.id]),
+                ],
+                limit=1,
+            )
+        if not account:
+            account = Account.create(
+                {
+                    "name": "Clearing",
+                    "code": "1005",
+                    "account_type": "asset_current",
+                    "reconcile": True,
+                    "company_ids": [(6, 0, [company.id])],
+                }
+            )
+            _logger.info(
+                "Created Clearing suspense account %s for company %s",
+                account.code,
+                company.name,
+            )
+        return account
+
+    def _configure_suspense_accounts(self, ctx: ETLContext) -> None:
+        """Wire the Clearing (1005) account in as the suspense account.
+
+        Sets it as (a) the company default so future journals auto-inherit it
+        (``account.journal.suspense_account_id`` is a stored computed that falls
+        back to ``company.account_journal_suspense_account_id``), (b) the
+        suspense account on every active, non-"(deleted)" bank journal, and
+        (c) the ``payment_account_id`` on those journals' inbound/outbound
+        payment method lines.
+
+        The method line write is a blanket OVERWRITE (not a fill-if-empty):
+        QBO migrations leave some lines pointing at the wrong account
+        ("111312 Bank Suspense Account" / acct 343); the directive is "1005
+        everywhere", so every in/out line is repointed regardless of its
+        current value. Idempotent: every step searches and sets to a fixed
+        target, so re-runs are no-ops.
+        """
+        clearing = self._ensure_clearing_suspense_account(ctx)
+        if not clearing:
+            _logger.warning(
+                "Could not resolve a Clearing suspense account; "
+                "skipping suspense configuration."
+            )
+            return
+
+        company = ctx.env.company
+
+        # Company-level default: set only if it differs, so future bank
+        # journals inherit Clearing without an unnecessary write.
+        if company.account_journal_suspense_account_id != clearing:
+            company.account_journal_suspense_account_id = clearing
+            _logger.info(
+                "Set company %s default suspense account to %s",
+                company.name,
+                clearing.code,
+            )
+
+        # Active bank journals, excluding QBO "(deleted)"-named carryovers.
+        journals = ctx.env["account.journal"].search(
+            [
+                ("company_id", "=", company.id),
+                ("type", "=", "bank"),
+                ("name", "not ilike", "(deleted)"),
+            ]
+        )
+        if journals:
+            journals.write({"suspense_account_id": clearing.id})
+            _logger.info(
+                "Set suspense_account_id to %s on %d bank journal(s)",
+                clearing.code,
+                len(journals),
+            )
+
+        # Their inbound/outbound payment method lines: overwrite all
+        # (including any bad 343 references) so payments route through Clearing.
+        lines = ctx.env["account.payment.method.line"].search(
+            [
+                ("journal_id", "in", journals.ids),
+                ("payment_type", "in", ("inbound", "outbound")),
+            ]
+        )
+        if lines:
+            lines.write({"payment_account_id": clearing.id})
+            _logger.info(
+                "Set payment_account_id to %s on %d in/out payment method "
+                "line(s) across %d journal(s)",
+                clearing.code,
+                len(lines),
+                len(lines.mapped("journal_id")),
+            )
 
     @staticmethod
     def _archive_deleted_journals(ctx: ETLContext) -> None:

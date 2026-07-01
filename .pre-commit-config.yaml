@@ -1,0 +1,7 @@
+# Bemade shared hooks — enforce a manifest version bump on every module change.
+# See https://github.com/bemade/pre-commit-hooks and the odoo-project-guide §7.
+repos:
+  - repo: https://github.com/bemade/pre-commit-hooks
+    rev: v0.1.1
+    hooks:
+      - id: check-manifest-version-bump

@@ -33,7 +33,8 @@ Acceptance criteria:
    ``itemname``/``frgnname`` filled per the existing convention, the returned
    vals still set ``name`` and ``default_code`` per existing logic AND set
    ``description_ecommerce`` to the extended description (no regression in
-   ``name``/``default_code`` selection).
+   ``name``/``default_code`` selection). Per task 3923, ``name`` is driven by
+   ``itemname`` (frgnname no longer participates in ``name``).
 """
 
 from unittest.mock import MagicMock
@@ -173,11 +174,12 @@ class TestProductDescriptionEcommerce(TransactionCase):
         self.assertEqual(len(result), 1)
         vals = result[0]
 
-        # name must come from frgnname (both filled → standard SAP B1 convention)
+        # name must come from itemname (frgnname goes to description_sale instead;
+        # see task 3923).
         self.assertEqual(
             vals["name"],
-            "Customer Facing Name",
-            "name must be frgnname when both itemname and frgnname are filled.",
+            "ItemName Internal",
+            "name must be itemname; frgnname no longer participates in name.",
         )
         # default_code must come from suppcatnum (per task 3626 contract)
         self.assertEqual(

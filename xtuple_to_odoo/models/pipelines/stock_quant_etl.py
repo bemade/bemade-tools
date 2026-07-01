@@ -32,6 +32,12 @@ SELECT_ITEMSITE_STOCK = """
     depends_on=[
         "xtuple.product.importer",
         "xtuple.product.cost.importer",
+        # Open-PO receipts (xtuple.purchase.order.line.importer) write incoming
+        # stock moves, so they MUST run BEFORE this inventory adjustment, which
+        # sets the final on-hand levels from xTuple itemsite. If receipts ran
+        # after, they would stack on top of the adjusted quantities and inflate
+        # stock (task #3814).
+        "xtuple.purchase.order.line.importer",
     ],
 )
 class XtupleStockQuantImporter(models.AbstractModel):
