@@ -167,6 +167,8 @@ class PurchaseOrderHeaderImporter(models.AbstractModel):
             _logger.info("No headers to transform.")
             return []
 
+        has_carrier_id = "carrier_id" in ctx.env["purchase.order"]._fields
+
         order_vals = []
         for header in headers:
             # Get partner ID (contact or company)
@@ -196,8 +198,12 @@ class PurchaseOrderHeaderImporter(models.AbstractModel):
                 "date_order": order_date,
                 "date_planned": fix_tz(header["docduedate"]),
                 "note": f"SAP Order {header['numatcard']}",
-                "carrier_id": cache["carriers_map"].get(header["trnspcode"]),
             }
+            if has_carrier_id:
+                # carrier_id is contributed by delivery_carrier_partner_account,
+                # which may not be installed on the target DB even though it is
+                # declared in this module's manifest depends.
+                vals["carrier_id"] = cache["carriers_map"].get(header["trnspcode"])
 
             order_vals.append(vals)
 
