@@ -11,6 +11,7 @@ from .pipelines import (
     test_product_search,
     test_property_field_write_failure_3623_3624,
     test_product_product_etl_description_ecommerce,
+    test_purchase_order_etl,
     test_res_partner_address_etl,
     test_res_partner_payment_term,
     test_res_partner_pricelist,
