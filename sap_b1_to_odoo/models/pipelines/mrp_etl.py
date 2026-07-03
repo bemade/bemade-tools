@@ -103,7 +103,7 @@ _logger = logging.getLogger(__name__)
 SAP_STATUS_MAP = {
     "P": "draft",  # Planned -> Draft
     "R": "confirmed",  # Released -> Confirmed
-    "L": "progress",  # Launched/Released -> In Progress
+    "L": "confirmed",  # Launched/Released -> Confirmed
     "C": "done",  # Closed -> Done
 }
 
@@ -643,25 +643,6 @@ class MrpProductionPostprocessImporter(models.AbstractModel):
             if u["status"] == "C"
             or (u["qty_produced"] or 0) >= (u["qty_planned"] or 0) > 0
         ]
-        # Mark as progress if status is 'L' and not already done
-        done_id_set = set(done_ids)
-        progress_ids = [
-            u["id"]
-            for u in updates
-            if u["status"] == "L" and u["id"] not in done_id_set
-        ]
-
-        if progress_ids:
-            cr.execute(
-                "UPDATE mrp_production SET state = 'progress' WHERE id = ANY(%s)",
-                [progress_ids],
-            )
-            cr.execute(
-                "UPDATE stock_move SET state = 'done', quantity = product_uom_qty WHERE raw_material_production_id = ANY(%s)",
-                [progress_ids],
-            )
-            _logger.info(f"Set {len(progress_ids)} productions to 'progress'")
-
         if done_ids:
             cr.execute(
                 "UPDATE mrp_production SET state = 'done', date_finished = %s, is_locked = true WHERE id = ANY(%s)",
