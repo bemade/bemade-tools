@@ -471,11 +471,17 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
         )
         existing_names = {row[0] for row in ctx.env.cr.fetchall()}
 
-        # Get customer ID to partner ID mapping for vendor/customer linking
+        # Get CRM account ID to partner ID mapping for vendor/customer linking.
+        # xTuple vendor-IDs and customer-IDs are independent ID spaces, so a
+        # vendor must NOT be matched to an existing partner by numeric id
+        # equality (vend_id == cust_id is a coincidence, not a relationship).
+        # crmacct_id is the single shared PK xTuple uses when the same
+        # real-world account is both a customer and a vendor.
         ctx.env.cr.execute(
-            "SELECT xtuple_cust_id, id FROM res_partner WHERE xtuple_cust_id IS NOT NULL"
+            "SELECT xtuple_crmacct_id, id FROM res_partner "
+            "WHERE xtuple_crmacct_id IS NOT NULL"
         )
-        cust_id_to_partner = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
+        crmacct_to_partner = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
 
         select_clause = f"""
         SELECT
@@ -496,11 +502,14 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
         ctx.cr.execute(sql)
         vendors = ctx.cr.dictfetchall()
 
-        # Embed existing customer partner ID in each vendor record
+        # Embed existing customer partner ID in each vendor record, matched by
+        # shared CRM account (not by vend_id/cust_id numeric coincidence).
         for vendor in vendors:
-            vend_id = vendor.get("vend_id")
-            if vend_id in cust_id_to_partner:
-                vendor["_existing_customer_partner_id"] = cust_id_to_partner[vend_id]
+            vend_crmacct_id = vendor.get("vend_crmacct_id")
+            if vend_crmacct_id and vend_crmacct_id in crmacct_to_partner:
+                vendor["_existing_customer_partner_id"] = crmacct_to_partner[
+                    vend_crmacct_id
+                ]
 
         return vendors, existing_names, len(existing_vend_ids)
 
