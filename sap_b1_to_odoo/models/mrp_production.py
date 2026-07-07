@@ -2,7 +2,10 @@ from odoo import fields, models
 
 
 class MrpProduction(models.Model):
-    _inherit = "mrp.production"
+    _name = "mrp.production"
+    _inherit = ["mrp.production", "sap.search.mixin"]
+
+    _SAP_SEARCH_FIELDS = ["sap_docnum"]
 
     sap_docentry = fields.Integer("SAP DocEntry", index=True, copy=False)
     sap_docnum = fields.Char("SAP DocNum", index=True, copy=False)

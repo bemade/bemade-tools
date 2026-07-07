@@ -2,7 +2,10 @@ from odoo import api, fields, models
 
 
 class SalesOrder(models.Model):
-    _inherit = "sale.order"
+    _name = "sale.order"
+    _inherit = ["sale.order", "sap.search.mixin"]
+
+    _SAP_SEARCH_FIELDS = ["sap_docnum"]
 
     sap_docentry = fields.Integer(index="btree", copy=False)
     sap_docnum = fields.Integer(index="btree", copy=False)

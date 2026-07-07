@@ -2,7 +2,10 @@ from odoo import fields, models
 
 
 class ResPartner(models.Model):
-    _inherit = "res.partner"
+    _name = "res.partner"
+    _inherit = ["res.partner", "sap.search.mixin"]
+
+    _SAP_SEARCH_FIELDS = ["sap_card_code"]
 
     sap_card_code = fields.Char(index="btree", copy=False)
     sap_parent_card = fields.Char(index="btree", copy=False)
