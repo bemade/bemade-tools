@@ -2,7 +2,10 @@ from odoo import models, fields
 
 
 class AccountMove(models.Model):
-    _inherit = "account.move"
+    _name = "account.move"
+    _inherit = ["account.move", "sap.search.mixin"]
+
+    _SAP_SEARCH_FIELDS = ["sap_docnum"]
 
     sap_docentry = fields.Integer(
         index="btree", string="SAP Document Entry", copy=False
