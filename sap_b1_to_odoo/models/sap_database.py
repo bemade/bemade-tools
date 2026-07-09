@@ -317,7 +317,6 @@ class SapDatabase(models.Model):
         return self._execute_pipelines(
             [
                 "stock.quant.importer",
-                "stock.valuation.layer.importer",
             ]
         )
 
@@ -465,7 +464,6 @@ class SapDatabase(models.Model):
 
         # Delete in reverse dependency order
         models_to_delete = [
-            "stock.valuation.layer",
             "stock.quant",
             "account.move",
             "sale.order",
@@ -502,6 +500,5 @@ class SapDatabase(models.Model):
             "account.move": "sap_doc_entry",
             "mrp.production": "sap_doc_entry",
             "stock.quant": None,  # No direct SAP field
-            "stock.valuation.layer": None,  # No direct SAP field
         }
         return field_mapping.get(model_name)
