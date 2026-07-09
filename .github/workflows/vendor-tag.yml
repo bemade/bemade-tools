@@ -1,0 +1,29 @@
+name: vendor-tag
+
+# Producer auto-tag for per-addon vendoring: on a push to a mainline branch, tag
+# each changed addon <addon>/<version> from its manifest. Logic lives in the
+# reusable bemade/vendor-autotag-action (a workflow only fires on the branch it
+# lives on, so this file must exist on each mainline branch to tag there).
+
+on:
+  push:
+    branches:
+      - "17.0"
+      - "18.0"
+      - "19.0"
+
+permissions:
+  contents: write  # create + push tags
+
+concurrency:
+  group: vendor-tag-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history + tags so existing tags are seen
+      - uses: bemade/vendor-autotag-action@v1
