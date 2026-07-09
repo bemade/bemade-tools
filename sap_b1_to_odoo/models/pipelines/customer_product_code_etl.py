@@ -63,7 +63,6 @@ class CustomerProductCodeImporter(models.AbstractModel):
             "sap_codes": sap_codes,
             "products_map": products_map,
             "partners_map": partners_map,
-            "company_id": ctx.env.company.id,
         }
 
     @ETL.transform()
@@ -81,7 +80,6 @@ class CustomerProductCodeImporter(models.AbstractModel):
         sap_codes = data.get("sap_codes", [])
         products_map = data.get("products_map", {})
         partners_map = data.get("partners_map", {})
-        company_id = data.get("company_id")
 
         code_vals = []
         skipped = 0
@@ -96,7 +94,6 @@ class CustomerProductCodeImporter(models.AbstractModel):
             vals = {
                 "product_id": product_id,
                 "partner_id": partner_id,
-                "company_id": company_id,
                 "product_code": sap_code["substitute"],
             }
             code_vals.append(vals)

@@ -13,6 +13,7 @@
                 <field name="database_name"/>
                 <field name="database_schema"/>
                 <field name="filestore_path"/>
+                <field name="company_id" groups="base.group_multi_company"/>
                 <button type="object" name="action_import_all" string="Import Records"
                         class="btn btn-primary"/>
                 <button type="object" name="action_delete_all"

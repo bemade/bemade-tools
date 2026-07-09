@@ -121,7 +121,6 @@ class ProductPricelistItemImporter(models.AbstractModel):
             "currencies_map": currencies_map,
             "agreement_partners_dict": agreement_partners_dict,
             "customer_listnum_map": customer_listnum_map,
-            "company_id": ctx.env.company.id,
         }
 
     @ETL.transform()
@@ -147,7 +146,6 @@ class ProductPricelistItemImporter(models.AbstractModel):
         partner_type_map = data["partner_type_map"]
         partner_pricelist_map = data["partner_pricelist_map"]
         currencies_map = data["currencies_map"]
-        company_id = data["company_id"]
 
         # Transform basic pricelists (OPLN)
         # Separate into base pricelists (self-referencing) and derived
@@ -161,7 +159,6 @@ class ProductPricelistItemImporter(models.AbstractModel):
             vals = {
                 "sap_listnum": listnum,
                 "name": pricelist["listname"],
-                "company_id": company_id,
             }
             if base_num == listnum:
                 # Self-referencing: standalone base pricelist
@@ -208,7 +205,6 @@ class ProductPricelistItemImporter(models.AbstractModel):
                         "product_tmpl_id": product_tmpl_id,
                         "compute_price": "fixed",
                         "fixed_price": line["unitprice"],
-                        "company_id": company_id,
                         "date_start": start,
                         "date_end": end,
                     }
@@ -239,7 +235,6 @@ class ProductPricelistItemImporter(models.AbstractModel):
                     "active": active,
                     "currency_id": currency_id,
                     "item_ids": [Command.create(val) for val in item_vals],
-                    "company_id": company_id,
                     "_partner_id": partner_id,  # Store for later use
                     "_is_active": active,
                 }
@@ -639,7 +634,6 @@ class ProductPricelistInitImporter(models.AbstractModel):
                     {
                         "name": pricelist_name,
                         "currency_id": currency.id,
-                        "company_id": company.id,
                     }
                 )
 

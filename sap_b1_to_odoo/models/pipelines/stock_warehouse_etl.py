@@ -81,7 +81,6 @@ class StockWarehouseImporter(models.AbstractModel):
         return {
             "warehouses": new_warehouses,
             "warehouses_to_update": warehouses_to_update,
-            "company_id": company_id,
         }
 
     @ETL.transform()
@@ -97,7 +96,6 @@ class StockWarehouseImporter(models.AbstractModel):
         """
         data = extracted.get("extract_warehouses") or {}
         sap_warehouses = data.get("warehouses", [])
-        company_id = data.get("company_id")
 
         warehouse_vals = []
         for sap_wh in sap_warehouses:
@@ -110,7 +108,6 @@ class StockWarehouseImporter(models.AbstractModel):
                 "name": name,
                 "code": odoo_code,
                 "sap_whs_code": sap_code,
-                "company_id": company_id,
             }
             warehouse_vals.append(vals)
 

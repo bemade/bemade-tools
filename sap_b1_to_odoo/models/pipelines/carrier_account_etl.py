@@ -166,7 +166,6 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
                     "default_code": "DELIVERY",
                     "sale_ok": True,
                     "purchase_ok": True,
-                    "company_id": ctx.env.company.id,
                 }
             )
 
@@ -176,7 +175,6 @@ class DeliveryCarrierAccountImporter(models.AbstractModel):
             vals = {
                 "name": name,
                 "active": True,
-                "company_id": ctx.env.company.id,
                 "sap_transporter_ids": [
                     Command.create({"sap_trnspcode": trnspcode})
                     for trnspcode in trnspcodes

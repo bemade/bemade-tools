@@ -216,9 +216,6 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         currencies_dict = {curr.name: curr.id for curr in currencies}
         company_currency_id = ctx.env.company.currency_id.id
 
-        # Get company ID
-        company_id = ctx.env.company.id
-
         # Build pricelist lookup: SAP listnum → Odoo pricelist ID (for customer create)
         pricelists_by_listnum = {}
         try:
@@ -275,7 +272,6 @@ class ResPartnerCompanyImporter(models.AbstractModel):
             "terms_dict": terms_dict,
             "currencies_dict": currencies_dict,
             "company_currency_id": company_currency_id,
-            "company_id": company_id,
             "accounts_dict": accounts_dict,
             "pricelists_by_listnum": pricelists_by_listnum,
         }
@@ -304,7 +300,6 @@ class ResPartnerCompanyImporter(models.AbstractModel):
         states_dict = cache["states_dict"]
         users_dict = cache["users_dict"]
         terms_dict = cache["terms_dict"]
-        company_id = cache["company_id"]
         pricelists_by_listnum = cache.get("pricelists_by_listnum", {})
 
         partner_vals = []
@@ -385,7 +380,6 @@ class ResPartnerCompanyImporter(models.AbstractModel):
                 "phone": sap_partner["phone1"] or sap_partner["phone2"],
                 "email": email,
                 "is_company": True,
-                "company_id": company_id,
                 "comment": sap_partner["notes"],
                 "user_id": user_id,
                 "property_purchase_currency_id": currency_id,
@@ -748,7 +742,6 @@ class ResPartnerContactImporter(models.AbstractModel):
                     "phone": phone,
                     "is_company": False,
                     "type": "contact",
-                    "company_id": ctx.env.company.id,
                 }
             )
 

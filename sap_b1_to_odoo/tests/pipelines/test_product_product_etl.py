@@ -118,6 +118,16 @@ class TestProductProductEtl(TransactionCase):
         vals = self._transform([_make_sap_row(frgnname="Widget FR", suppcatnum="SUP-001")])
         self.assertNotEqual(vals[0]["default_code"], "Widget FR")
 
+    def test_company_id_not_written(self):
+        """company_id must NOT be emitted.
+
+        product.template/product.product leave company_id blank in native Odoo
+        (products are shared across companies). The importer must not pin them to
+        a company; the acting company is set on the env, not hand-written here.
+        """
+        vals = self._transform([_make_sap_row()])
+        self.assertNotIn("company_id", vals[0])
+
     def test_missing_suppcatnum_default_code_blank(self):
         """None suppcatnum → default_code is False, no exception raised."""
         vals = self._transform([_make_sap_row(suppcatnum=None)])

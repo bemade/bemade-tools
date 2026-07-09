@@ -31,10 +31,44 @@ class SapDatabase(models.Model):
     database_port = fields.Integer(required=True)
     database_schema = fields.Char(required=True)
     filestore_path = fields.Char()
+    company_id = fields.Many2one(
+        "res.company",
+        string="Target Company",
+        default=lambda self: self.env.ref(
+            "base.main_company", raise_if_not_found=False
+        )
+        or self.env.company,
+        help="Company that all imported records are created under. The import "
+        "pins this company on the execution environment so that models with a "
+        "company default (sale.order, account.move, etc.) resolve to it, "
+        "regardless of the company of the user running the import. Models that "
+        "Odoo leaves company-agnostic (res.partner, product.template) are left "
+        "blank, matching native behaviour. Defaults to the main company.\n\n"
+        "Note: high-volume pipelines that dispatch to HTTP workers run under "
+        "the import user's own company; keep this field aligned with that "
+        "user's company (both are the main company by default).",
+    )
 
     ##################################################################
     # Constraints and Computed Fields
     ##################################################################
+
+    def _acting_company(self):
+        """Company to pin on the execution env for the whole import.
+
+        Prefer the explicitly configured target company; fall back to the main
+        company, then to the ambient ``env.company``. Resolving this here (rather
+        than relying on the running user's ``env.company``) keeps the acting
+        company deterministic across invocation contexts (UI, ``odoo-bin shell``,
+        cron/hook), which is what the ``company_id`` defaults on transactional
+        models read from.
+        """
+        self.ensure_one()
+        return (
+            self.company_id
+            or self.env.ref("base.main_company", raise_if_not_found=False)
+            or self.env.company
+        )
 
     @api.constrains("filestore_path")
     def _constrain_filestore_path(self):
@@ -141,26 +175,28 @@ class SapDatabase(models.Model):
 
     def _execute_pipeline(self, pipeline_name: str) -> dict:
         """Execute a single ETL pipeline by name."""
+        env = self.with_company(self._acting_company()).env
         with self.get_cursor() as cr:
             pipeline = ETL.get_pipeline(pipeline_name)
             if not pipeline:
                 raise UserError(_(f"{pipeline_name} ETL pipeline not found"))
 
-            importer = self.env[pipeline_name].with_company(self.env.company)
+            importer = env[pipeline_name]
             ctx = ETLContext(
-                cr=cr, env=self.env, source_config=self._get_source_config()
+                cr=cr, env=env, source_config=self._get_source_config()
             )
             executor = ETLExecutor(pipeline, ctx, importer)
             executor.execute()
-            self.env.cr.commit()
+            env.cr.commit()
 
         return self._success_notification()
 
     def _execute_pipelines(self, pipeline_names: list) -> dict:
         """Execute multiple ETL pipelines using the orchestrator."""
+        env = self.with_company(self._acting_company()).env
         with self.get_cursor() as cr:
             orchestrator = PipelineOrchestrator(
-                self.env, source_config=self._get_source_config()
+                env, source_config=self._get_source_config()
             )
             orchestrator.execute_pipelines(cr, pipeline_names)
         return self._success_notification()
@@ -171,11 +207,12 @@ class SapDatabase(models.Model):
         if not pipeline:
             raise UserError(_("product.pricelist.importer ETL pipeline not found"))
 
-        importer = self.env["product.pricelist.importer"].with_company(self.env.company)
-        ctx = ETLContext(cr=None, env=self.env)
+        env = self.with_company(self._acting_company()).env
+        importer = env["product.pricelist.importer"]
+        ctx = ETLContext(cr=None, env=env)
         executor = ETLExecutor(pipeline, ctx, importer)
         executor.execute()
-        self.env.cr.commit()
+        env.cr.commit()
 
         return self._success_notification()
 
@@ -396,9 +433,10 @@ class SapDatabase(models.Model):
         self.ensure_one()
         _logger.info("Beginning SAP record import using ETL framework.")
 
+        env = self.with_company(self._acting_company()).env
         with self.get_cursor() as cr:
             orchestrator = PipelineOrchestrator(
-                self.env, source_config=self._get_source_config()
+                env, source_config=self._get_source_config()
             )
             try:
                 orchestrator.execute_all(cr)

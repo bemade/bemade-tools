@@ -80,7 +80,6 @@ class SaleQuotationHeaderImporter(models.AbstractModel):
                 "terms_map": {},
                 "pricelists_map": {},
                 "carriers_map": {},
-                "company_id": ctx.env.company.id,
             })
 
         # Pre-compute lookups (same as sale orders)
@@ -177,7 +176,6 @@ class SaleQuotationHeaderImporter(models.AbstractModel):
             "terms_map": terms_map,
             "pricelists_map": pricelists_map,
             "carriers_map": carriers_map,
-            "company_id": ctx.env.company.id,
         })
 
     @ETL.transform()

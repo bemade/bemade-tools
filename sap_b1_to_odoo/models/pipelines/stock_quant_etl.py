@@ -105,7 +105,6 @@ class StockQuantImporter(models.AbstractModel):
             "product_map": product_map,
             "warehouse_location_map": warehouse_location_map,
             "sww_location_map": sww_location_map,
-            "company_id": ctx.env.company.id,
         }
 
     @ETL.transform()
@@ -124,7 +123,6 @@ class StockQuantImporter(models.AbstractModel):
         product_map = data.get("product_map", {})
         warehouse_location_map = data.get("warehouse_location_map", {})
         sww_location_map = data.get("sww_location_map", {})
-        company_id = data.get("company_id")
 
         quant_vals = []
         transform_skipped = []
@@ -160,7 +158,6 @@ class StockQuantImporter(models.AbstractModel):
                 "location_id": location_id,
                 "quantity": sap_quant["onhand"],
                 "reserved_quantity": sap_quant["iscommited"] or 0,
-                "company_id": company_id,
             }
             quant_vals.append(vals)
 

@@ -229,7 +229,6 @@ class AccountJournalSetup(models.AbstractModel):
                 "name": "Customer Invoices",
                 "code": "INV",
                 "type": "sale",
-                "company_id": ctx.env.company.id,
             }
             # For sale journals, default_account_id is the default income account
             if income_account:
@@ -244,7 +243,6 @@ class AccountJournalSetup(models.AbstractModel):
                 "name": "Vendor Bills",
                 "code": "BILL",
                 "type": "purchase",
-                "company_id": ctx.env.company.id,
             }
             # For purchase journals, default_account_id is the default expense account
             if expense_account:
@@ -258,7 +256,6 @@ class AccountJournalSetup(models.AbstractModel):
                 "name": "Miscellaneous Operations",
                 "code": "MISC",
                 "type": "general",
-                "company_id": ctx.env.company.id,
             }
             journal_vals.append(vals)
             _logger.info("Will create General journal (MISC)")
@@ -269,7 +266,6 @@ class AccountJournalSetup(models.AbstractModel):
                 "name": "SAP Payment Reconciliation",
                 "code": "SAPRC",
                 "type": "general",
-                "company_id": ctx.env.company.id,
             }
             journal_vals.append(vals)
             _logger.info("Will create SAP Payment Reconciliation journal (SAPRC)")
@@ -280,7 +276,6 @@ class AccountJournalSetup(models.AbstractModel):
                 "name": "Stock Journal",
                 "code": "STJ",
                 "type": "general",
-                "company_id": ctx.env.company.id,
             }
             journal_vals.append(vals)
             _logger.info("Will create Stock journal (STJ)")
@@ -295,7 +290,6 @@ class AccountJournalSetup(models.AbstractModel):
                 "name": cash_account.name,
                 "code": journal_code,
                 "type": "bank",
-                "company_id": ctx.env.company.id,
                 "default_account_id": cash_account.id,
             }
             journal_vals.append(vals)

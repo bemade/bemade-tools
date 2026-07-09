@@ -76,7 +76,6 @@ class MrpBomImporter(models.AbstractModel):
             product.sap_item_code: product.product_tmpl_id.id
             for product in odoo_products
         }
-        company_id = ctx.env.company.id
 
         # Get generic work center for operations
         workcenter = ctx.env["mrp.workcenter"].search([("code", "=", "PROD")], limit=1)
@@ -89,7 +88,6 @@ class MrpBomImporter(models.AbstractModel):
             context={
                 "products_map": products_map,
                 "product_tmpl_map": product_tmpl_map,
-                "company_id": company_id,
                 "bom_lines": sap_bom_lines,
                 "labor_items": labor_items,
                 "workcenter_id": workcenter_id,
@@ -112,7 +110,6 @@ class MrpBomImporter(models.AbstractModel):
         cache = data.context
 
         product_tmpl_map = cache["product_tmpl_map"]
-        company_id = cache["company_id"]
 
         bom_vals = []
         for bom in sap_boms:
@@ -128,7 +125,6 @@ class MrpBomImporter(models.AbstractModel):
                     "type": "phantom" if bom["treetype"] == "A" else "normal",
                     "sap_code": bom["code"],
                     "sap_atcentry": bom.get("atcentry") or 0,
-                    "company_id": company_id,
                 }
             )
 
@@ -157,7 +153,6 @@ class MrpBomImporter(models.AbstractModel):
 
         # Create BOM lines
         products_map = cache["products_map"]
-        company_id = cache["company_id"]
         sap_bom_lines = cache["bom_lines"]
 
         boms_by_code = {bom.sap_code: bom.id for bom in boms}
@@ -195,7 +190,6 @@ class MrpBomImporter(models.AbstractModel):
                         "bom_id": boms_by_code[line["father"]],
                         "time_cycle_manual": quantity * 60,  # hours to minutes
                         "sequence": line["childnum"],
-                        "company_id": company_id,
                     }
                 )
                 continue
@@ -212,7 +206,6 @@ class MrpBomImporter(models.AbstractModel):
                 "product_qty": quantity,
                 "sequence": line["childnum"],
                 "bom_id": boms_by_code[line["father"]],
-                "company_id": company_id,
             }
             # Add SAP comment if present
             if line.get("comment"):

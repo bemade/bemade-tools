@@ -164,7 +164,7 @@ class AccountTaxImporter(models.AbstractModel):
         )
         if not tax_group:
             tax_group = ctx.env["account.tax.group"].create(
-                {"name": group_name, "company_id": ctx.env.company.id}
+                {"name": group_name}
             )
 
         effective_rate = 0.0 if is_exempt else rate
@@ -174,7 +174,6 @@ class AccountTaxImporter(models.AbstractModel):
             "amount": effective_rate,
             "amount_type": "percent",
             "type_tax_use": type_tax_use,
-            "company_id": ctx.env.company.id,
             "tax_group_id": tax_group.id,
             "active": not is_locked,
             "sap_tax_code": code,

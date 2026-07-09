@@ -370,7 +370,6 @@ class MrpConsumptionETLImporter(models.AbstractModel):
             p.sap_docentry: {
                 "id": p.id,
                 "location_src_id": p.location_src_id.id if p.location_src_id else False,
-                "company_id": p.company_id.id,
             }
             for p in productions
         }
@@ -424,7 +423,6 @@ class MrpConsumptionETLImporter(models.AbstractModel):
                 "product_uom_qty": issued_qty,
                 "location_id": production["location_src_id"],
                 "location_dest_id": prod_loc_id,
-                "company_id": production["company_id"],
                 "sap_docentry": line["docentry"],
                 "sap_linenum": line["linenum"],
             }

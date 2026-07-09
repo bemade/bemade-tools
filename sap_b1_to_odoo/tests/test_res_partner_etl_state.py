@@ -373,6 +373,18 @@ class TestResPartnerCompanyImporterState(TransactionCase):
             "Company UY/CO must resolve to Colonia, not Colorado",
         )
 
+    def test_company_id_not_written(self):
+        """company_id must NOT be emitted on company partners.
+
+        res.partner.company_id has no default in Odoo — partners are shared
+        across companies. The importer must leave it blank; hand-writing it is
+        what pinned every contact to the main company and made EbizCharge choke.
+        The acting company is set on the execution env, not on the partner.
+        """
+        row = _make_company_ocrd_row(country="US", state1="CO")
+        vals_list = self._run_transform([row])
+        self.assertNotIn("company_id", vals_list[0])
+
 
 # ---------------------------------------------------------------------------
 # TestResPartnerAddressImporterState — integration via transform_addresses

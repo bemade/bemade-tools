@@ -85,7 +85,6 @@ class ProductSupplierinfoImporter(models.AbstractModel):
                 "product_tmpl_map": product_tmpl_map,
                 "partner_map": partner_map,
                 "currency_map": currency_map,
-                "company_id": ctx.env.company.id,
                 "company_currency_id": ctx.env.company.currency_id.id,
                 "existing_map": existing_map,
             },
@@ -108,7 +107,6 @@ class ProductSupplierinfoImporter(models.AbstractModel):
         product_tmpl_map = cache["product_tmpl_map"]
         partner_map = cache["partner_map"]
         currency_map = cache["currency_map"]
-        company_id = cache["company_id"]
         company_currency_id = cache["company_currency_id"]
         existing_map = cache["existing_map"]
 
@@ -143,7 +141,6 @@ class ProductSupplierinfoImporter(models.AbstractModel):
                 "product_tmpl_id": product_tmpl_id,
                 "price": price,
                 "currency_id": currency_id,
-                "company_id": company_id,
             }
 
             key = (product_tmpl_id, partner_id)

@@ -82,7 +82,6 @@ class PurchaseOrderHeaderImporter(models.AbstractModel):
                 "terms_map": {},
                 "pricelists_map": {},
                 "carriers_map": {},
-                "company_id": ctx.env.company.id,
             })
 
         # Pre-compute lookups
@@ -153,7 +152,6 @@ class PurchaseOrderHeaderImporter(models.AbstractModel):
             "contacts_map": contacts_map,
             "terms_map": terms_map,
             "carriers_map": carriers_map,
-            "company_id": ctx.env.company.id,
         })
 
     @ETL.transform()

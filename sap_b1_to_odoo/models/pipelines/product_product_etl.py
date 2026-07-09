@@ -55,14 +55,10 @@ class ProductImporter(models.AbstractModel):
         )
         categories_map = {cat.sap_itms_grp_cod: cat.id for cat in categories}
 
-        # Get company ID
-        company_id = ctx.env.company.id
-
         return ChunkableData(
             records=sap_products,
             context={
                 "categories_map": categories_map,
-                "company_id": company_id,
             },
         )
 
@@ -84,7 +80,6 @@ class ProductImporter(models.AbstractModel):
         cache = data.context
 
         categories_map = cache["categories_map"]
-        company_id = cache["company_id"]
 
         product_vals = []
         category_miss_codes = []
@@ -127,7 +122,6 @@ class ProductImporter(models.AbstractModel):
                 "active": sap_product["validfor"] == "Y",
                 "type": "consu",
                 "is_storable": True,
-                "company_id": company_id,
             }
 
             if categ_id:
