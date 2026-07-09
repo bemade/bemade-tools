@@ -7,8 +7,6 @@ from . import ir_attachment_etl
 from . import stock_warehouse_etl
 from . import stock_location_etl
 from . import stock_quant_etl
-# Disabled: stock.valuation.layer model removed in Odoo 19, needs rewrite
-# from . import stock_valuation_etl
 from . import mrp_bom_etl
 from . import mrp_etl
 from . import sale_purchase_order_etl_mixin
