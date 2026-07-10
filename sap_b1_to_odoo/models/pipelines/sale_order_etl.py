@@ -773,7 +773,8 @@ class SaleOrderPostProcessor(models.AbstractModel):
 
         _logger.info("Validating pickings with SAP quantities...")
         self._validate_pickings_with_sap_quantities(
-            sap_data.get("sap_line_quantities", [])
+            sap_data.get("sap_line_quantities", []),
+            open_order_docnums=sap_data.get("open_orders", []),
         )
 
         _logger.info("Setting order dates...")
@@ -930,10 +931,17 @@ class SaleOrderPostProcessor(models.AbstractModel):
         self.env.cr.commit()
 
     @api.model
-    def _validate_pickings_with_sap_quantities(self, sap_lines):
-        """Validate stock pickings based on SAP delivered quantities."""
+    def _validate_pickings_with_sap_quantities(self, sap_lines, open_order_docnums=None):
+        """Validate stock pickings based on SAP delivered quantities.
+
+        For OPEN orders (docnums in ``open_order_docnums``) the undelivered
+        remainder is preserved as an open backorder picking so the warehouse can
+        complete it post-cutover (task #3028). CLOSED/historical orders keep the
+        legacy behavior: complete the delivered qty and drop the remainder.
+        """
         if not sap_lines:
             return
+        open_order_docnums = set(open_order_docnums or [])
 
         # Group lines by order
         order_lines = {}
@@ -950,14 +958,65 @@ class SaleOrderPostProcessor(models.AbstractModel):
             ]
         )
 
-        # Process each order's pickings.  Multi-step warehouses (Pick → Pack
-        # → Out) chain pickings: validating one step creates / releases the
-        # next, so we loop until no validatable pickings remain.  Without the
+        def _apply_sap_qty(picking, order_sap_lines):
+            """Set each move's done qty to its SAP-delivered quantity (0 if the
+            line wasn't delivered)."""
+            for move in picking.move_ids:
+                order_line = move.sale_line_id
+                if not order_line:
+                    move.quantity = 0
+                    continue
+                sap_line = next(
+                    (
+                        l
+                        for l in order_sap_lines
+                        if l["linenum"] + 2 == order_line.sap_line_num
+                    ),
+                    None,
+                )
+                move.quantity = sap_line["quantity"] if sap_line else 0
+
+        # Process each order's pickings.
+        #
+        # OPEN orders (task #3028): apply the SAP-delivered qty to the current
+        # delivery picking(s) ONCE and keep the undelivered remainder as an open
+        # backorder the warehouse completes post-cutover. We must NOT re-loop:
+        # the multi-step loop below would re-fetch the just-created backorder and
+        # re-validate it with the same delivered qty, cascading it to done.
+        #
+        # CLOSED / historical orders: multi-step warehouses (Pick → Pack → Out)
+        # chain pickings — validating one step releases the next — so we loop
+        # until no validatable pickings remain, completing everything and
+        # dropping the undelivered remainder (skip_backorder=True). Without the
         # loop, qty_delivered on the sale.order.line stays 0 because only the
-        # final customer-facing OUT picking writes qty_delivered, and OUT
-        # never gets reached on first pass.
+        # final customer-facing OUT picking writes qty_delivered.
         for order in orders:
             order_sap_lines = order_lines[order.sap_docnum]
+
+            if order.sap_docnum in open_order_docnums:
+                pickings = order.picking_ids.filtered(
+                    lambda p: p.state in ("waiting", "confirmed", "assigned")
+                )
+                for picking in pickings:
+                    _apply_sap_qty(picking, order_sap_lines)
+                    if any(move.quantity > 0 for move in picking.move_ids):
+                        # skip_sms bypasses the confirm.stock.sms wizard.
+                        res = picking.with_context(
+                            skip_backorder=False, skip_sms=True,
+                        ).button_validate()
+                        # button_validate returns the backorder-confirmation
+                        # wizard for the undelivered remainder; process it so the
+                        # backorder is created and left open.
+                        if (
+                            isinstance(res, dict)
+                            and res.get("res_model")
+                            == "stock.backorder.confirmation"
+                        ):
+                            self.env["stock.backorder.confirmation"].with_context(
+                                res.get("context", {})
+                            ).create({}).process()
+                continue
+
             for _ in range(10):  # iteration guard against unexpected chains
                 pickings = order.picking_ids.filtered(
                     lambda p: p.state in ("waiting", "confirmed", "assigned")
@@ -966,26 +1025,9 @@ class SaleOrderPostProcessor(models.AbstractModel):
                     break
                 progressed = False
                 for picking in pickings:
-                    for move in picking.move_ids:
-                        order_line = move.sale_line_id
-                        if not order_line:
-                            move.quantity = 0
-                            continue
-                        sap_line = next(
-                            (
-                                l
-                                for l in order_sap_lines
-                                if l["linenum"] + 2 == order_line.sap_line_num
-                            ),
-                            None,
-                        )
-                        if sap_line:
-                            move.quantity = sap_line["quantity"]
+                    _apply_sap_qty(picking, order_sap_lines)
                     if any(move.quantity > 0 for move in picking.move_ids):
                         prior_state = picking.state
-                        # skip_sms bypasses the confirm.stock.sms wizard that
-                        # blocks customer-facing OUT picking validation when
-                        # the partner has SMS delivery notifications enabled.
                         picking.with_context(
                             skip_backorder=True, skip_sms=True,
                         ).button_validate()
