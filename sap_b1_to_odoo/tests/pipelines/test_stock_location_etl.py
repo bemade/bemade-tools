@@ -28,6 +28,12 @@ Acceptance criteria:
 4. (test_quant_falls_back_when_sww_blank) a product with blank/unmapped sww
    falls back to the warehouse lot_stock_id location for its whscode, and is
    NOT dropped (count preserved, warning path covered).
+5. (test_quant_multiwarehouse_sww_splits_by_home_warehouse) an item with a
+   non-blank sww and onhand in ≥2 SAP warehouses places the sww bin ONLY on
+   the row whose whscode matches the item's dfltwh (home warehouse); every
+   other warehouse row routes to its own warehouse lot_stock_id, exactly like
+   blank-sww routing — no (product_id, location_id) collision, no dropped
+   onhand.
 """
 
 from unittest.mock import MagicMock
@@ -190,6 +196,7 @@ class TestStockLocationEtl(TransactionCase):
                 "iscommited": 0,
                 "avgprice": 10.0,
                 "sww": "02",
+                "dfltwh": "WH",
             }
         ]
 
@@ -216,6 +223,7 @@ class TestStockLocationEtl(TransactionCase):
                 "iscommited": 0,
                 "avgprice": 5.0,
                 "sww": "",
+                "dfltwh": "WH",
             }
         ]
         sww_location_map = {}  # no sww locations
@@ -240,6 +248,7 @@ class TestStockLocationEtl(TransactionCase):
                 "iscommited": 0,
                 "avgprice": 2.0,
                 "sww": "99",
+                "dfltwh": "WH",
             }
         ]
         sww_location_map = {}  # sww "99" not present
@@ -253,4 +262,196 @@ class TestStockLocationEtl(TransactionCase):
             quant_vals[0]["location_id"],
             self._lot_stock_id(),
             "Unmapped sww must fall back to the warehouse lot_stock_id.",
+        )
+
+    # ------------------------------------------------------------------
+    # Test 5: multi-warehouse items — sww applies only to the home warehouse
+    # ------------------------------------------------------------------
+
+    def _wh2_lot_stock_id(self):
+        """A second, distinct internal location standing in for a WH2 warehouse's
+        lot_stock_id — no need to create a real stock.warehouse for these tests,
+        transform_stock_quants only ever consults warehouse_location_map."""
+        if not hasattr(self, "_wh2_location"):
+            self._wh2_location = self.env["stock.location"].create({
+                "name": "WH2 Stock",
+                "usage": "internal",
+                "location_id": self.warehouse.view_location_id.id,
+            })
+        return self._wh2_location.id
+
+    def test_quant_multiwarehouse_sww_splits_by_home_warehouse(self):
+        """An item's sww bin applies ONLY to its home-warehouse (dfltwh) row;
+        the other warehouse row routes to its own warehouse lot_stock_id —
+        NOT the sww location. This is the core regression: current (buggy)
+        code places both rows at the sww location, colliding on
+        (product_id, location_id) and silently dropping one row's onhand.
+        """
+        loc_02 = self.env["stock.location"].create({
+            "name": "SWW-02-multi",
+            "usage": "internal",
+            "location_id": self._lot_stock_id(),
+            "sap_sww_code": "02",
+        })
+        sww_location_map = {"02": loc_02.id}
+        warehouse_location_map = {
+            "WH": self._lot_stock_id(),
+            "WH2": self._wh2_lot_stock_id(),
+        }
+        sap_quants = [
+            {
+                "itemcode": "ITEM-MULTI",
+                "whscode": "WH",
+                "onhand": 7.0,
+                "iscommited": 0,
+                "avgprice": 10.0,
+                "sww": "02",
+                "dfltwh": "WH",
+            },
+            {
+                "itemcode": "ITEM-MULTI",
+                "whscode": "WH2",
+                "onhand": 1.0,
+                "iscommited": 0,
+                "avgprice": 10.0,
+                "sww": "02",
+                "dfltwh": "WH",
+            },
+        ]
+
+        quant_vals = self._transform_quants(
+            sap_quants, sww_location_map, warehouse_location_map
+        )
+
+        self.assertEqual(len(quant_vals), 2, "Both warehouse rows must be preserved.")
+        by_whs = {"WH": quant_vals[0], "WH2": quant_vals[1]}
+        self.assertEqual(
+            by_whs["WH"]["location_id"],
+            loc_02.id,
+            "Home-warehouse row must be placed at the sww location.",
+        )
+        self.assertEqual(
+            by_whs["WH2"]["location_id"],
+            self._wh2_lot_stock_id(),
+            "Non-home-warehouse row must route to its own warehouse lot_stock_id, "
+            "not the sww location.",
+        )
+
+    def test_quant_multiwarehouse_no_location_collision(self):
+        """Distinct SAP warehouse rows for the same item must resolve to distinct
+        Odoo locations, and total emitted quantity must equal the sum of onhand —
+        no quant is lost to a (product_id, location_id) collision."""
+        loc_02 = self.env["stock.location"].create({
+            "name": "SWW-02-collision",
+            "usage": "internal",
+            "location_id": self._lot_stock_id(),
+            "sap_sww_code": "02",
+        })
+        sww_location_map = {"02": loc_02.id}
+        warehouse_location_map = {
+            "WH": self._lot_stock_id(),
+            "WH2": self._wh2_lot_stock_id(),
+        }
+        sap_quants = [
+            {
+                "itemcode": "ITEM-COLLISION",
+                "whscode": "WH",
+                "onhand": 7.0,
+                "iscommited": 0,
+                "avgprice": 10.0,
+                "sww": "02",
+                "dfltwh": "WH",
+            },
+            {
+                "itemcode": "ITEM-COLLISION",
+                "whscode": "WH2",
+                "onhand": 1.0,
+                "iscommited": 0,
+                "avgprice": 10.0,
+                "sww": "02",
+                "dfltwh": "WH",
+            },
+        ]
+
+        quant_vals = self._transform_quants(
+            sap_quants, sww_location_map, warehouse_location_map
+        )
+
+        self.assertEqual(len(quant_vals), 2)
+        location_ids = {v["location_id"] for v in quant_vals}
+        self.assertEqual(
+            len(location_ids), 2, "The two rows must resolve to DISTINCT locations."
+        )
+        total_quantity = sum(v["quantity"] for v in quant_vals)
+        self.assertEqual(total_quantity, 8.0, "Total quantity must equal sum of onhand.")
+
+    def test_quant_nonhome_warehouse_sww_ignored(self):
+        """An item with a non-blank sww but onhand ONLY in a non-home warehouse
+        must route to that warehouse's own location, never the sww bin —
+        mirrors blank-sww routing."""
+        loc_02 = self.env["stock.location"].create({
+            "name": "SWW-02-nonhome",
+            "usage": "internal",
+            "location_id": self._lot_stock_id(),
+            "sap_sww_code": "02",
+        })
+        sww_location_map = {"02": loc_02.id}
+        warehouse_location_map = {
+            "WH": self._lot_stock_id(),
+            "WH2": self._wh2_lot_stock_id(),
+        }
+        sap_quants = [
+            {
+                "itemcode": "ITEM-NONHOME",
+                "whscode": "WH2",
+                "onhand": 4.0,
+                "iscommited": 0,
+                "avgprice": 10.0,
+                "sww": "02",
+                "dfltwh": "WH",
+            },
+        ]
+
+        quant_vals = self._transform_quants(
+            sap_quants, sww_location_map, warehouse_location_map
+        )
+
+        self.assertEqual(len(quant_vals), 1)
+        self.assertEqual(
+            quant_vals[0]["location_id"],
+            self._wh2_lot_stock_id(),
+            "Non-home-warehouse onhand must route to its own location, never the "
+            "sww bin.",
+        )
+
+    def test_quant_home_warehouse_single_row_still_sww(self):
+        """Regression guard: an item with a single onhand row in its home
+        warehouse still lands at the sww location (existing single-warehouse
+        behavior preserved)."""
+        loc_02 = self.env["stock.location"].create({
+            "name": "SWW-02-single",
+            "usage": "internal",
+            "location_id": self._lot_stock_id(),
+            "sap_sww_code": "02",
+        })
+        sww_location_map = {"02": loc_02.id}
+        sap_quants = [
+            {
+                "itemcode": "ITEM-SINGLE-HOME",
+                "whscode": "WH",
+                "onhand": 6.0,
+                "iscommited": 0,
+                "avgprice": 10.0,
+                "sww": "02",
+                "dfltwh": "WH",
+            },
+        ]
+
+        quant_vals = self._transform_quants(sap_quants, sww_location_map)
+
+        self.assertEqual(len(quant_vals), 1)
+        self.assertEqual(
+            quant_vals[0]["location_id"],
+            loc_02.id,
+            "Single home-warehouse row must still land at the sww location.",
         )

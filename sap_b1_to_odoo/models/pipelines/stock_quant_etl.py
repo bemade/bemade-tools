@@ -55,10 +55,12 @@ class StockQuantImporter(models.AbstractModel):
         )
         sww_location_map = {loc["sap_sww_code"]: loc["id"] for loc in sww_locations}
 
-        # Query SAP OITW (warehouse item stock), joining OITM to get sww
+        # Query SAP OITW (warehouse item stock), joining OITM to get sww and
+        # dfltwh (the item's home warehouse — used to scope the sww bin to
+        # the home-warehouse row only; see transform_stock_quants).
         sql = """
             SELECT w.whscode, w.itemcode, w.onhand, w.iscommited, w.avgprice,
-                   i.sww
+                   i.sww, i.dfltwh
             FROM oitw w
             INNER JOIN oitm i ON w.itemcode = i.itemcode
             WHERE w.onhand > 0
@@ -130,15 +132,25 @@ class StockQuantImporter(models.AbstractModel):
         for sap_quant in sap_quants:
             product_id = product_map.get(sap_quant["itemcode"])
 
-            # Resolve location: prefer the sww-specific location; fall back to the
-            # warehouse lot_stock_id when sww is blank or has no Odoo location yet.
+            # Resolve location: prefer the sww-specific location, but ONLY for
+            # the row whose whscode is the item's home warehouse (dfltwh) —
+            # an item's sww bin is a single physical bin, so it can only ever
+            # hold the onhand for its home warehouse. Every other warehouse
+            # row for the same item falls back to its own warehouse
+            # lot_stock_id, exactly like blank-sww items, so multi-warehouse
+            # onhand is never collapsed onto one (product_id, location_id).
             sww = (sap_quant.get("sww") or "").strip()
-            if sww and sww in sww_location_map:
+            whscode = (sap_quant.get("whscode") or "").strip()
+            dfltwh = (sap_quant.get("dfltwh") or "").strip()
+            is_home_warehouse_row = whscode == dfltwh
+
+            if sww and is_home_warehouse_row and sww in sww_location_map:
                 location_id = sww_location_map[sww]
             else:
                 location_id = warehouse_location_map.get(sap_quant["whscode"])
-                if sww:
-                    # sww was set but not found in the map — log and fall back
+                if sww and is_home_warehouse_row:
+                    # sww was set on the home-warehouse row but not found in
+                    # the map — log and fall back.
                     sww_fallback_count += 1
                     _logger.debug(
                         "stock_quant transform: sww %r for item %r not in "
