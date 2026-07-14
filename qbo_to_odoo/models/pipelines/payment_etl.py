@@ -166,6 +166,13 @@ class QboPaymentImporter(models.AbstractModel):
         extractor.extra["partner_receivable_map"] = extractor.partner_receivable_map()
         extractor.extra["partner_payable_map"] = extractor.partner_payable_map()
 
+        # Ensure the cached QBO JournalReport exists before the load phase.
+        # load_payments reads it (per chunk) to recover the true bank rate for
+        # foreign payments QBO booked at par (see _build_gl_bank_home). The
+        # cache is idempotent and later reused by the fallback pipeline.
+        connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
+        connection._ensure_journal_cache()
+
         all_payments = new_payments + new_bill_payments
 
         return ChunkableData(
@@ -699,6 +706,58 @@ class QboPaymentImporter(models.AbstractModel):
                     f"{journal.name} (id={journal.id})"
                 )
 
+    @staticmethod
+    def _build_gl_bank_home(ctx: ETLContext) -> Dict[str, Dict[str, float]]:
+        """Return ``{qbo_txn_id: {account_code: home_net}}`` for payments.
+
+        Reads the cached QBO JournalReport (home-currency amounts) for the
+        payment transaction types.  Used to recover the exact bank rate for
+        foreign payments QBO booked at par — see the posting loop.
+        """
+        ctx.env.cr.execute(
+            """
+            SELECT t.qbo_txn_id, l.account_code,
+                   sum(l.debit - l.credit)
+            FROM qbo_journal_cache_transaction t
+            JOIN qbo_journal_cache_line l ON l.transaction_id = t.id
+            WHERE t.txn_type IN (
+                'Payment',
+                'Bill Payment (Cheque)',
+                'Bill Payment (Credit Card)'
+            )
+            GROUP BY t.qbo_txn_id, l.account_code
+            """
+        )
+        result: Dict[str, Dict[str, float]] = {}
+        for txn_id, code, home in ctx.env.cr.fetchall():
+            if not txn_id or not code:
+                continue
+            result.setdefault(txn_id, {})[code] = home
+        return result
+
+    @staticmethod
+    def _gl_bank_rate(payment, gl_bank_home: Dict[str, Dict[str, float]]):
+        """Derive QBO's true bank rate (home per foreign) for *payment*.
+
+        ``rate = |bank home CAD| / |foreign paid|`` from the cached
+        JournalReport bank line on the payment's own journal account.
+        Returns ``None`` when the cache has no usable amount.
+        """
+        txn_id = payment.qbo_bill_payment_id or payment.qbo_payment_id
+        if not txn_id:
+            return None
+        # qbo_bill_payment_id / qbo_payment_id are Integer fields; the cache
+        # keys on the Char qbo_txn_id — match on the string form.
+        txn_id = str(txn_id)
+        bank_account = payment.journal_id.default_account_id
+        bank_code = bank_account.code if bank_account else None
+        if not bank_code:
+            return None
+        bank_home = (gl_bank_home.get(txn_id) or {}).get(bank_code)
+        if not bank_home or not payment.amount:
+            return None
+        return abs(bank_home) / abs(payment.amount)
+
     @ETL.load()
     def load_payments(self, ctx: ETLContext, transformed: Dict) -> None:
         """Create account.payment records and attempt reconciliation."""
@@ -752,6 +811,9 @@ class QboPaymentImporter(models.AbstractModel):
         # into res.currency.rate immediately before posting so that Odoo's
         # line computation picks up the exact rate.
         rate_ensurer = ExchangeRateEnsurer(ctx.env)
+        # GL-truth bank rates, keyed by QBO transaction id, for the par-booking
+        # recovery in the posting loop below.
+        gl_bank_home = self._build_gl_bank_home(ctx)
         by_journal = {}
         for payment, linked_moves, is_customer, fx_info in payments:
             jid = payment.journal_id.id
@@ -767,10 +829,28 @@ class QboPaymentImporter(models.AbstractModel):
                     qbo_id = payment.qbo_payment_id or payment.qbo_bill_payment_id or "?"
                     with ctx.skippable(f"post payment QBO#{qbo_id}"):
                         fx_code, fx_rate = fx_info
-                        if fx_code and fx_rate:
-                            rate_ensurer.set_rate(
-                                fx_code, str(payment.date), fx_rate,
-                            )
+                        if fx_code:
+                            if fx_rate and fx_rate != 1.0:
+                                # QBO gave an explicit conversion rate — trust it.
+                                rate_ensurer.set_rate(
+                                    fx_code, str(payment.date), fx_rate,
+                                )
+                            else:
+                                # QBO booked this foreign payment at par
+                                # (ExchangeRate 1.0/absent). Recover the true
+                                # bank rate from the cached JournalReport:
+                                # rate = |bank home CAD| / |foreign paid|.
+                                # Without this Odoo falls back to the prevailing
+                                # daily rate and fabricates FX (drift on 5900 +
+                                # the USD banks).
+                                gl_rate = self._gl_bank_rate(
+                                    payment, gl_bank_home,
+                                )
+                                if gl_rate:
+                                    rate_ensurer.set_rate(
+                                        fx_code, str(payment.date), gl_rate,
+                                        force=True,
+                                    )
                         payment.action_post()
                         posted += 1
                         if linked_moves:

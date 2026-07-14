@@ -94,6 +94,7 @@ class ExchangeRateEnsurer:
         currency_code: str,
         date: str,
         qbo_rate: float,
+        force: bool = False,
     ) -> None:
         """Upsert a single exchange rate, overwriting any existing value.
 
@@ -104,11 +105,19 @@ class ExchangeRateEnsurer:
             currency_code: ISO currency code (e.g. ``"USD"``).
             date: Transaction date as ``"YYYY-MM-DD"``.
             qbo_rate: QBO convention rate (home per 1 foreign).
+            force: When ``True``, upsert even a unity (``1.0``) rate.  QBO
+                sometimes books a *foreign* payment at par (bank home CAD ==
+                foreign face — an unconverted USD cheque).  Callers that have
+                derived that par rate from the JournalReport pass ``force`` so
+                the payment posts at 1.0 instead of falling back to the
+                prevailing daily rate (which would fabricate FX).
         """
         currency_id = self._currency_map.get(currency_code)
         if not currency_id or currency_id == self._company_currency_id:
             return
-        if not qbo_rate or qbo_rate == 1.0:
+        if not qbo_rate:
+            return
+        if qbo_rate == 1.0 and not force:
             return
 
         odoo_rate = qbo_rate_to_odoo(qbo_rate)
