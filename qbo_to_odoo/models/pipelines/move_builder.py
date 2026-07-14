@@ -789,8 +789,11 @@ class QBOMoveBuilder:
         }
         # Set per-transaction exchange rate so Odoo uses the exact QBO rate
         # for computing CAD amounts (instead of a daily rate from the global
-        # res.currency.rate table).
-        if is_foreign and exchange_rate and exchange_rate != 1.0:
+        # res.currency.rate table). This must also cover foreign invoices QBO
+        # booked at PAR (ExchangeRate 1.0, home == foreign): without pinning
+        # rate 1.0 Odoo falls back to the prevailing daily rate and over/under-
+        # states the CAD revenue + AR, then fabricates FX on reconciliation.
+        if is_foreign and exchange_rate:
             from .exchange_rate_helper import qbo_rate_to_odoo
             vals["invoice_currency_rate"] = qbo_rate_to_odoo(exchange_rate)
             # Stash FX metadata for the load phase to upsert into the global

@@ -433,10 +433,14 @@ def load_and_post_invoice_moves(ctx, move_vals_list: List[Dict]) -> None:
                     idx = move_index.get(move.id)
                     truth = gl_truth.get(idx) if idx is not None else None
                     if truth and truth.get("fx_currency_code"):
+                        # force=True so a QBO par booking (rate 1.0) is pinned
+                        # into res.currency.rate too, instead of being dropped
+                        # and letting reconcile() fall back to the daily rate.
                         rate_ensurer.set_rate(
                             truth["fx_currency_code"],
                             str(move.invoice_date or move.date),
                             truth["fx_qbo_rate"],
+                            force=True,
                         )
                     move.with_context(skip_cogs_generation=True).action_post()
                     posted += 1
