@@ -47,6 +47,12 @@ _ALLOWED_TYPES = frozenset({
     "Tax Payment",
     "Sales Tax Payment",
     "Sales Tax Adjustment",
+    # QBO home-currency-adjustment JEs (foreign Line.Amount == 0, so the
+    # JournalEntry API pipeline can't build them and drops them). They exist
+    # only in the JournalReport with real home-currency amounts (typically
+    # DR 5900 / CR a foreign bank). get_imported_qbo_ids already excludes the
+    # JEs the API pipeline DID import, so this only picks up the dropped ones.
+    "Journal Entry",
 })
 
 
