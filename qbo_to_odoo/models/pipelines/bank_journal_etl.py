@@ -153,7 +153,12 @@ class QboBankJournalProcessor(models.AbstractModel):
 
             _logger.info(f"Created {created} bank journals")
 
-        self._archive_deleted_journals(ctx)
+        # NOTE: archiving "deleted" journals is deferred to the terminal
+        # ``qbo.journal.finalizer`` pipeline (end of this file). This pipeline
+        # runs EARLY (everything depends on journals existing), so archiving
+        # here would prevent later payment/transfer/bill/JE pipelines from
+        # posting into those journals ("cannot post an entry in an archived
+        # journal"), silently leaving ~250 moves in draft.
 
         # Point the company default, the active bank journals, and their
         # in/out payment method lines at the Clearing (1005) suspense account.
@@ -306,3 +311,49 @@ class QboBankJournalProcessor(models.AbstractModel):
             len(to_archive),
             ", ".join(to_archive.mapped("name")),
         )
+
+
+@ETL.pipeline(
+    target_model="account.journal",
+    importer_name="qbo.journal.finalizer",
+    depends_on=[
+        # Every pipeline that posts moves INTO a journal — the "(deleted)"
+        # journals must stay active until all of these have posted, or Odoo
+        # rejects the post ("cannot post an entry in an archived journal") and
+        # ctx.skippable() leaves the move in draft. Mirrors qbo.account.finalizer.
+        "qbo.payment.importer",
+        "qbo.cc.payment.importer",
+        "qbo.transfer.importer",
+        "qbo.bill.importer",
+        "qbo.invoice.importer",
+        "qbo.journal.entry.importer",
+        "qbo.deposit.importer",
+        "qbo.expense.importer",
+        "qbo.sales.receipt.importer",
+        "qbo.refund.receipt.importer",
+        "qbo.credit.memo.importer",
+        "qbo.vendor.credit.importer",
+        "qbo.journal.fallback",
+    ],
+)
+class QboJournalFinalizer(models.AbstractModel):
+    """Archive QBO 'deleted' journals AFTER every move-posting pipeline.
+
+    QBO carries over journals for deactivated-in-QBO accounts (names contain
+    "deleted"). They must be archived, but only once every payment, transfer,
+    bill, invoice and journal entry that posts into them has been posted —
+    archiving earlier (as bank-journal creation used to do) makes those posts
+    fail and leaves the moves in draft, understating AP and stranding the
+    credit-card charge side. Deferring the archival to this terminal finalizer
+    (the same pattern as ``qbo.account.finalizer``) fixes that.
+
+    Load-only: no extract/transform; delegates to the idempotent staticmethod
+    ``qbo.bank.journal.processor._archive_deleted_journals``.
+    """
+
+    _name = "qbo.journal.finalizer"
+    _description = "QBO Journal Finalizer"
+
+    @ETL.load()
+    def archive_deleted_journals(self, ctx: ETLContext, transformed: Dict) -> None:
+        ctx.env["qbo.bank.journal.processor"]._archive_deleted_journals(ctx)
