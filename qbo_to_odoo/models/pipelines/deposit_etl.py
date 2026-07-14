@@ -141,6 +141,35 @@ class QboDepositImporter(models.AbstractModel):
         line_ids = []
         for line in deposit.get("Line", []):
             if "DepositLineDetail" not in line:
+                # A bare LinkedTxn line (no DepositLineDetail) is money already
+                # held in Undeposited Funds by a linked transaction — e.g. a
+                # Sales Tax Payment refund — that this deposit moves to the bank.
+                # Clear it against Undeposited Funds so the holding account nets
+                # to zero, exactly as QBO's own journal does. Without this the
+                # funds stay stranded in Undeposited Funds and the bank line is
+                # understated by the same amount.
+                linked_amt = float(line.get("Amount", 0) or 0)
+                if line.get("LinkedTxn") and linked_amt != 0:
+                    uf_id = builder.undeposited_funds_id
+                    if uf_id:
+                        abs_company = builder.convert_to_company_currency(
+                            abs(linked_amt), exchange_rate, is_foreign
+                        )
+                        uf_line_vals = {
+                            "account_id": uf_id,
+                            "name": "Deposited from Undeposited Funds",
+                            "credit": abs_company if linked_amt > 0 else 0,
+                            "debit": 0 if linked_amt > 0 else abs_company,
+                        }
+                        if is_foreign:
+                            uf_line_vals["currency_id"] = currency_id
+                            uf_line_vals["amount_currency"] = -linked_amt
+                        line_ids.append((0, 0, uf_line_vals))
+                        continue
+                    _logger.warning(
+                        f"Deposit {qbo_id} has a bare LinkedTxn line but no "
+                        f"Undeposited Funds account; skipping"
+                    )
                 _logger.debug(
                     f"Deposit {qbo_id} line has no DepositLineDetail, "
                     f"keys={list(line.keys())}"
