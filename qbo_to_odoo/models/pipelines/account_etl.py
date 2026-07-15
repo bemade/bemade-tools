@@ -211,13 +211,25 @@ class QboAccountImporter(models.AbstractModel):
                 "company_ids": [(4, company.id)],
             }
 
-            # Preserve currency from QBO (e.g. multi-currency AR/AP accounts)
+            # Preserve currency from QBO (e.g. multi-currency AR/AP accounts).
+            # Search including inactive currencies and activate any the QBO
+            # books use: an inactive currency is absent from the importer's
+            # currency map, so its transactions fall back to the company
+            # currency and post at par (rate 1.0) instead of QBO's exchange
+            # rate — fabricating FX. Activating it here (accounts import first)
+            # lets every downstream pipeline resolve and rate it correctly.
             currency_ref = account.get("CurrencyRef", {}).get("value")
             if currency_ref:
-                currency = ctx.env["res.currency"].search(
-                    [("name", "=", currency_ref)], limit=1
-                )
+                currency = ctx.env["res.currency"].with_context(
+                    active_test=False
+                ).search([("name", "=", currency_ref)], limit=1)
                 if currency:
+                    if not currency.active:
+                        currency.active = True
+                        _logger.info(
+                            "Activated currency %s used by QBO account %s",
+                            currency.name, account.get("Name", currency_ref),
+                        )
                     vals["currency_id"] = currency.id
 
             account_vals.append(vals)
