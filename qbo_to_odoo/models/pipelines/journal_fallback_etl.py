@@ -26,6 +26,7 @@ from odoo.addons.etl_framework import ETL, ETLContext, ChunkableData, post_lock
 from .extractor import QBOExtractor
 from .gl_helpers import (
     build_code_maps,
+    build_cogs_completion_transactions,
     get_imported_qbo_ids,
     journal_entry_vals_from_export,
 )
@@ -148,6 +149,26 @@ class QboJournalFallbackImporter(models.AbstractModel):
 
         # Build code maps for account resolution
         maps = build_code_maps(ctx)
+
+        # Complete entity-imported transactions (invoices, sales receipts)
+        # with the perpetual-COGS lines QBO booked but no pipeline recovers:
+        # DR Cost of Goods Sold / CR inventory valuation.  Appended to the
+        # whole-transaction fallback list so the same transform/load builds
+        # balancing JEs from them.
+        cogs_txns = build_cogs_completion_transactions(
+            ctx,
+            cache.id,
+            imported_ids,
+            maps["code_map"],
+            maps["account_type_map"],
+        )
+        if cogs_txns:
+            _logger.info(
+                "COGS completion: recovering dropped COGS/inventory lines "
+                "for %d entity-imported transactions",
+                len(cogs_txns),
+            )
+            transactions = transactions + cogs_txns
 
         # Get the misc journal for generic entries
         extractor.preload_journals("general")

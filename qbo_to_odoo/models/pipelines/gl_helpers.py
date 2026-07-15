@@ -7,6 +7,7 @@ from XLSX export data.
 """
 
 import logging
+from collections import defaultdict
 from io import BytesIO
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -302,3 +303,159 @@ def get_imported_qbo_ids(ctx) -> Set[str]:
         imported.update(str(row[0]) for row in cr.fetchall())
 
     return imported
+
+
+# Odoo account_type for Cost-of-Goods-Sold accounts (see account_etl's
+# QBO account-type mapping: "Cost of Goods Sold" -> "expense_direct_cost").
+_COGS_ACCOUNT_TYPE = "expense_direct_cost"
+
+
+def build_cogs_completion_transactions(
+    ctx,
+    cache_id: int,
+    imported_ids: Set[str],
+    code_map: Dict[str, int],
+    account_type_map: Dict[int, str],
+) -> List[Dict]:
+    """Recover perpetual-COGS lines that entity pipelines structurally drop.
+
+    QBO books perpetual COGS (DR Cost of Goods Sold / CR inventory
+    valuation) directly on inventory-item sales.  The entity pipelines
+    import only the API ``Line`` array (revenue / AR / tax), and the
+    invoice poster deliberately skips Odoo's own COGS generation — which
+    cannot fire anyway on link-less imported invoices (no sale-order or
+    delivery to relieve).  ``journal_fallback`` then excludes any
+    transaction an entity pipeline imported, so those COGS / inventory
+    lines are recovered nowhere and inventory is never relieved.
+
+    For each cached transaction that WAS entity-imported, return the COGS /
+    inventory lines the Odoo move never booked — scoped to a Cost-of-Goods-
+    Sold account or QBO's inventory account, and only when:
+
+    * the scoped missing lines self-balance (a clean COGS pair balances
+      exactly; this drops any unrelated FX/rounding line QBO booked on the
+      revenue side, which would otherwise unbalance the completion), and
+    * at least one scoped line lands on a Cost-of-Goods-Sold account
+      (so a coincidental balancing subset on other accounts is never
+      plugged).
+
+    QBO's inventory account is discovered from its own "Inventory Starting
+    Value" transactions (the account they debit), NOT from Odoo's category
+    valuation config — the migration leaves Odoo's valuation accounts
+    Odoo-correct for the future, but QBO historically relieved a different
+    inventory account, which is where the opening balance actually sits.
+
+    Returns transactions shaped like ``get_transactions_for_import`` so the
+    fallback transform builds balancing JEs from them unchanged.
+    """
+    if not imported_ids:
+        return []
+    cr = ctx.env.cr
+
+    # account_id -> code, from the (company-agnostic) code_map, so the
+    # booked-codes query doesn't assume a particular company key.
+    id_to_code = {aid: code for code, aid in code_map.items()}
+
+    # QBO's inventory account(s): those debited in its own Inventory Starting
+    # Value transactions.  Odoo's category valuation accounts differ and are
+    # not where QBO booked the opening balance or the COGS relief.
+    cr.execute(
+        """
+        SELECT l.account_code
+        FROM qbo_journal_cache_transaction t
+        JOIN qbo_journal_cache_line l ON l.transaction_id = t.id
+        WHERE t.cache_id = %s AND t.txn_type = 'Inventory Starting Value'
+        GROUP BY l.account_code
+        HAVING sum(l.debit) > sum(l.credit)
+        """,
+        (cache_id,),
+    )
+    inventory_codes = {row[0] for row in cr.fetchall() if row[0]}
+
+    def _in_cogs_scope(code: str) -> bool:
+        return (
+            account_type_map.get(code_map.get(code or "")) == _COGS_ACCOUNT_TYPE
+            or (code or "") in inventory_codes
+        )
+
+    # 1. Account codes each entity-imported move actually booked, keyed by
+    #    QBO transaction id (pooled across every move-type id field).
+    booked: Dict[str, set] = defaultdict(set)
+    for field in _QBO_ID_FIELDS:
+        cr.execute(
+            f"""
+            SELECT am.{field}, aml.account_id
+            FROM account_move am
+            JOIN account_move_line aml ON aml.move_id = am.id
+            WHERE am.{field} IS NOT NULL AND am.{field} != 0
+            """
+        )
+        for qbo_id, account_id in cr.fetchall():
+            code = id_to_code.get(account_id)
+            if code:
+                booked[str(qbo_id)].add(code)
+
+    # 2. Cache lines for the entity-imported transactions.
+    cr.execute(
+        """
+        SELECT t.qbo_txn_id, t.txn_type, t.txn_date, t.txn_num, t.txn_name,
+               l.account_code, l.account_name, l.memo, l.name,
+               l.debit, l.credit
+        FROM qbo_journal_cache_transaction t
+        JOIN qbo_journal_cache_line l ON l.transaction_id = t.id
+        WHERE t.cache_id = %s AND t.qbo_txn_id = ANY(%s)
+        ORDER BY t.qbo_txn_id
+        """,
+        (cache_id, list(imported_ids)),
+    )
+    txns: Dict[str, Dict] = {}
+    for (qbo_id, ttype, tdate, tnum, tname,
+         acode, aname, memo, lname, debit, credit) in cr.fetchall():
+        txn = txns.setdefault(qbo_id, {
+            "type": ttype, "date": tdate, "num": tnum,
+            "name": tname, "lines": [],
+        })
+        txn["lines"].append({
+            "account_code": acode, "account_name": aname,
+            "memo": memo, "name": lname,
+            "debit": debit or 0.0, "credit": credit or 0.0,
+        })
+
+    result: List[Dict] = []
+    for qbo_id, txn in txns.items():
+        booked_codes = booked.get(qbo_id, set())
+        missing = [
+            ln for ln in txn["lines"]
+            if (ln["account_code"] or "") not in booked_codes
+            and _in_cogs_scope(ln["account_code"])
+        ]
+        if not missing:
+            continue
+        diff = round(
+            sum(l["debit"] for l in missing)
+            - sum(l["credit"] for l in missing), 2
+        )
+        if abs(diff) > 0.01:
+            continue  # not a clean self-balancing pair — never plug
+        has_cogs = any(
+            account_type_map.get(code_map.get(l["account_code"] or ""))
+            == _COGS_ACCOUNT_TYPE
+            for l in missing
+        )
+        if not has_cogs:
+            continue
+        result.append({
+            "id": qbo_id,
+            "lines": [{
+                "date": str(txn["date"]) if txn["date"] else "",
+                "type": txn["type"] or "",
+                "num": txn["num"] or "",
+                "name": txn["name"] or "",
+                "memo": l["memo"] or "",
+                "account_code": l["account_code"] or "",
+                "account_name": l["account_name"] or "",
+                "debit": l["debit"],
+                "credit": l["credit"],
+            } for l in missing],
+        })
+    return result
