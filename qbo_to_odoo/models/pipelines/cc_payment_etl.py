@@ -62,7 +62,33 @@ class QboCCPaymentImporter(models.AbstractModel):
         extractor.preload("account")
         extractor.preload_journals("general")
 
-        return {"payments": new_payments, "extractor": extractor.export()}
+        # GL-truth amounts from the cached JournalReport. QBO's
+        # CreditCardPayment.Amount can disagree with what actually posted to
+        # the GL (observed: API Amount 3647.97 vs GL 5000.00). The
+        # JournalReport is authoritative for the trial balance, so the load
+        # phase books the GL amount when the two differ.
+        connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
+        connection._ensure_journal_cache()
+        ctx.env.cr.execute(
+            """
+            SELECT t.qbo_txn_id, sum(l.debit)
+            FROM qbo_journal_cache_transaction t
+            JOIN qbo_journal_cache_line l ON l.transaction_id = t.id
+            WHERE t.txn_type = 'Credit Card Payment'
+            GROUP BY t.qbo_txn_id
+            """
+        )
+        gl_amounts = {
+            str(tid): float(amt)
+            for tid, amt in ctx.env.cr.fetchall()
+            if tid
+        }
+
+        return {
+            "payments": new_payments,
+            "extractor": extractor.export(),
+            "gl_amounts": gl_amounts,
+        }
 
     @ETL.transform()
     def transform_cc_payments(
@@ -72,6 +98,7 @@ class QboCCPaymentImporter(models.AbstractModel):
         data = extracted.get("extract_cc_payments", {})
         payments = data.get("payments", [])
         extractor_data = data.get("extractor", {})
+        gl_amounts = data.get("gl_amounts", {})
 
         if not payments:
             return []
@@ -87,7 +114,18 @@ class QboCCPaymentImporter(models.AbstractModel):
 
         for payment in payments:
             qbo_id = int(payment.get("Id", 0))
-            amount = float(payment.get("Amount", 0) or 0)
+            api_amount = float(payment.get("Amount", 0) or 0)
+            # Prefer the GL-truth amount from the cached JournalReport: QBO's
+            # CreditCardPayment.Amount sometimes disagrees with what actually
+            # posted (e.g. API 3647.97 vs GL 5000.00), which understates both
+            # the bank and the credit-card clearing account.
+            gl_amount = gl_amounts.get(str(qbo_id))
+            amount = gl_amount if gl_amount else api_amount
+            if gl_amount is not None and abs(gl_amount - api_amount) > 0.01:
+                _logger.info(
+                    "CC payment %s: booking GL amount %.2f over API Amount %.2f",
+                    qbo_id, gl_amount, api_amount,
+                )
             if amount == 0:
                 skipped += 1
                 continue
