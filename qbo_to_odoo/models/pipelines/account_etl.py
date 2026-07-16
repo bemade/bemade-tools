@@ -563,6 +563,15 @@ class QboAccountFinalizer(models.AbstractModel):
         # Now that all chunks are committed, retry unmatched pairs.
         self._retry_credit_reconciliation(ctx)
 
+        # ── Realized-FX true-up ──
+        # QBO books 100% of a foreign payment's realized FX inside the
+        # payment (clearing AR/AP at the booking rate); Odoo defers it to
+        # reconciliation EXCH entries that under-book on open many-to-many
+        # chains, stranding the remainder on the AR/AP control account.
+        # Book the per-payment shortfall to the exchange account now that
+        # reconciliation is final. Must run AFTER _retry_credit_reconciliation.
+        self._book_payment_fx_trueup(ctx)
+
         inactive_qbo_ids = transformed.get("transform_inactive_accounts", [])
         if not inactive_qbo_ids:
             _logger.info("No inactive QBO accounts to archive")
@@ -711,7 +720,14 @@ class QboAccountFinalizer(models.AbstractModel):
                     )
                     if cap < 0.01:
                         continue
-                    reconcile_at_amount(credit_line, debit_line, cap)
+                    # Heuristic pairing — no driving QBO transaction, so the
+                    # exchange move can't be attributed to a cache txn.  The
+                    # FX true-up reverses RETRY-stamped FX and books QBO's
+                    # version per-txn instead.
+                    reconcile_at_amount(
+                        credit_line, debit_line, cap,
+                        qbo_ref="QBO_EXCH:RETRY",
+                    )
                     reconciled += 1
             _logger.info(
                 "Reconciliation retry pass %d: %d/%d resolved",
@@ -728,3 +744,264 @@ class QboAccountFinalizer(models.AbstractModel):
             )
         else:
             _logger.info("Reconciliation retry: no unmatched pairs found")
+
+    @staticmethod
+    def _book_payment_fx_trueup(ctx: ETLContext):
+        """Recover the realized FX QBO books on payments but Odoo under-books.
+
+        QBO clears a foreign payment's AR/AP at the *invoice booking rate* and
+        posts 100% of the realized FX to the exchange gain/loss account inside
+        the payment transaction — including zero-total payments that merely
+        apply credit/debit notes.  Odoo instead books FX as reconciliation
+        exchange-difference entries at its own rates, which diverge on open
+        many-to-many chains and on credit-note applications, stranding the
+        remainder on the AR/AP control account.
+
+        Every reconciliation goes through ``reconcile_at_amount``, which stamps
+        the exchange moves it creates with the driving QBO transaction
+        (``ref = QBO_EXCH:<Kind>:<qbo_txn_id>``).  This finalizer then:
+
+        1. Reverses ``QBO_EXCH:RETRY`` exchange moves (heuristic partner-level
+           pairings with no driving txn — their FX is re-booked per-txn below).
+        2. For every payment-type transaction in the JournalReport cache books::
+
+               gap = QBO_exch(txn) - stamped_exchange_FX(txn)
+
+           as a foreign-amount-zero home-currency adjustment — the exchange
+           account against the AR/AP control account QBO's own GL used, dated
+           to the transaction so each fiscal year ties to QBO.  The AR/AP leg
+           carries no partner, so customer/vendor aging is untouched.
+
+        This covers regular payments, embedded credit applications (stamped
+        with their payment's txn), and pure zero-total applications (which
+        have no ``account.payment`` record at all).  Runs once, after all
+        reconciliation is final.  Idempotent via the ``QBO_FX_TRUEUP`` ref.
+        """
+        env = ctx.env
+        company = env.company
+        gain_acct = company.income_currency_exchange_account_id
+        loss_acct = company.expense_currency_exchange_account_id
+        exch_journal = company.currency_exchange_journal_id
+        if not (gain_acct and loss_acct and exch_journal):
+            _logger.warning(
+                "FX true-up skipped: company exchange journal/accounts not "
+                "configured (gain=%s loss=%s journal=%s)",
+                gain_acct.code if gain_acct else None,
+                loss_acct.code if loss_acct else None,
+                exch_journal.code if exch_journal else None,
+            )
+            return
+
+        # Guard against a double-run (e.g. finalizer re-executed on a DB that
+        # already has the true-up).
+        if env["account.move"].search_count([("ref", "=", "QBO_FX_TRUEUP")]):
+            _logger.info("FX true-up already booked — skipping")
+            return
+
+        # The QBO cache stores home-currency amounts under QBO's own account
+        # codes; the exchange account carries that code across import, so derive
+        # it rather than hard-coding a chart-specific value.
+        exch_accts = gain_acct | loss_acct
+        exch_codes = tuple({a.code for a in exch_accts if a.code})
+        exch_ids = tuple(exch_accts.ids)
+        if not exch_codes:
+            _logger.warning("FX true-up skipped: exchange accounts have no code")
+            return
+
+        # AR/AP control accounts by code — used to place each true-up's
+        # counterpart on the same control account QBO's own GL used.
+        arap_accts = env["account.account"].search(
+            [("account_type", "in", ("asset_receivable", "liability_payable"))]
+        )
+        arap_by_code = {a.code: a for a in arap_accts if a.code}
+        if not arap_by_code:
+            _logger.warning("FX true-up skipped: no coded AR/AP accounts")
+            return
+
+        # Step 1 — reverse heuristic-retry FX.  RETRY-stamped exchange moves
+        # come from partner-level pairings with no driving QBO transaction, so
+        # their FX cannot be attributed to a cache txn; QBO's version of that
+        # FX is booked per-txn in step 2, so leaving the retry FX in place
+        # would double-count it.
+        retry_moves = env["account.move"].search(
+            [("ref", "=", "QBO_EXCH:RETRY"), ("state", "=", "posted")]
+        )
+        if retry_moves:
+            reversals = retry_moves._reverse_moves(
+                default_values_list=[
+                    {"ref": "QBO_FX_RETRY_REVERSAL", "date": m.date}
+                    for m in retry_moves
+                ],
+            )
+            reversals.action_post()
+            retry_fx = sum(
+                l.balance
+                for l in reversals.line_ids
+                if l.account_id in exch_accts
+            )
+            _logger.info(
+                "FX true-up: reversed %d heuristic-retry exchange moves "
+                "(%.2f FX returned to AR/AP; re-booked per-txn below)",
+                len(retry_moves), -retry_fx,
+            )
+
+        # Step 2 — uniform per-QBO-txn gap.  For every payment-type txn in the
+        # JournalReport cache (regular payments, zero-total credit/debit-note
+        # applications, and embedded applications alike):
+        #
+        #     gap = QBO_exch(txn) - stamped_exchange_FX(txn)
+        #
+        # The Odoo side is the exchange moves reconcile_at_amount stamped with
+        # this txn's ``QBO_EXCH:<Kind>:<id>`` ref, so attribution is exact and
+        # application FX (which has no account.payment record) is covered.
+        # The control account comes from the txn's own AR/AP line in the cache.
+        env.cr.execute(
+            """
+            WITH qbo_txn AS (
+                SELECT CASE WHEN t.txn_type = 'Payment' THEN 'Payment'
+                            ELSE 'BillPayment' END AS kind,
+                       t.qbo_txn_id AS qid,
+                       min(t.txn_date) AS dt,
+                       sum(CASE WHEN l.account_code IN %(exch_codes)s
+                                THEN l.debit - l.credit ELSE 0 END) AS qbo_exch
+                FROM qbo_journal_cache_transaction t
+                JOIN qbo_journal_cache_line l ON l.transaction_id = t.id
+                WHERE t.txn_type IN ('Payment', 'Bill Payment (Cheque)',
+                                     'Bill Payment (Credit Card)')
+                  -- Skipped payments the journal fallback imported GL-as-is
+                  -- already carry QBO's FX inside the fallback move.
+                  AND NOT EXISTS (
+                      SELECT 1 FROM account_move fm
+                      WHERE fm.state = 'posted'
+                        AND fm.ref = 'JNL-' || t.txn_type || '-' || t.qbo_txn_id
+                  )
+                GROUP BY 1, 2
+            ),
+            ctrl AS (
+                -- Dominant AR/AP account per txn, from QBO's own GL lines.
+                SELECT DISTINCT ON (kind, qid) kind, qid, account_code
+                FROM (
+                    SELECT CASE WHEN t.txn_type = 'Payment' THEN 'Payment'
+                                ELSE 'BillPayment' END AS kind,
+                           t.qbo_txn_id AS qid, l.account_code,
+                           sum(abs(l.debit - l.credit)) AS weight
+                    FROM qbo_journal_cache_transaction t
+                    JOIN qbo_journal_cache_line l ON l.transaction_id = t.id
+                    WHERE t.txn_type IN ('Payment', 'Bill Payment (Cheque)',
+                                         'Bill Payment (Credit Card)')
+                      AND l.account_code IN %(arap_codes)s
+                    GROUP BY 1, 2, 3
+                ) w
+                ORDER BY kind, qid, weight DESC
+            ),
+            odoo_fx AS (
+                SELECT split_part(m.ref, ':', 2) AS kind,
+                       split_part(m.ref, ':', 3) AS qid,
+                       sum(aml.balance) AS fx
+                FROM account_move m
+                JOIN account_move_line aml ON aml.move_id = m.id
+                WHERE m.ref LIKE 'QBO\\_EXCH:%%'
+                  AND m.ref != 'QBO_EXCH:RETRY'
+                  AND m.state = 'posted'
+                  AND aml.account_id IN %(exch_ids)s
+                GROUP BY 1, 2
+            )
+            SELECT q.kind, q.qid, q.dt, c.account_code,
+                   round((q.qbo_exch - COALESCE(o.fx, 0))::numeric, 2) AS gap
+            FROM qbo_txn q
+            LEFT JOIN ctrl c ON c.kind = q.kind AND c.qid = q.qid
+            LEFT JOIN odoo_fx o ON o.kind = q.kind AND o.qid = q.qid
+            WHERE abs(q.qbo_exch - COALESCE(o.fx, 0)) >= 0.01
+            ORDER BY q.dt, q.kind, q.qid
+            """,
+            {
+                "exch_ids": exch_ids,
+                "exch_codes": exch_codes,
+                "arap_codes": tuple(arap_by_code),
+            },
+        )
+        rows = env.cr.fetchall()
+
+        # Stamped FX with no cache counterpart would mean a reconciliation
+        # driven by a txn the JournalReport doesn't know — surface it.
+        env.cr.execute(
+            """
+            SELECT m.ref, round(sum(aml.balance)::numeric, 2)
+            FROM account_move m
+            JOIN account_move_line aml ON aml.move_id = m.id
+            WHERE m.ref LIKE 'QBO\\_EXCH:%%'
+              AND m.ref != 'QBO_EXCH:RETRY'
+              AND m.state = 'posted'
+              AND aml.account_id IN %(exch_ids)s
+              AND NOT EXISTS (
+                  SELECT 1 FROM qbo_journal_cache_transaction t
+                  WHERE t.qbo_txn_id = split_part(m.ref, ':', 3)
+                    AND ((split_part(m.ref, ':', 2) = 'Payment'
+                          AND t.txn_type = 'Payment')
+                         OR (split_part(m.ref, ':', 2) = 'BillPayment'
+                             AND t.txn_type IN ('Bill Payment (Cheque)',
+                                                'Bill Payment (Credit Card)')))
+              )
+            GROUP BY m.ref
+            """,
+            {"exch_ids": exch_ids},
+        )
+        for ref, fx in env.cr.fetchall():
+            _logger.warning(
+                "FX true-up: stamped exchange FX %.2f on %s has no "
+                "JournalReport txn — left un-trued", fx, ref,
+            )
+
+        if not rows:
+            _logger.info("FX true-up: no per-txn FX gaps found")
+            return
+
+        move_vals = []
+        net = 0.0
+        skipped_no_ctrl = 0
+        for kind, qid, dt, ctrl_code, gap in rows:
+            gap = float(gap)
+            ctrl = arap_by_code.get(ctrl_code)
+            if not ctrl:
+                skipped_no_ctrl += 1
+                _logger.warning(
+                    "FX true-up: %s %s gap %.2f has no AR/AP control "
+                    "account in the cache — left un-trued", kind, qid, gap,
+                )
+                continue
+            net += gap
+            # gap > 0: Odoo under-booked a loss -> Dr exchange-loss, Cr AR/AP.
+            # gap < 0: Odoo under-booked a gain -> Dr AR/AP, Cr exchange-gain.
+            if gap > 0:
+                exch_line = {"account_id": loss_acct.id, "debit": gap, "credit": 0.0}
+                ctrl_line = {"account_id": ctrl.id, "debit": 0.0, "credit": gap}
+            else:
+                exch_line = {"account_id": gain_acct.id, "debit": 0.0, "credit": -gap}
+                ctrl_line = {"account_id": ctrl.id, "debit": -gap, "credit": 0.0}
+            # AR/AP leg: pure home-currency FX adjustment, no partner so the
+            # aged receivable/payable is untouched — only the GL balance moves.
+            # On a foreign-currency control account the line must carry the
+            # account currency with 0 foreign amount (realized-FX shape); on a
+            # home-currency account amount_currency must equal the balance, so
+            # leave the ORM to fill it.
+            ctrl_line["name"] = f"QBO FX true-up {kind} {qid}"
+            ctrl_cur = ctrl.currency_id
+            if ctrl_cur and ctrl_cur != company.currency_id:
+                ctrl_line.update({"currency_id": ctrl_cur.id, "amount_currency": 0.0})
+            exch_line["name"] = f"QBO FX true-up {kind} {qid}"
+            move_vals.append({
+                "move_type": "entry",
+                "date": dt,
+                "journal_id": exch_journal.id,
+                "ref": "QBO_FX_TRUEUP",
+                "line_ids": [(0, 0, exch_line), (0, 0, ctrl_line)],
+            })
+
+        moves = env["account.move"].create(move_vals)
+        moves.action_post()
+        _logger.info(
+            "FX true-up: booked %d per-txn adjustments, net %.2f to exchange "
+            "account (recovered from AR/AP control; %d skipped without "
+            "control account)",
+            len(moves), net, skipped_no_ctrl,
+        )

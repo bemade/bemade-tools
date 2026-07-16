@@ -22,7 +22,7 @@ from .utils import get_api_client
 _logger = logging.getLogger(__name__)
 
 
-def _pair_credits_to_invoices(credits, invoices, qbo_id):
+def _pair_credits_to_invoices(credits, invoices, qbo_id, txn_date=None):
     """Pair credit applications to invoices via sequential consumption.
 
     QBO lists credits and invoices as independent lines on a Payment
@@ -34,10 +34,12 @@ def _pair_credits_to_invoices(credits, invoices, qbo_id):
         credits: list of (odoo_move_id, qbo_amount) for credit side
         invoices: list of (odoo_move_id, qbo_amount) for invoice side
         qbo_id: QBO payment ID (str) for logging/tracking
+        txn_date: the driving payment's TxnDate — dates the exchange
+            moves the application's reconciliation creates
 
     Returns:
         list of dicts with invoice_move_id, credit_memo_move_id,
-        amount, and qbo_payment_id.
+        amount, qbo_payment_id, and date.
     """
     pairs = []
     inv_remaining = [[mid, amt] for mid, amt in invoices]
@@ -54,6 +56,7 @@ def _pair_credits_to_invoices(credits, invoices, qbo_id):
                     "credit_memo_move_id": credit_id,
                     "amount": round(apply_amt, 2),
                     "qbo_payment_id": qbo_id,
+                    "date": txn_date,
                 })
                 remaining = round(remaining - apply_amt, 2)
                 inv_remaining[inv_idx][1] = round(inv_avail - apply_amt, 2)
@@ -75,8 +78,11 @@ def _pair_credits_to_invoices(credits, invoices, qbo_id):
         "qbo.credit.memo.importer",
         "qbo.vendor.credit.importer",
     ],
-    chunk_size=50,
-    multiprocessing_threshold=99999,
+    # Reconciliation (Phase 3/4 in load_payments) must see every payment and
+    # every committed invoice in one pass so multi-payment / many-to-many
+    # customer chains reconcile fully. Force single-process, in-transaction
+    # execution — never dispatch payments across HTTP chunk-workers.
+    allow_multiprocessing=False,
 )
 class QboPaymentImporter(models.AbstractModel):
     """ETL Pipeline for importing QBO Payments as account.payment objects."""
@@ -370,7 +376,7 @@ class QboPaymentImporter(models.AbstractModel):
 
         # Build credit application pairs for embedded CMs
         embedded_apps = _pair_credits_to_invoices(
-            embedded_cm_links, linked_moves, qbo_payment_id,
+            embedded_cm_links, linked_moves, qbo_payment_id, txn_date,
         ) if embedded_cm_links and linked_moves else []
 
         return {
@@ -428,7 +434,9 @@ class QboPaymentImporter(models.AbstractModel):
                 )
             return []
 
-        return _pair_credits_to_invoices(credits, invoices, qbo_id)
+        return _pair_credits_to_invoices(
+            credits, invoices, qbo_id, payment.get("TxnDate"),
+        )
 
     @staticmethod
     def _transform_vendor_credit_application(
@@ -476,7 +484,9 @@ class QboPaymentImporter(models.AbstractModel):
                 )
             return []
 
-        return _pair_credits_to_invoices(credits, bills, f"BP-{qbo_id}")
+        return _pair_credits_to_invoices(
+            credits, bills, f"BP-{qbo_id}", bill_payment.get("TxnDate"),
+        )
 
     def _get_bank_journal(
         self, payment: Dict, builder: QBOMoveBuilder
@@ -641,6 +651,7 @@ class QboPaymentImporter(models.AbstractModel):
         # Build credit application pairs for embedded VCs
         embedded_apps = _pair_credits_to_invoices(
             embedded_vc_links, linked_moves, f"BP-{qbo_bill_payment_id}",
+            txn_date,
         ) if embedded_vc_links and linked_moves else []
 
         return {
@@ -912,6 +923,11 @@ class QboPaymentImporter(models.AbstractModel):
         reconciled = 0
         for account_id, group in sorted(by_account.items()):
             for payment, payment_line, linked_moves in group:
+                qbo_ref = (
+                    f"QBO_EXCH:Payment:{payment.qbo_payment_id}"
+                    if payment.qbo_payment_id
+                    else f"QBO_EXCH:BillPayment:{payment.qbo_bill_payment_id}"
+                )
                 for linked_id, qbo_amount in linked_moves:
                     with ctx.skippable(
                         f"reconcile {payment.name} <-> move#{linked_id}"
@@ -938,6 +954,7 @@ class QboPaymentImporter(models.AbstractModel):
                         # greedily consume the entire invoice.
                         reconcile_at_amount(
                             pay_line_open[0], inv_line[0], qbo_amount,
+                            qbo_ref=qbo_ref, qbo_date=payment.date,
                         )
                         reconciled += 1
 
@@ -989,13 +1006,27 @@ class QboPaymentImporter(models.AbstractModel):
                     )
                     retry_queue.append(app)
                     continue
-                reconcile_at_amount(cm_line[0], inv_line[0], qbo_amount)
+                # Stamp with the driving QBO txn: apps from zero-total
+                # BillPayments carry a "BP-" prefix, customer apps and
+                # embedded apps carry the (bill)payment's own txn id.
+                sid = str(qbo_id)
+                qbo_ref = (
+                    f"QBO_EXCH:BillPayment:{sid[3:]}"
+                    if sid.startswith("BP-")
+                    else f"QBO_EXCH:Payment:{sid}"
+                )
+                reconcile_at_amount(
+                    cm_line[0], inv_line[0], qbo_amount, qbo_ref=qbo_ref,
+                    qbo_date=app.get("date"),
+                )
                 applied += 1
 
         _logger.info(f"Applied {applied} credit/debit note applications")
 
-        # NOTE: a post-pipeline reconciliation retry would help here but
-        # load_payments runs per-chunk with multiprocessing, so any retry
-        # within this method races with other chunks. The retry must run
-        # after all chunks complete — see account_etl.py finalizer.
+        # NOTE: load_payments runs single-process (allow_multiprocessing=False),
+        # so Phase 3/4 already see every payment + every committed invoice in
+        # one transaction. The remaining reconciliation retry lives in the
+        # account_etl.py finalizer to catch CROSS-PIPELINE stragglers — credit
+        # notes / refunds whose counter-lines are created by other pipelines —
+        # not to work around any within-pipeline chunk race.
 

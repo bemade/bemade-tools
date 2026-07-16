@@ -193,7 +193,8 @@ def correct_arap_accounts(ctx, moves, move_index, gl_truth) -> int:
 # Amount-constrained reconciliation
 # ---------------------------------------------------------------------------
 
-def reconcile_at_amount(pay_line, inv_line, amount_currency):
+def reconcile_at_amount(pay_line, inv_line, amount_currency, qbo_ref=None,
+                        qbo_date=None):
     """Reconcile exactly *amount_currency* (foreign) between two lines.
 
     Mimics ``account.move.line.reconcile()`` but caps the payment line's
@@ -206,6 +207,17 @@ def reconcile_at_amount(pay_line, inv_line, amount_currency):
         inv_line: The invoice-side ``account.move.line`` (AR/AP).
         amount_currency: Exact amount to reconcile in the transaction
             currency (from QBO ``Line.Amount``).
+        qbo_ref: Stamp written to ``ref`` on any exchange-difference move
+            this reconciliation creates (``QBO_EXCH:<Kind>:<qbo_txn_id>``,
+            or ``QBO_EXCH:RETRY`` for heuristic pairings with no driving
+            QBO transaction).  The FX true-up finalizer uses it to compare
+            Odoo's realized FX per QBO transaction against the JournalReport
+            cache with exact PK traceability.
+        qbo_date: Date of the driving QBO transaction.  Odoo dates exchange
+            moves at the reconciliation date (the later document), but QBO
+            books realized FX at the payment's own date — forcing the QBO
+            date keeps each fiscal year's FX where QBO put it, so the
+            year-end trial balances tie without temporal drift.
     """
     AML = pay_line.env["account.move.line"]
     amls = pay_line + inv_line
@@ -263,6 +275,10 @@ def reconcile_at_amount(pay_line, inv_line, amount_currency):
                     results.get("exchange_values")
                     and results["exchange_values"]["move_values"]["line_ids"]
                 ):
+                    if qbo_date:
+                        results["exchange_values"]["move_values"]["date"] = (
+                            qbo_date
+                        )
                     exchange_diff_values_list.append(
                         results["exchange_values"]
                     )
@@ -284,6 +300,8 @@ def reconcile_at_amount(pay_line, inv_line, amount_currency):
         exchange_moves = AML._create_exchange_difference_moves(
             exchange_diff_values_list
         )
+        if qbo_ref and exchange_moves:
+            exchange_moves.write({"ref": qbo_ref})
         used_exchange_moves = set()
         used_partials = set()
         for partial in partials:
