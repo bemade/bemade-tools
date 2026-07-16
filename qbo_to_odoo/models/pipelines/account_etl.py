@@ -11,7 +11,7 @@ from odoo import models
 
 from odoo.addons.etl_framework import ETL, ETLContext
 
-from .move_posting_helpers import reconcile_at_amount
+from .reconcile_pass import run_reconciliation_pass
 from .utils import get_api_client
 
 _logger = logging.getLogger(__name__)
@@ -555,13 +555,13 @@ class QboAccountFinalizer(models.AbstractModel):
 
     @ETL.load()
     def load_archive_accounts(self, ctx: ETLContext, transformed: Dict) -> None:
-        """Retry failed credit applications, then archive inactive accounts."""
-        # ── Reconciliation retry ──
-        # Phase 4 credit applications run per-chunk during the payment
-        # pipeline. CMs partially consumed at one FX rate may leave
-        # residuals that prevent the next chunk from fully reconciling.
-        # Now that all chunks are committed, retry unmatched pairs.
-        self._retry_credit_reconciliation(ctx)
+        """Replay QBO applications, true up FX, archive inactive accounts."""
+        # ── One-pass reconciliation replay ──
+        # Every QBO settlement lives as application lines on a Payment or
+        # BillPayment. Now that all transaction pipelines have committed,
+        # replay each one as a reconciliation group against the imported
+        # moves (see reconcile_pass.py).
+        run_reconciliation_pass(ctx)
 
         # ── Realized-FX true-up ──
         # QBO books 100% of a foreign payment's realized FX inside the
@@ -569,7 +569,7 @@ class QboAccountFinalizer(models.AbstractModel):
         # reconciliation EXCH entries that under-book on open many-to-many
         # chains, stranding the remainder on the AR/AP control account.
         # Book the per-payment shortfall to the exchange account now that
-        # reconciliation is final. Must run AFTER _retry_credit_reconciliation.
+        # reconciliation is final. Must run AFTER run_reconciliation_pass.
         self._book_payment_fx_trueup(ctx)
 
         # Cent-scale rounding parity — after all structural corrections,
@@ -645,111 +645,6 @@ class QboAccountFinalizer(models.AbstractModel):
                 ", ".join(skipped.mapped("code")),
             )
         return accounts - skipped
-
-    @staticmethod
-    def _retry_credit_reconciliation(ctx: ETLContext):
-        """Retry failed reconciliations after all payment chunks complete.
-
-        Handles two cases that fail during multiprocessing:
-        1. Credit notes/vendor credits partially consumed at different FX rates
-        2. Payment entries that raced with invoice chunks on the same partner
-
-        Runs single-threaded after all pipelines, so no chunk contention.
-        """
-        AML = ctx.env["account.move.line"]
-        grand_total = 0
-
-        # SQL to find unreconciled credit↔debit pairs by partner+account_type.
-        # Covers CM/VC (refunds) and payment entries with unreconciled lines.
-        _PAIRS_SQL = """
-            WITH open_credits AS (
-                SELECT aml.id AS line_id, aml.partner_id,
-                       aa.account_type
-                FROM account_move_line aml
-                JOIN account_account aa ON aa.id = aml.account_id
-                JOIN account_move am ON am.id = aml.move_id
-                WHERE aml.reconciled = false
-                  AND aml.amount_residual < 0
-                  AND aa.account_type IN ('asset_receivable', 'liability_payable')
-                  AND am.state = 'posted'
-                  AND aml.partner_id IS NOT NULL
-                  AND am.move_type IN ('out_refund', 'in_refund')
-            ),
-            open_debits AS (
-                SELECT aml.id AS line_id, aml.partner_id,
-                       aa.account_type
-                FROM account_move_line aml
-                JOIN account_account aa ON aa.id = aml.account_id
-                JOIN account_move am ON am.id = aml.move_id
-                WHERE aml.reconciled = false
-                  AND aml.amount_residual > 0
-                  AND aa.account_type IN ('asset_receivable', 'liability_payable')
-                  AND am.state = 'posted'
-                  AND am.move_type IN ('out_invoice', 'in_invoice')
-                  AND aml.partner_id IS NOT NULL
-            )
-            SELECT DISTINCT ON (oc.line_id)
-                   oc.line_id AS credit_line_id,
-                   od.line_id AS debit_line_id
-            FROM open_credits oc
-            JOIN open_debits od
-              ON od.account_type = oc.account_type
-             AND od.partner_id = oc.partner_id
-            ORDER BY oc.line_id, od.line_id
-        """
-
-        # Loop: each pass may free up new pairings as residuals change.
-        iteration = 0
-        while True:
-            iteration += 1
-            ctx.env.cr.execute(_PAIRS_SQL)
-            pairs = ctx.env.cr.fetchall()
-            if not pairs:
-                break
-
-            _logger.info(
-                "Reconciliation retry pass %d: %d pairs to try",
-                iteration, len(pairs),
-            )
-            reconciled = 0
-            for credit_id, debit_id in pairs:
-                with ctx.skippable(
-                    f"retry reconcile credit={credit_id} debit={debit_id}"
-                ):
-                    credit_line = AML.browse(credit_id)
-                    debit_line = AML.browse(debit_id)
-                    if credit_line.reconciled or debit_line.reconciled:
-                        continue
-                    cap = min(
-                        abs(credit_line.amount_residual_currency),
-                        abs(debit_line.amount_residual_currency),
-                    )
-                    if cap < 0.01:
-                        continue
-                    # Heuristic pairing — no driving QBO transaction, so the
-                    # exchange move can't be attributed to a cache txn.  The
-                    # FX true-up reverses RETRY-stamped FX and books QBO's
-                    # version per-txn instead.
-                    reconcile_at_amount(
-                        credit_line, debit_line, cap,
-                        qbo_ref="QBO_EXCH:RETRY",
-                    )
-                    reconciled += 1
-            _logger.info(
-                "Reconciliation retry pass %d: %d/%d resolved",
-                iteration, reconciled, len(pairs),
-            )
-            grand_total += reconciled
-            if reconciled == 0:
-                break  # no progress, stop
-
-        if grand_total:
-            _logger.info(
-                "Reconciliation retry: %d total reconciliations in %d passes",
-                grand_total, iteration,
-            )
-        else:
-            _logger.info("Reconciliation retry: no unmatched pairs found")
 
     @staticmethod
     def _book_payment_fx_trueup(ctx: ETLContext):
@@ -970,6 +865,30 @@ class QboAccountFinalizer(models.AbstractModel):
         for kind, qid, dt, ctrl_code, gap in rows:
             gap = float(gap)
             ctrl = arap_by_code.get(ctrl_code)
+            if not ctrl:
+                # QBO's own GL for this txn has no AR/AP line (e.g. an FX
+                # adjustment payment booked against undeposited funds), but
+                # Odoo's exchange moves for it DID rebalance a control
+                # account — that account is where the gap sits, so true up
+                # against it.
+                env.cr.execute(
+                    """
+                    SELECT aml.account_id
+                    FROM account_move m
+                    JOIN account_move_line aml ON aml.move_id = m.id
+                    JOIN account_account aa ON aa.id = aml.account_id
+                    WHERE m.ref = %s AND m.state = 'posted'
+                      AND aa.account_type IN
+                          ('asset_receivable', 'liability_payable')
+                    GROUP BY aml.account_id
+                    ORDER BY sum(abs(aml.balance)) DESC
+                    LIMIT 1
+                    """,
+                    [f"QBO_EXCH:{kind}:{qid}"],
+                )
+                row = env.cr.fetchone()
+                if row:
+                    ctrl = env["account.account"].browse(row[0])
             if not ctrl:
                 skipped_no_ctrl += 1
                 _logger.warning(
