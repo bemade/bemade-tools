@@ -1,15 +1,20 @@
 """QBO Journal Fallback Pipeline.
 
-Imports transaction types that have no dedicated QBO API endpoint:
+Imports transactions the API entity pipelines cannot build:
 
-- **Payroll Cheque** — payroll transactions (always CAD)
-- **Inventory Starting Value** — opening inventory balances (always CAD)
-- **Tax Payment / Sales Tax Payment / Sales Tax Adjustment**
+- **Payroll Cheque** — payroll transactions (no API endpoint)
+- **Inventory Starting Value** — opening inventory balances (no API endpoint)
+- **Tax Payment / Sales Tax Payment / Sales Tax Adjustment** (no API endpoint)
+- **Journal Entry** — only the home-currency-adjustment JEs the API pipeline
+  drops (all foreign line amounts are zero)
+- **Payment / Bill Payment** — only payments the API pipeline skipped
+  (e.g. deleted partner); pure zero-total credit applications are excluded
 
 These are imported as generic journal entries (``move_type='entry'``)
-from the cached QBO JournalReport (``qbo.journal.cache``).  Since all
-fallback types are CAD-only, no FX handling or tax corrections are
-needed — just a simple create-then-post flow.
+from the cached QBO JournalReport (``qbo.journal.cache``), booking the
+report's home-currency amounts as-is — GL truth by construction, so no
+FX or tax recomputation is involved (a line on a foreign-currency account
+gets its foreign amount at par, which is cosmetic: the TB is home-currency).
 
 Runs after all entity pipelines so ``get_imported_qbo_ids()`` correctly
 excludes transactions already imported via the API.
@@ -35,12 +40,6 @@ _logger = logging.getLogger(__name__)
 
 # Only these QBO transaction types are imported from the JournalReport.
 # Everything else comes from the API entity pipelines.
-#
-# NOTE: "Payment" and "Bill Payment (Cheque)" are FX realization entries
-# that QBO creates when payments settle at a different rate than the invoice.
-# Odoo generates equivalent entries during reconciliation, so importing the
-# QBO versions would double-count.  They appear as "unimported" in logs but
-# the FX drift they represent is structural (QBO vs Odoo rate differences).
 _ALLOWED_TYPES = frozenset({
     "Payroll Cheque",   # XLSX export name
     "Paycheque",        # API JournalReport name
@@ -51,9 +50,25 @@ _ALLOWED_TYPES = frozenset({
     # QBO home-currency-adjustment JEs (foreign Line.Amount == 0, so the
     # JournalEntry API pipeline can't build them and drops them). They exist
     # only in the JournalReport with real home-currency amounts (typically
-    # DR 5900 / CR a foreign bank). get_imported_qbo_ids already excludes the
-    # JEs the API pipeline DID import, so this only picks up the dropped ones.
+    # DR exchange G/L / CR a foreign bank). get_imported_qbo_ids already
+    # excludes the JEs the API pipeline DID import, so this only picks up
+    # the dropped ones.
     "Journal Entry",
+    # Payments the API pipeline skipped (e.g. deleted partner -> no
+    # receivable/payable account resolves).  get_imported_qbo_ids excludes
+    # every account.payment the API pipeline created, and pure zero-total
+    # credit applications (AR/AP + exchange legs only, no cash) are filtered
+    # out in extract — those are reconciliations, not missing moves, and
+    # their FX is handled by the FX true-up finalizer.
+    "Payment",
+    "Bill Payment (Cheque)",
+    "Bill Payment (Credit Card)",
+})
+
+_PAYMENT_TYPES = frozenset({
+    "Payment",
+    "Bill Payment (Cheque)",
+    "Bill Payment (Credit Card)",
 })
 
 
@@ -108,6 +123,44 @@ class QboJournalFallbackImporter(models.AbstractModel):
             len(imported_ids),
         )
 
+        # Build code maps for account resolution (also used by the
+        # pure-application filter below).
+        maps = build_code_maps(ctx)
+
+        # Drop pure zero-total credit/debit-note applications: payment-type
+        # txns whose every line sits on AR/AP or the exchange G/L accounts.
+        # Those are reconciliations (handled in payment_etl + the FX true-up
+        # finalizer), not missing moves — importing them would double-book
+        # their FX and dump un-reconcilable noise on the control accounts.
+        company = ctx.env.company
+        exch_ids = (
+            company.income_currency_exchange_account_id
+            | company.expense_currency_exchange_account_id
+        ).ids
+        arap_types = ("asset_receivable", "liability_payable")
+
+        def _is_pure_application(txn) -> bool:
+            if not txn["lines"] or txn["lines"][0].get("type") not in _PAYMENT_TYPES:
+                return False
+            for line in txn["lines"]:
+                acct_id = maps["code_map"].get(line.get("account_code"))
+                if acct_id is None:
+                    return False  # unmapped leg — not provably an application
+                if (
+                    maps["account_type_map"].get(acct_id) not in arap_types
+                    and acct_id not in exch_ids
+                ):
+                    return False  # has a cash/other leg — a real payment
+            return True
+
+        pure_apps = [t for t in transactions if _is_pure_application(t)]
+        if pure_apps:
+            transactions = [t for t in transactions if not _is_pure_application(t)]
+            _logger.info(
+                "Fallback: excluded %d pure credit-application payment txns "
+                "(reconciliations, not missing moves)", len(pure_apps),
+            )
+
         # Log type breakdown
         type_counts: Dict[str, int] = defaultdict(int)
         for txn in transactions:
@@ -146,9 +199,6 @@ class QboJournalFallbackImporter(models.AbstractModel):
                 "Unimported cache transaction details:\n%s",
                 "\n".join(skipped_details),
             )
-
-        # Build code maps for account resolution
-        maps = build_code_maps(ctx)
 
         # Complete entity-imported transactions (invoices, sales receipts)
         # with the perpetual-COGS lines QBO booked but no pipeline recovers:
