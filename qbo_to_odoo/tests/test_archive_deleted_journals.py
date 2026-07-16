@@ -1,13 +1,16 @@
 """Tests for the end-of-import 'deleted' journal archival step.
 
-Acceptance criteria (task 3818):
+Acceptance criteria (task 3818, AC2 revised when the archival moved to the
+terminal ``qbo.journal.finalizer`` pipeline):
 1. At the end of the QBO import, every account.journal whose name contains
    "deleted" is archived (active=False). Matching is case-insensitive, so
    journals named with any casing of "deleted" / "(Deleted)" are archived,
    while a normally-named journal is left untouched.
-2. The step runs automatically as part of the import — it is invoked from the
-   bank-journal pipeline's load step (QboBankJournalProcessor.load_journals),
-   which the orchestrated import runs. The test exercises the cleanup method
+2. The archival runs from the terminal ``qbo.journal.finalizer`` load step —
+   and must NOT run from the bank-journal pipeline's ``load_journals``: that
+   pipeline runs before the move-posting pipelines, and archiving there makes
+   posts into the deleted journals fail ("cannot post an entry in an archived
+   journal"), stranding moves in draft. The tests exercise both load steps
    directly (no live QBO connection needed), as the existing pipeline tests do.
 3. Idempotent — invoking the cleanup a second time does not error and leaves the
    deleted-named journals archived.
@@ -76,24 +79,34 @@ class TestArchiveDeletedJournals(TransactionCase):
             "a normally-named journal must NOT be archived",
         )
 
-    def test_ac2_runs_from_load_journals(self):
-        """AC2: the cleanup runs automatically via the pipeline load step.
+    def test_ac2_runs_from_finalizer_not_load_journals(self):
+        """AC2: archival fires from the terminal finalizer, NOT journal creation.
 
-        load_journals with no journals to create still triggers the archival
-        cleanup, so an orchestrated import that creates no new bank journals
-        still cleans up QBO 'deleted' journals.
+        The bank-journal pipeline runs before the move-posting pipelines, so
+        archiving there breaks posting into the deleted journals (moves left
+        in draft). The cleanup must therefore be a no-op in load_journals and
+        run from qbo.journal.finalizer's load step instead.
         """
         ctx = _make_ctx(self.env)
 
         self.deleted_lower.with_context(active_test=False).write({"active": True})
 
-        # No 'transform_journals' key -> no creation, but cleanup must still run.
+        # Journal creation must NOT archive — downstream pipelines still need
+        # to post into the deleted journals.
         self.processor.load_journals(ctx, {})
+        self.deleted_lower.invalidate_recordset()
+        self.assertTrue(
+            self.deleted_lower.with_context(active_test=False).active,
+            "load_journals must NOT archive 'deleted' journals (posting into "
+            "them happens later in the import)",
+        )
 
+        # The terminal finalizer is what archives.
+        self.env["qbo.journal.finalizer"].archive_deleted_journals(ctx, {})
         self.deleted_lower.invalidate_recordset()
         self.assertFalse(
             self.deleted_lower.with_context(active_test=False).active,
-            "load_journals must invoke the 'deleted' cleanup even with no new journals",
+            "qbo.journal.finalizer must archive 'deleted' journals",
         )
 
     def test_ac3_idempotent_on_rerun(self):
