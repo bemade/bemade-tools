@@ -59,8 +59,10 @@ class QboJournalEntryImporter(models.AbstractModel):
         extractor.preload("account", "account_currency", "currency")
         extractor.preload_journals("general")
 
-        # Tax rate ref → tax account ID for JEs with TxnTaxDetail
+        # Tax rate ref → tax account ID for JEs with TxnTaxDetail, plus the
+        # per-txn GL-truth override for txns QBO booked to the other variant.
         extractor.preload_tax_rate_account_map(use_suspense=True)
+        extractor.preload_txn_tax_gl_accounts(ctx, ("Journal Entry",))
 
         return ChunkableData(
             records=new_entries,

@@ -380,6 +380,11 @@ class QBOMoveBuilder:
         net credits.
         """
         tax_rate_account_map = self.get_extra("tax_rate_account_map") or {}
+        # GL-truth per-txn override: the account QBO's own JournalReport
+        # booked this transaction's tax to (see preload_txn_tax_gl_accounts).
+        gl_tax_account_id = (self.get_extra("txn_tax_gl_account") or {}).get(
+            str(entry.get("Id"))
+        )
         tax_lines = entry.get("TxnTaxDetail", {}).get("TaxLine", [])
         result = []
         total_tax_company = 0.0
@@ -392,7 +397,9 @@ class QBOMoveBuilder:
             rate_ref = detail.get("TaxRateRef", {}).get("value")
             if not rate_ref:
                 continue
-            tax_account_id = tax_rate_account_map.get(str(rate_ref))
+            tax_account_id = gl_tax_account_id or tax_rate_account_map.get(
+                str(rate_ref)
+            )
             if not tax_account_id:
                 _logger.warning(
                     f"No tax account for rate ref {rate_ref} in "
@@ -554,8 +561,12 @@ class QBOMoveBuilder:
         amount = float(line.get("Amount", 0) or 0)
         if not unit_price and amount and qty:
             unit_price = amount / qty
-        if force_positive:
-            unit_price = abs(unit_price)
+        # Refund-type moves (force_positive) carry the credit direction in
+        # move_type, so QBO's normally-positive line amounts pass through
+        # unchanged — INCLUDING a genuinely negative line, which is QBO's
+        # "net this back out" add-back and must book opposite the other
+        # lines.  abs() here destroyed that sign, mis-booking both the
+        # expense line and the AP counterpart by twice the line amount.
         tax_ids = self.resolve_tax(detail, entry, tax_use)
         line_vals = {
             "name": line.get("Description", "") or item_ref.get("name", "") or "/",
@@ -582,8 +593,9 @@ class QBOMoveBuilder:
             except (ValueError, TypeError):
                 pass
         amount = float(line.get("Amount", 0) or 0)
-        if force_positive:
-            amount = abs(amount)
+        # Sign-preserving on refund-type moves (see
+        # _build_item_expense_invoice_line): a negative QBO line inside a
+        # credit is an add-back and must book opposite the other lines.
         tax_ids = self.resolve_tax(detail, entry, tax_use)
         line_vals = {
             "name": line.get("Description", "")
@@ -815,11 +827,14 @@ class QBOMoveBuilder:
             tl_detail = tax_line.get("TaxLineDetail", {})
             rate_ref = tl_detail.get("TaxRateRef", {}).get("value")
             amount = float(tax_line.get("Amount", 0) or 0)
-            if rate_ref and amount:
+            # Zero amounts are kept: a listed rate with Amount 0 is a manual
+            # override to zero (QBO keeps TaxPercent/base), and the fix phase
+            # must zero out the tax Odoo computes from the percentage.
+            if rate_ref:
                 odoo_tax_id = tax_rate_map.get(str(rate_ref))
                 if odoo_tax_id:
                     tax_amounts.append({"tax_id": odoo_tax_id, "amount": amount})
-                else:
+                elif amount:
                     _logger.warning(
                         "TaxRateRef %s not mapped to Odoo tax in %s %s",
                         rate_ref, qbo_id_field, qbo_id,

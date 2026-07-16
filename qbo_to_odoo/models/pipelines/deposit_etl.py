@@ -66,8 +66,48 @@ class QboDepositImporter(models.AbstractModel):
         extractor.preload_journals("general")
         extractor.preload_undeposited_funds()
 
-        # Tax rate ref → tax account ID for deposits with TxnTaxDetail
+        # Tax rate ref → tax account ID for deposits with TxnTaxDetail, plus
+        # the per-txn GL-truth override for txns QBO booked to the other
+        # variant.
         extractor.preload_tax_rate_account_map(use_suspense=True)
+        extractor.preload_txn_tax_gl_accounts(ctx, ("Deposit",))
+
+        # GL-truth per-account nets: a foreign deposit moves money from
+        # Undeposited Funds (valued at the original payments' rates) to the
+        # bank (deposit-date rate); QBO books the realized-FX difference to
+        # the exchange G/L.  Rebuilding lines at the deposit rate misses
+        # both, so the builder trues every account's home-currency net to
+        # QBO's own GL from the JournalReport cache.
+        connection = ctx.env["qbo.connection"].browse(
+            ctx.get_config("source_id")
+        )
+        cache = connection._ensure_journal_cache()
+        ctx.env.cr.execute(
+            """
+            SELECT t.qbo_txn_id, l.account_code, sum(l.debit - l.credit)
+            FROM qbo_journal_cache_transaction t
+            JOIN qbo_journal_cache_line l ON l.transaction_id = t.id
+            WHERE t.cache_id = %(cache_id)s
+              AND t.txn_type = 'Deposit'
+              AND l.account_code IS NOT NULL
+            GROUP BY 1, 2
+            """,
+            {"cache_id": cache.id},
+        )
+        gl_nets: Dict[str, Dict[str, float]] = {}
+        for qid, code, net in ctx.env.cr.fetchall():
+            gl_nets.setdefault(str(qid), {})[code] = round(float(net), 2)
+        extractor.extra["deposit_gl_nets"] = gl_nets
+
+        ctx.env.cr.execute(
+            """
+            SELECT code_store::jsonb ->> %(cid)s, id
+            FROM account_account
+            WHERE code_store::jsonb ->> %(cid)s IS NOT NULL
+            """,
+            {"cid": str(ctx.env.company.id)},
+        )
+        extractor.extra["gl_code_account_map"] = dict(ctx.env.cr.fetchall())
 
         return ChunkableData(
             records=new_deposits,
@@ -270,12 +310,90 @@ class QboDepositImporter(models.AbstractModel):
         )
         line_ids.extend(tax_line_tuples)
 
+        # GL-truth per-account truing: adjust each account's home-currency
+        # net to what QBO's own GL booked for this deposit.  A foreign
+        # deposit's source lines carry the ORIGINAL payments' rates in QBO
+        # (Undeposited Funds releases at payment-rate value) and the
+        # realized-FX difference goes to the exchange G/L — neither of which
+        # `foreign × deposit-rate` reproduces.  The bank leg (excluded here)
+        # then self-balances onto QBO's exact amount.
+        gl_targets = (builder.get_extra("deposit_gl_nets") or {}).get(qbo_id)
+        if gl_targets:
+            code_map = builder.get_extra("gl_code_account_map") or {}
+            for code, target in gl_targets.items():
+                acct_id = code_map.get(code)
+                if not acct_id or acct_id == deposit_to_account_id:
+                    continue
+                built = round(sum(
+                    l[2].get("debit", 0) - l[2].get("credit", 0)
+                    for l in line_ids
+                    if l[2].get("account_id") == acct_id
+                ), 2)
+                delta = round(target - built, 2)
+                if abs(delta) < 0.01:
+                    continue
+                cands = [
+                    l for l in line_ids if l[2].get("account_id") == acct_id
+                ]
+                if cands:
+                    # Fold the delta into the account's largest line
+                    # (home-currency only; the foreign amount stays QBO's).
+                    lv = max(
+                        cands,
+                        key=lambda l: abs(
+                            l[2].get("debit", 0) - l[2].get("credit", 0)
+                        ),
+                    )[2]
+                    net = round(
+                        lv.get("debit", 0) - lv.get("credit", 0) + delta, 2
+                    )
+                    lv["debit"] = net if net >= 0 else 0.0
+                    lv["credit"] = -net if net < 0 else 0.0
+                else:
+                    # Account QBO booked but no built line carries it —
+                    # typically the exchange G/L realized-FX plug.
+                    new_vals = {
+                        "account_id": acct_id,
+                        "name": "GL true-up (QBO)",
+                        "debit": delta if delta > 0 else 0.0,
+                        "credit": -delta if delta < 0 else 0.0,
+                    }
+                    if is_foreign:
+                        new_vals["currency_id"] = currency_id
+                        new_vals["amount_currency"] = 0.0
+                    line_ids.append((0, 0, new_vals))
+
         # Debit line for bank account — computed from actual line totals
         # rather than TotalAmt, which may include linked transactions
         # (e.g. TaxPayment refunds) with no DepositLineDetail.
         total_credits = sum(l[2].get("credit", 0) for l in line_ids)
         total_debits = sum(l[2].get("debit", 0) for l in line_ids)
         debit_company = total_credits - total_debits
+        # After GL truing, the self-balanced bank leg must land on QBO's
+        # bank amount; a residual means some built line sits on an account
+        # QBO's GL doesn't carry for this txn (e.g. a tax-routing fallback).
+        if gl_targets:
+            code_map = builder.get_extra("gl_code_account_map") or {}
+            bank_codes = [
+                c for c, aid in code_map.items()
+                if aid == deposit_to_account_id and c in gl_targets
+            ]
+            if bank_codes:
+                qbo_bank = gl_targets[bank_codes[0]]
+                # Compare account NETS: the deposit may carry other lines on
+                # the bank account itself (e.g. a same-account in-and-out).
+                built_bank = round(debit_company + sum(
+                    l[2].get("debit", 0) - l[2].get("credit", 0)
+                    for l in line_ids
+                    if l[2].get("account_id") == deposit_to_account_id
+                ), 2)
+                if abs(round(built_bank - qbo_bank, 2)) >= 0.01:
+                    _logger.warning(
+                        "Deposit %s: bank account net %.2f != QBO %.2f after "
+                        "GL truing — a line sits on an account QBO's GL "
+                        "doesn't carry for this txn",
+                        qbo_id, built_bank, qbo_bank,
+                    )
         debit_line_vals = {
             "account_id": deposit_to_account_id,
             "name": f"Deposit to {deposit_to_ref.get('name', 'bank')}",

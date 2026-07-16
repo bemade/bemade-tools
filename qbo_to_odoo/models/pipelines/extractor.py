@@ -219,6 +219,88 @@ class QBOExtractor:
         )
         return self
 
+    def preload_txn_tax_gl_accounts(self, ctx, txn_types) -> "QBOExtractor":
+        """Per-txn GL-truth tax account for TxnTaxDetail lines.
+
+        The static ``tax_rate_account_map`` routes ALL of a pipeline's
+        TxnTaxDetail lines to one account variant (suspense or payable),
+        but QBO occasionally books a transaction's tax to the other one.
+        The JournalReport cache knows which account QBO actually used, so
+        build ``{qbo_txn_id: account_id}`` for every transaction of
+        *txn_types* whose tax landed on exactly ONE candidate tax account.
+        ``build_tax_lines_from_detail`` prefers this over the static map;
+        ambiguous transactions (several candidate accounts) fall back to it.
+
+        Args:
+            ctx: The ETL context (for the QBO connection / journal cache).
+            txn_types: Cache ``txn_type`` values to scan (e.g.
+                ``("Journal Entry",)`` or ``("Deposit",)``).
+        """
+        self.extra["txn_tax_gl_account"] = {}
+
+        # Candidate tax accounts = every account any imported tax's 'tax'
+        # repartition line posts to, plus the pipeline's static routing
+        # targets (the suspense variant).
+        self.env.cr.execute(
+            """
+            SELECT DISTINCT arl.account_id
+            FROM account_tax t
+            JOIN account_tax_repartition_line arl ON arl.tax_id = t.id
+            WHERE t.qbo_tax_rate_id IS NOT NULL
+              AND t.qbo_tax_rate_id != ''
+              AND arl.repartition_type = 'tax'
+              AND arl.account_id IS NOT NULL
+            """
+        )
+        candidate_ids = {row[0] for row in self.env.cr.fetchall()}
+        candidate_ids.update(
+            (self.extra.get("tax_rate_account_map") or {}).values()
+        )
+        if not candidate_ids:
+            return self
+
+        self.env.cr.execute(
+            """
+            SELECT id, code_store::jsonb ->> %(cid)s
+            FROM account_account WHERE id IN %(ids)s
+            """,
+            {"ids": tuple(candidate_ids), "cid": str(self._company_id)},
+        )
+        id_by_code = {code: aid for aid, code in self.env.cr.fetchall() if code}
+        if not id_by_code:
+            return self
+
+        connection = ctx.env["qbo.connection"].browse(ctx.get_config("source_id"))
+        cache = connection._ensure_journal_cache()
+        self.env.cr.execute(
+            """
+            SELECT t.qbo_txn_id, array_agg(DISTINCT l.account_code)
+            FROM qbo_journal_cache_transaction t
+            JOIN qbo_journal_cache_line l ON l.transaction_id = t.id
+            WHERE t.cache_id = %(cache_id)s
+              AND t.txn_type IN %(types)s
+              AND l.account_code IN %(codes)s
+            GROUP BY 1
+            """,
+            {
+                "cache_id": cache.id,
+                "types": tuple(txn_types),
+                "codes": tuple(id_by_code),
+            },
+        )
+        override = {
+            str(qid): id_by_code[codes[0]]
+            for qid, codes in self.env.cr.fetchall()
+            if len(codes) == 1
+        }
+        self.extra["txn_tax_gl_account"] = override
+        if override:
+            _logger.info(
+                "GL-truth tax accounts resolved for %d %s txns",
+                len(override), "/".join(txn_types),
+            )
+        return self
+
     # ------------------------------------------------------------------
     # Generic query helpers
     # ------------------------------------------------------------------
