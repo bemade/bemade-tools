@@ -42,6 +42,9 @@ from unittest.mock import MagicMock
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
+from odoo.addons.sap_b1_to_odoo.models.pipelines.product_product_etl import (
+    ProductImporter,
+)
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 
 
@@ -62,6 +65,18 @@ def _make_sap_product(**overrides):
     }
     base.update(overrides)
     return base
+
+
+def _base_transform(importer, ctx, extracted):
+    """Run the BASE transform_products, bound to ProductImporter explicitly.
+
+    Extending modules (e.g. rwi_sap_b1_to_odoo) override transform_products
+    with different field mappings (deliberately routing u_salesextdescription
+    to website_description instead). These tests guard the base pipeline's
+    mapping only; overlay behaviour is covered by the extending module's own
+    tests.
+    """
+    return ProductImporter.transform_products(importer, ctx, extracted)
 
 
 def _make_extracted(sap_products, categories_map=None, company_id=1):
@@ -97,7 +112,7 @@ class TestProductDescriptionEcommerce(TransactionCase):
         ctx = self._make_ctx()
         extracted = _make_extracted([sap_product], company_id=self.env.company.id)
 
-        result = self.importer.transform_products(ctx, extracted)
+        result = _base_transform(self.importer, ctx, extracted)
 
         self.assertEqual(len(result), 1)
         self.assertEqual(
@@ -120,7 +135,7 @@ class TestProductDescriptionEcommerce(TransactionCase):
                     [sap_product], company_id=self.env.company.id
                 )
 
-                result = self.importer.transform_products(ctx, extracted)
+                result = _base_transform(self.importer, ctx, extracted)
 
                 self.assertEqual(len(result), 1)
                 vals = result[0]
@@ -149,7 +164,7 @@ class TestProductDescriptionEcommerce(TransactionCase):
         ctx = self._make_ctx()
         extracted = _make_extracted([sap_product], company_id=self.env.company.id)
 
-        result = self.importer.transform_products(ctx, extracted)
+        result = _base_transform(self.importer, ctx, extracted)
 
         self.assertEqual(len(result), 1)
         self.assertEqual(
@@ -169,7 +184,7 @@ class TestProductDescriptionEcommerce(TransactionCase):
         ctx = self._make_ctx()
         extracted = _make_extracted([sap_product], company_id=self.env.company.id)
 
-        result = self.importer.transform_products(ctx, extracted)
+        result = _base_transform(self.importer, ctx, extracted)
 
         self.assertEqual(len(result), 1)
         vals = result[0]

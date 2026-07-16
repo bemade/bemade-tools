@@ -43,6 +43,10 @@ from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 from odoo.tools.safe_eval import safe_eval
 
+from odoo.addons.sap_b1_to_odoo.models.pipelines.product_product_etl import (
+    ProductImporter,
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers shared across classes
@@ -439,6 +443,9 @@ class TestProductEtlCategoryMissWarning(TransactionCase):
         return ctx
 
     def _transform(self, sap_rows, categories_map=None, company_id=None):
+        # Bind the BASE transform_products explicitly: extending modules
+        # (e.g. rwi_sap_b1_to_odoo) override it with different mappings and
+        # return shape; these tests guard the base pipeline's logic only.
         extracted = {
             "extract_products": MagicMock(
                 records=sap_rows,
@@ -449,7 +456,7 @@ class TestProductEtlCategoryMissWarning(TransactionCase):
             )
         }
         ctx = self._make_ctx()
-        return self.importer.transform_products(ctx, extracted)
+        return ProductImporter.transform_products(self.importer, ctx, extracted)
 
     def test_product_etl_warns_on_category_miss(self):
         """transform emits WARNING when itmsgrpcod is not in categories_map."""

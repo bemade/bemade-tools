@@ -35,6 +35,9 @@ from unittest.mock import MagicMock
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
+from odoo.addons.sap_b1_to_odoo.models.pipelines.product_product_etl import (
+    ProductImporter,
+)
 from odoo.addons.sap_b1_to_odoo.tools import fix_quotes
 
 
@@ -82,7 +85,14 @@ class TestProductProductEtl(TransactionCase):
         return ctx
 
     def _transform(self, sap_rows, categories_map=None, company_id=None):
-        """Run transform_products against a list of SAP row dicts."""
+        """Run the BASE transform_products against a list of SAP row dicts.
+
+        Bound to ProductImporter explicitly: extending modules (e.g.
+        rwi_sap_b1_to_odoo) override transform_products with different
+        mappings and a different return shape. These tests guard the base
+        pipeline's logic only; overlay behaviour is covered by the extending
+        module's own tests.
+        """
         extracted = {
             "extract_products": MagicMock(
                 records=sap_rows,
@@ -93,7 +103,7 @@ class TestProductProductEtl(TransactionCase):
             )
         }
         ctx = self._make_ctx()
-        return self.importer.transform_products(ctx, extracted)
+        return ProductImporter.transform_products(self.importer, ctx, extracted)
 
     # ------------------------------------------------------------------
     # Transform tests
@@ -159,10 +169,12 @@ class TestProductProductEtl(TransactionCase):
     # ------------------------------------------------------------------
 
     def _run_load(self, product_vals):
-        """Run load_products against a pre-built transformed dict."""
+        """Run the BASE load_products against a pre-built transformed dict
+        (see _transform for why the base implementation is bound explicitly).
+        """
         transformed = {"transform_products": product_vals}
         ctx = self._make_ctx()
-        self.importer.load_products(ctx, transformed)
+        ProductImporter.load_products(self.importer, ctx, transformed)
 
     def test_reimport_updates_existing_default_code(self):
         """Re-import with same sap_item_code updates existing record without duplication."""

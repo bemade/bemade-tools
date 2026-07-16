@@ -36,6 +36,10 @@ from unittest.mock import MagicMock
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
+from odoo.addons.sap_b1_to_odoo.models.pipelines.carrier_account_etl import (
+    DeliveryCarrierAccountImporter,
+)
+
 
 def _make_ctx(env, sap_rows):
     ctx = MagicMock()
@@ -63,17 +67,31 @@ class TestCarrierAccountEtl(TransactionCase):
         existing = cls.env["delivery.carrier"].search([])
         if len(existing) != 1:
             existing.unlink()
-            cls.env["delivery.carrier"].create({"name": "Test Default Carrier"})
+            cls.env["delivery.carrier"].create({
+                "name": "Test Default Carrier",
+                "product_id": cls.env["product.product"].create({
+                    "name": "Test Default Carrier Product",
+                    "type": "service",
+                }).id,
+            })
 
     def _run_pipeline(self, sap_rows):
-        """Drive extract -> transform -> load over mocked OCRD/OSHP rows."""
+        """Drive extract -> transform -> load over mocked OCRD/OSHP rows.
+
+        Bind the BASE implementations explicitly: extending modules (e.g.
+        rwi_sap_b1_to_odoo) override these steps with extra SQL the mocked
+        cursor cannot serve. These tests guard the base pipeline's logic
+        only; overlay behaviour is covered by the extending module's tests.
+        """
         ctx = _make_ctx(self.env, sap_rows)
-        extracted = self.importer.extract_carriers_and_accounts(ctx)
-        transformed = self.importer.transform_carriers_and_accounts(
-            ctx, {"extract_carriers_and_accounts": extracted}
+        extracted = DeliveryCarrierAccountImporter.extract_carriers_and_accounts(
+            self.importer, ctx
         )
-        self.importer.load_carriers_and_accounts(
-            ctx, {"transform_carriers_and_accounts": transformed}
+        transformed = DeliveryCarrierAccountImporter.transform_carriers_and_accounts(
+            self.importer, ctx, {"extract_carriers_and_accounts": extracted}
+        )
+        DeliveryCarrierAccountImporter.load_carriers_and_accounts(
+            self.importer, ctx, {"transform_carriers_and_accounts": transformed}
         )
         return extracted, transformed
 
