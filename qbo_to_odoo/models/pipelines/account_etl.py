@@ -572,6 +572,12 @@ class QboAccountFinalizer(models.AbstractModel):
         # reconciliation is final. Must run AFTER _retry_credit_reconciliation.
         self._book_payment_fx_trueup(ctx)
 
+        # Cent-scale rounding parity — after all structural corrections,
+        # book the per-transaction rounding remainders (per-line rounding
+        # differs between the systems) so every account ties to the source
+        # GL to the penny. Must run LAST.
+        self._book_gl_cent_trueup(ctx)
+
         inactive_qbo_ids = transformed.get("transform_inactive_accounts", [])
         if not inactive_qbo_ids:
             _logger.info("No inactive QBO accounts to archive")
@@ -794,7 +800,9 @@ class QboAccountFinalizer(models.AbstractModel):
 
         # Guard against a double-run (e.g. finalizer re-executed on a DB that
         # already has the true-up).
-        if env["account.move"].search_count([("ref", "=", "QBO_FX_TRUEUP")]):
+        if env["account.move"].search_count(
+            [("ref", "=like", "QBO_FX_TRUEUP%")]
+        ):
             _logger.info("FX true-up already booked — skipping")
             return
 
@@ -993,7 +1001,9 @@ class QboAccountFinalizer(models.AbstractModel):
                 "move_type": "entry",
                 "date": dt,
                 "journal_id": exch_journal.id,
-                "ref": "QBO_FX_TRUEUP",
+                # Per-txn ref so downstream per-transaction attribution
+                # (the cent-parity pass) can fold this back onto its txn.
+                "ref": f"QBO_FX_TRUEUP:{kind}:{qid}",
                 "line_ids": [(0, 0, exch_line), (0, 0, ctrl_line)],
             })
 
@@ -1004,4 +1014,191 @@ class QboAccountFinalizer(models.AbstractModel):
             "account (recovered from AR/AP control; %d skipped without "
             "control account)",
             len(moves), net, skipped_no_ctrl,
+        )
+
+    @staticmethod
+    def _book_gl_cent_trueup(ctx: ETLContext):
+        """Book per-transaction rounding-parity entries against the source GL.
+
+        After every structural correction, what remains between Odoo and the
+        JournalReport cache is per-document rounding: the two systems round
+        line amounts differently (per-line vs per-total), leaving cent-scale
+        gaps scattered across accounts.  Both ledgers are balanced, so each
+        transaction's per-account gaps sum to zero — which makes the exact
+        remainder bookable as ONE balanced parity entry per transaction,
+        dated at the transaction, with one leg per account.
+
+        Attribution folds every Odoo move onto its QBO transaction: entity
+        qbo-id columns, account.payment ids, stamped exchange moves
+        (``QBO_EXCH:<Kind>:<id>``), per-txn FX true-ups
+        (``QBO_FX_TRUEUP:<Kind>:<id>``), and journal-fallback moves
+        (``JNL-<type>-<id>``).  Heuristic-retry exchange moves and their
+        reversals cancel pairwise and are excluded.  QBO transaction ids are
+        globally unique across types, so keys never collide.
+
+        Safety guards (each skip is logged):
+        - any per-account gap over 1.00 → not rounding, skip the txn;
+        - a txn whose gaps don't sum to zero → incomplete attribution, skip.
+
+        Runs once, last.  Idempotent via the ``QBO_CENT_TRUEUP`` ref.
+        """
+        env = ctx.env
+        company = env.company
+        journal = company.currency_exchange_journal_id
+        if not journal:
+            _logger.warning(
+                "Cent parity skipped: company.currency_exchange_journal_id "
+                "not configured"
+            )
+            return
+        if env["account.move"].search_count([("ref", "=", "QBO_CENT_TRUEUP")]):
+            _logger.info("Cent parity already booked — skipping")
+            return
+
+        env.cr.execute(
+            """
+            WITH codes AS (
+                SELECT id, code_store::jsonb ->> %(cid)s AS code
+                FROM account_account
+                WHERE code_store::jsonb ->> %(cid)s IS NOT NULL
+            ),
+            odoo_side AS (
+                SELECT c.code,
+                       CASE
+                         WHEN m.ref IN ('QBO_EXCH:RETRY',
+                                        'QBO_FX_RETRY_REVERSAL')
+                           THEN NULL  -- cancels pairwise, no txn identity
+                         WHEN m.ref LIKE 'QBO\\_EXCH:%%'
+                           THEN split_part(m.ref, ':', 3)
+                         WHEN m.ref LIKE 'QBO\\_FX\\_TRUEUP:%%'
+                           THEN split_part(m.ref, ':', 3)
+                         WHEN m.ref LIKE 'JNL-%%'
+                           THEN regexp_replace(m.ref, '^JNL-.*-', '')
+                         ELSE COALESCE(
+                             m.qbo_invoice_id::text, m.qbo_bill_id::text,
+                             m.qbo_credit_memo_id::text,
+                             m.qbo_vendor_credit_id::text,
+                             m.qbo_journal_entry_id::text,
+                             m.qbo_deposit_id::text, m.qbo_expense_id::text,
+                             m.qbo_transfer_id::text,
+                             m.qbo_sales_receipt_id::text,
+                             m.qbo_refund_receipt_id::text,
+                             m.qbo_tax_payment_id::text,
+                             m.qbo_cc_payment_id::text,
+                             p.qbo_payment_id::text,
+                             p.qbo_bill_payment_id::text)
+                       END AS key,
+                       min(m.date) AS dt,
+                       sum(aml.balance) AS v
+                FROM account_move m
+                LEFT JOIN account_payment p ON p.move_id = m.id
+                JOIN account_move_line aml ON aml.move_id = m.id
+                JOIN codes c ON c.id = aml.account_id
+                WHERE m.state = 'posted'
+                GROUP BY 1, 2
+            ),
+            qbo_side AS (
+                SELECT l.account_code AS code, t.qbo_txn_id AS key,
+                       min(t.txn_date) AS dt,
+                       sum(l.debit - l.credit) AS v
+                FROM qbo_journal_cache_transaction t
+                JOIN qbo_journal_cache_line l ON l.transaction_id = t.id
+                WHERE l.account_code IS NOT NULL
+                GROUP BY 1, 2
+            )
+            SELECT COALESCE(q.key, o.key) AS key,
+                   COALESCE(q.code, o.code) AS code,
+                   COALESCE(q.dt, o.dt) AS dt,
+                   round((COALESCE(q.v, 0) - COALESCE(o.v, 0))::numeric, 2)
+                       AS gap
+            FROM qbo_side q
+            FULL OUTER JOIN odoo_side o
+              ON o.code = q.code AND o.key = q.key
+            WHERE COALESCE(q.key, o.key) IS NOT NULL
+              AND abs(COALESCE(q.v, 0) - COALESCE(o.v, 0)) >= 0.005
+            ORDER BY 3, 1, 2
+            """,
+            {"cid": str(company.id)},
+        )
+        rows = env.cr.fetchall()
+        if not rows:
+            _logger.info("Cent parity: ledgers already tie to the penny")
+            return
+
+        acct_by_code = {
+            a.code: a
+            for a in env["account.account"].search([])
+            if a.code
+        }
+        by_txn = {}
+        for key, code, dt, gap in rows:
+            by_txn.setdefault(key, {"dt": dt, "gaps": []})
+            by_txn[key]["gaps"].append((code, float(gap)))
+            if dt and (by_txn[key]["dt"] is None or dt < by_txn[key]["dt"]):
+                by_txn[key]["dt"] = dt
+
+        move_vals = []
+        skipped = 0
+        gross = 0.0
+        for key, data in by_txn.items():
+            gaps = data["gaps"]
+            if any(abs(g) > 1.0 for _, g in gaps):
+                skipped += 1
+                _logger.warning(
+                    "Cent parity: txn %s has a gap over 1.00 (%s) — not "
+                    "rounding, left un-trued",
+                    key, ", ".join(f"{c}:{g:+.2f}" for c, g in gaps),
+                )
+                continue
+            if abs(round(sum(g for _, g in gaps), 2)) >= 0.005:
+                skipped += 1
+                _logger.warning(
+                    "Cent parity: txn %s gaps don't balance (%s) — "
+                    "incomplete attribution, left un-trued",
+                    key, ", ".join(f"{c}:{g:+.2f}" for c, g in gaps),
+                )
+                continue
+            lines = []
+            for code, gap in gaps:
+                acct = acct_by_code.get(code)
+                if not acct:
+                    lines = []
+                    break
+                lv = {
+                    "account_id": acct.id,
+                    "name": f"QBO rounding parity {key}",
+                    "debit": gap if gap > 0 else 0.0,
+                    "credit": -gap if gap < 0 else 0.0,
+                }
+                cur = acct.currency_id
+                if cur and cur != company.currency_id:
+                    lv.update({"currency_id": cur.id, "amount_currency": 0.0})
+                lines.append((0, 0, lv))
+            if not lines:
+                skipped += 1
+                _logger.warning(
+                    "Cent parity: txn %s references an unmapped account "
+                    "code — left un-trued", key,
+                )
+                continue
+            gross += sum(abs(g) for _, g in gaps)
+            move_vals.append({
+                "move_type": "entry",
+                "date": data["dt"],
+                "journal_id": journal.id,
+                "ref": "QBO_CENT_TRUEUP",
+                "line_ids": lines,
+            })
+
+        if not move_vals:
+            _logger.info(
+                "Cent parity: nothing bookable (%d skipped)", skipped,
+            )
+            return
+        moves = env["account.move"].create(move_vals)
+        moves.action_post()
+        _logger.info(
+            "Cent parity: booked %d per-txn rounding entries (%.2f gross "
+            "absolute; %d skipped)",
+            len(moves), gross, skipped,
         )

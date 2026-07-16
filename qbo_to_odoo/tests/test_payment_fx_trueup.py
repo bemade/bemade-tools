@@ -131,7 +131,9 @@ class TestPaymentFxTrueup(TransactionCase):
         return move
 
     def _trueups(self):
-        return self.env["account.move"].search([("ref", "=", "QBO_FX_TRUEUP")])
+        return self.env["account.move"].search(
+            [("ref", "=like", "QBO_FX_TRUEUP%")]
+        )
 
     def test_ac1_books_full_gap_as_loss(self):
         # QBO booked a 100.00 FX loss (debit) Odoo never booked -> gap = +100.
@@ -200,6 +202,47 @@ class TestPaymentFxTrueup(TransactionCase):
         exch_leg = tu.line_ids.filtered(lambda l: l.account_id == self.exch_acct)
         self.assertAlmostEqual(exch_leg.debit, 60.0, 2,
                                msg="only the shortfall beyond stamped FX books")
+
+    def test_ac7_cent_parity_books_balanced_remainder(self):
+        # A cache txn whose Odoo counterpart is off by balanced cents gets
+        # ONE parity entry with a leg per account, dated at the txn.
+        self._seed_cache(910007, "2024-08-05", fx_debit=0.03)
+        # Odoo booked nothing for this txn: gaps = exch +0.03 / AR -0.03.
+        self.finalizer._book_gl_cent_trueup(_ctx(self.env))
+
+        parity = self.env["account.move"].search(
+            [("ref", "=", "QBO_CENT_TRUEUP")]
+        )
+        self.assertEqual(len(parity), 1, "one balanced parity entry expected")
+        self.assertEqual(str(parity.date), "2024-08-05")
+        exch_leg = parity.line_ids.filtered(
+            lambda l: l.account_id == self.exch_acct
+        )
+        ar_leg = parity.line_ids.filtered(
+            lambda l: l.account_id == self.ar_acct
+        )
+        self.assertAlmostEqual(exch_leg.debit, 0.03, 2)
+        self.assertAlmostEqual(ar_leg.credit, 0.03, 2)
+        # Idempotent.
+        self.finalizer._book_gl_cent_trueup(_ctx(self.env))
+        self.assertEqual(
+            self.env["account.move"].search_count(
+                [("ref", "=", "QBO_CENT_TRUEUP")]
+            ),
+            1,
+            "second run must book nothing",
+        )
+
+    def test_ac8_cent_parity_skips_non_rounding_gaps(self):
+        # A gap over 1.00 is not rounding — the txn must be skipped.
+        self._seed_cache(910008, "2024-09-01", fx_debit=25.0)
+        self.finalizer._book_gl_cent_trueup(_ctx(self.env))
+        self.assertFalse(
+            self.env["account.move"].search(
+                [("ref", "=", "QBO_CENT_TRUEUP")]
+            ),
+            "gaps over the rounding threshold must not be parity-booked",
+        )
 
     def test_ac6_retry_fx_reversed(self):
         # A heuristic-retry exchange move has no driving QBO txn: its FX is
