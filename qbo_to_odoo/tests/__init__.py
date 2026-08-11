@@ -10,3 +10,4 @@ from . import test_product_name_locale
 from . import test_bank_journal_suspense
 from . import test_cogs_completion
 from . import test_reconciliation_pass
+from . import test_vendor_currency
