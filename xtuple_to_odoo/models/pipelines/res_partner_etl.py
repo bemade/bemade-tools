@@ -214,6 +214,34 @@ class XtuplePartnerImportMixin(models.AbstractModel):
         last_name = partner_data.get("cntct_last_name", "") or ""
         return f"{first_name} {last_name}".strip()
 
+    @api.model
+    def _resolve_xtuple_currency_id(self, currency_abbr):
+        """Resolve an xTuple currency abbreviation to a ``res.currency`` id.
+
+        Mirrors the ISO-abbreviation resolution pattern used by the SAP B1
+        pipeline (``res_company_etl.py``, ``product_pricelist_etl.py``):
+        match on ``res.currency.name`` (the ISO code), searching with
+        ``active_test=False`` so a currency that exists but hasn't been
+        activated in this company/DB still resolves (see #4091 risk: a
+        USD vendor must map even if USD isn't enabled yet).
+
+        Degrades gracefully: returns ``False`` (leaving the field unset,
+        never raising) when there is no abbreviation or no matching
+        currency, since a vendor with an unresolved currency should still
+        import -- it simply falls back to displaying the company currency.
+        """
+        if not currency_abbr:
+            return False
+        abbr = str(currency_abbr).strip().upper()
+        if not abbr:
+            return False
+        currency = (
+            self.env["res.currency"]
+            .with_context(active_test=False)
+            .search([("name", "=", abbr)], limit=1)
+        )
+        return currency.id if currency else False
+
 
 # =============================================================================
 # Customer Importer Pipeline
@@ -483,15 +511,24 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
         )
         crmacct_to_partner = {row[0]: row[1] for row in ctx.env.cr.fetchall()}
 
+        # NOTE (#4091): the vend_curr_id -> curr_symbol.curr_abbr JOIN below
+        # is the standard xTuple/OpenMFG schema but was NOT verified against
+        # a live xTuple DB (no XTUPLE_* env vars / live connection were
+        # available when this was written -- see 03-implementation-notes.md).
+        # If the column/table names are wrong for a given source, this
+        # surfaces as a loud SQL error at extract time (not silent bad
+        # data) -- see design Risks.
         select_clause = f"""
         SELECT
             {VENDOR_SELECT},
             crmacct_parent_id,
-            crmacct.crmacct_id as vend_crmacct_id
+            crmacct.crmacct_id as vend_crmacct_id,
+            curr.curr_abbr as vend_curr_abbr
         FROM vendinfo
         LEFT JOIN cntct ON (vend_cntct1_id = cntct_id)
         LEFT JOIN addr ON (vend_addr_id = addr_id)
         LEFT JOIN crmacct ON (crmacct_vend_id = vend_id)
+        LEFT JOIN curr_symbol curr ON (curr.curr_id = vend_curr_id)
         """
 
         if existing_vend_ids:
@@ -595,6 +632,11 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
                     "supplier_rank": 1,
                 }
             )
+            currency_id = self._resolve_xtuple_currency_id(
+                vendor.get("vend_curr_abbr")
+            )
+            if currency_id:
+                vals["property_purchase_currency_id"] = currency_id
             create_vals.append(vals)
 
         # Transform vendors that need xTuple fields updated (matched by name)
@@ -616,6 +658,10 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
                     "_addr_zip": address_info["zip"],
                     "_addr_state_id": address_info["state"].id if address_info["state"] else False,
                     "_addr_country_id": address_info["country"].id if address_info["country"] else False,
+                    # Currency for backfill (only applied if partner has none, in load)
+                    "_currency_id": self._resolve_xtuple_currency_id(
+                        vendor.get("vend_curr_abbr")
+                    ),
                 }
             )
 
@@ -657,6 +703,7 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
             updated = 0
             for vals in update_vals:
                 name = vals.pop("name")
+                currency_id = vals.pop("_currency_id", False)
                 # Extract address backfill values (prefixed with _addr_)
                 addr_backfill = {
                     k[len("_addr_"):]: v
@@ -684,6 +731,9 @@ class XtuplePartnerVendorImporter(models.AbstractModel):
                         vals["state_id"] = addr_backfill["state_id"]
                     if not partner.country_id and addr_backfill.get("country_id"):
                         vals["country_id"] = addr_backfill["country_id"]
+                    # Backfill currency only if the partner has none set yet
+                    if not partner.property_purchase_currency_id and currency_id:
+                        vals["property_purchase_currency_id"] = currency_id
 
                     partner.write(vals)
                     updated += 1
@@ -1265,6 +1315,7 @@ class XtuplePartnerVendorLinker(models.AbstractModel):
 
     _name = "xtuple.partner.vendor.linker"
     _description = "xTuple Vendor Linker"
+    _inherit = "xtuple.partner.import.mixin"
 
     @ETL.extract("vendinfo")
     def extract_vendors_for_linking(self, ctx: ETLContext) -> List[Dict]:
@@ -1286,11 +1337,18 @@ class XtuplePartnerVendorLinker(models.AbstractModel):
         )
         existing_vend_ids = {row[0] for row in ctx.env.cr.fetchall()}
 
+        # NOTE (#4091): see the identical caveat on
+        # XtuplePartnerVendorImporter._get_vendor_base_query -- the
+        # vend_curr_id -> curr_symbol.curr_abbr JOIN is unverified against a
+        # live xTuple DB; a schema mismatch surfaces as a loud SQL error at
+        # extract time rather than silently omitting currency data.
         select_clause = """
         SELECT
             vend_id,
-            vend_name
+            vend_name,
+            curr.curr_abbr as vend_curr_abbr
         FROM vendinfo
+        LEFT JOIN curr_symbol curr ON (curr.curr_id = vend_curr_id)
         WHERE vend_name IS NOT NULL AND vend_name != ''
         """
         ctx.cr.execute(select_clause)
@@ -1320,13 +1378,17 @@ class XtuplePartnerVendorLinker(models.AbstractModel):
                 continue
             partner_id = vendor.get("_partner_id")
             if partner_id:
-                link_updates.append(
-                    {
-                        "partner_id": partner_id,
-                        "xtuple_vend_id": vendor.get("vend_id"),
-                        "name": vendor.get("vend_name", ""),
-                    }
+                update = {
+                    "partner_id": partner_id,
+                    "xtuple_vend_id": vendor.get("vend_id"),
+                    "name": vendor.get("vend_name", ""),
+                }
+                currency_id = self._resolve_xtuple_currency_id(
+                    vendor.get("vend_curr_abbr")
                 )
+                if currency_id:
+                    update["_currency_id"] = currency_id
+                link_updates.append(update)
 
         _logger.info(f"Found {len(link_updates)} partners to link as vendors by name")
         return link_updates
@@ -1359,5 +1421,14 @@ class XtuplePartnerVendorLinker(models.AbstractModel):
                 f"Linked partner {update['partner_id']} (name={update['name']}) "
                 f"to xTuple vendor {update['xtuple_vend_id']}"
             )
+
+            # Currency backfill only (never overwrite an existing value);
+            # company_dependent field, so this must go through the ORM
+            # rather than the raw SQL UPDATE above.
+            currency_id = update.get("_currency_id")
+            if currency_id:
+                partner = ctx.env["res.partner"].browse(update["partner_id"])
+                if not partner.property_purchase_currency_id:
+                    partner.write({"property_purchase_currency_id": currency_id})
 
         _logger.info(f"Linked {len(link_updates)} existing partners to xTuple vendors")

@@ -541,4 +541,120 @@ class TestVendorCrmacctMatching(TransactionCase):
         )
 
         self.assertEqual(len(vendors), 1)
-        self.assertNotIn("_existing_customer_partner_id", vendors[0])        
+        self.assertNotIn("_existing_customer_partner_id", vendors[0])
+
+
+# Regression coverage for #4091: the xTuple vendor importer must map the
+# vendor's source currency (best-effort vend_curr_id -> curr_symbol.curr_abbr
+# -> res.currency by ISO name, see `_resolve_xtuple_currency_id`) onto
+# `property_purchase_currency_id`, mirroring what the QBO vendor importer
+# already does for `CurrencyRef`. These tests drive `transform_vendors`
+# directly against a fake cursor (via `_FakeXtupleCursor`) and a pre-built
+# `vend_curr_abbr` key, so they stay valid regardless of whether the real
+# xTuple `vend_curr_id` -> `curr_symbol.curr_abbr` JOIN in
+# `_get_vendor_base_query` matches the live schema (unverified, see design
+# risk / 03-implementation-notes.md).
+class TestVendorCurrencyMapping(TransactionCase):
+    def setUp(self):
+        super().setUp()
+        self.vendor_importer = self.env["xtuple.partner.vendor.importer"].with_company(
+            self.env.company
+        )
+
+    def _transform_new_vendor(self, vendor_row):
+        """Drive `transform_vendors`'s create path with a single fake vendor
+        row, bypassing the extract phase entirely (extract is exercised
+        separately by TestVendorCrmacctMatching)."""
+        ctx = ETLContext(cr=_FakeXtupleCursor([]), env=self.env)
+        extracted = {
+            "extract_new_vendors": [vendor_row],
+            "extract_vendors_to_update": [],
+        }
+        result = self.vendor_importer.transform_vendors(ctx, extracted)
+        self.assertEqual(len(result["create"]), 1)
+        return result["create"][0]
+
+    def test_vendor_currency_usd_maps_to_property_purchase_currency(self):
+        usd = self.env["res.currency"].with_context(active_test=False).search(
+            [("name", "=", "USD")], limit=1
+        )
+        self.assertTrue(usd, "USD currency must exist in the demo chart for this test")
+
+        vals = self._transform_new_vendor(
+            {
+                "vend_id": 601,
+                "vend_number": "V601",
+                "vend_name": "US Dollar Vendor",
+                "vend_active": True,
+                "vend_curr_abbr": "USD",
+            }
+        )
+        self.assertEqual(vals["property_purchase_currency_id"], usd.id)
+
+    def test_vendor_currency_cad_maps_to_property_purchase_currency(self):
+        cad = self.env["res.currency"].with_context(active_test=False).search(
+            [("name", "=", "CAD")], limit=1
+        )
+        self.assertTrue(cad, "CAD currency must exist in the demo chart for this test")
+
+        vals = self._transform_new_vendor(
+            {
+                "vend_id": 602,
+                "vend_number": "V602",
+                "vend_name": "Canadian Dollar Vendor",
+                "vend_active": True,
+                "vend_curr_abbr": "CAD",
+            }
+        )
+        self.assertEqual(vals["property_purchase_currency_id"], cad.id)
+
+    def test_vendor_with_unknown_currency_abbr_leaves_field_unset(self):
+        """An abbreviation that doesn't match any res.currency must not
+        raise and must simply leave the key unset (falls back to displaying
+        the company currency), not abort the vendor's creation."""
+        vals = self._transform_new_vendor(
+            {
+                "vend_id": 603,
+                "vend_number": "V603",
+                "vend_name": "Unknown Currency Vendor",
+                "vend_active": True,
+                "vend_curr_abbr": "ZZZ",
+            }
+        )
+        self.assertNotIn("property_purchase_currency_id", vals)
+
+    def test_vendor_with_no_currency_abbr_leaves_field_unset(self):
+        """Simulates either a NULL vend_curr_id, or the fallback query used
+        when the currency JOIN itself fails against the live xTuple schema
+        (`vend_curr_abbr` key simply absent from the row)."""
+        vals = self._transform_new_vendor(
+            {
+                "vend_id": 604,
+                "vend_number": "V604",
+                "vend_name": "No Currency Vendor",
+                "vend_active": True,
+            }
+        )
+        self.assertNotIn("property_purchase_currency_id", vals)
+
+    def test_currency_resolves_even_when_inactive_in_target_company(self):
+        """Guards the most likely silent-failure mode (see design Risks): a
+        currency that exists in Odoo's currency list but hasn't been
+        activated for this company/DB must still resolve, since the
+        resolver searches with active_test=False."""
+        currency = self.env["res.currency"].with_context(active_test=False).search(
+            [("active", "=", False)], limit=1
+        )
+        if not currency:
+            self.skipTest("No inactive res.currency available to test against")
+
+        vals = self._transform_new_vendor(
+            {
+                "vend_id": 605,
+                "vend_number": "V605",
+                "vend_name": "Inactive Currency Vendor",
+                "vend_active": True,
+                "vend_curr_abbr": currency.name,
+            }
+        )
+        self.assertEqual(vals["property_purchase_currency_id"], currency.id)
