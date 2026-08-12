@@ -298,6 +298,12 @@ class QboMigrationReport(models.Model):
         QBO so no source filter is needed.  Using all posted moves avoids
         false negatives from enriched payments whose ``qbo_*_id`` lives on
         ``account.payment`` rather than ``account.move``.
+
+        Excludes ``qbo.year.end.close`` moves (``ref LIKE 'QBO_YE_CLOSE:%'``):
+        those are deliberately absent from QBO's GL cache (QBO never closes
+        the books in Odoo's sense), so including them would manufacture
+        drift on the Retained Earnings / Current-Year-Earnings accounts
+        that nets to zero and isn't a real migration discrepancy.
         """
         cr = self.env.cr
         cr.execute(
@@ -311,6 +317,7 @@ class QboMigrationReport(models.Model):
               JOIN account_account aa ON aml.account_id = aa.id
               JOIN account_move am ON aml.move_id = am.id
              WHERE am.state = 'posted'
+               AND (am.ref IS NULL OR am.ref NOT LIKE 'QBO\\_YE\\_CLOSE:%')
              GROUP BY aa.id, code, acct_name
              ORDER BY code
         """
@@ -341,6 +348,7 @@ class QboMigrationReport(models.Model):
               JOIN account_account aa ON aml.account_id = aa.id
               JOIN account_move am ON aml.move_id = am.id
              WHERE am.state = 'posted'
+               AND (am.ref IS NULL OR am.ref NOT LIKE 'QBO\\_YE\\_CLOSE:%')
              ORDER BY am.date, am.id
         """
         )
