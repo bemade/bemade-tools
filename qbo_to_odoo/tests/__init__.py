@@ -11,3 +11,4 @@ from . import test_bank_journal_suspense
 from . import test_cogs_completion
 from . import test_reconciliation_pass
 from . import test_vendor_currency
+from . import test_year_end_close

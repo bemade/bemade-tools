@@ -25,3 +25,4 @@ from . import sales_receipt_etl
 from . import refund_receipt_etl
 from . import cc_payment_etl
 from . import journal_fallback_etl
+from . import year_end_close
