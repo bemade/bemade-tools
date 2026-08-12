@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <!--
+        Year-end closing entries (qbo.year.end.close pipeline) are opt-in:
+        every migration must explicitly enable them via this parameter
+        before any closing move is posted. noupdate="1" so a value the
+        user has already changed on-site is never overwritten by a
+        module upgrade.
+    -->
+    <record id="year_end_close_enabled" model="ir.config_parameter" forcecreate="0">
+        <field name="key">qbo_to_odoo.year_end_close.enabled</field>
+        <field name="value">0</field>
+    </record>
+
+    <record id="year_end_close_retained_earnings_code" model="ir.config_parameter" forcecreate="0">
+        <field name="key">qbo_to_odoo.year_end_close.retained_earnings_code</field>
+        <field name="value">3200</field>
+    </record>
+</odoo>
