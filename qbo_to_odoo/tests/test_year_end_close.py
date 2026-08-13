@@ -418,3 +418,90 @@ class TestYearEndClosePipeline(TransactionCase):
 
         with self.assertRaises(UserError):
             self._run_pipeline()
+
+
+@tagged("post_install", "-at_install", "qbo_year_end_close")
+class TestYearEndCloseConfigDataUpgrade(TransactionCase):
+    """Regression test for the ``forcecreate="0"`` XML-loading bug (task 4096
+    rework): ``data/ir_config_parameter.xml`` seeds
+    ``YEAR_END_CLOSE_ENABLED_PARAM``/``YEAR_END_CLOSE_RE_CODE_PARAM`` under
+    ``noupdate="1"``. With ``forcecreate="0"`` on those two ``<record>``
+    elements, Odoo's XML loader (``odoo/tools/convert.py``, around the
+    ``self.noupdate and self.mode != 'init'`` branch) *skips creating* a
+    ``noupdate`` record that doesn't already exist whenever the owning module
+    is being *upgraded* rather than freshly installed
+    (``odoo/modules/loading.py``: ``mode = 'update' if package.state == 'to
+    upgrade' else 'init'``) — exactly the path a `-u qbo_to_odoo` deploy takes
+    on any environment where the module predates this feature. That silently
+    leaves both ``ir.config_parameter`` records missing, so a client module
+    (e.g. ``verajet_qbo_to_odoo``) that overrides them by external ID fails
+    to install/upgrade with ``Cannot update missing record``.
+
+    Exercising only ``get_year_end_close_config``/``set_param`` (as the
+    other tests in this module do) never touches XML loading at all, so it
+    can't catch this class of bug. This test instead replays the *exact*
+    loader call Odoo's module installer makes for an upgrade of an
+    already-installed module (``mode="update"``, ``noupdate=True``) against
+    this module's own data file, which is precisely the scenario that broke
+    in production.
+    """
+
+    def test_ir_config_parameter_records_created_on_noupdate_reload(self):
+        # Simulate an environment where qbo_to_odoo predates this feature:
+        # neither the ir.model.data entries nor the ir.config_parameter
+        # records exist yet.
+        self.env["ir.model.data"].search(
+            [
+                ("module", "=", "qbo_to_odoo"),
+                (
+                    "name",
+                    "in",
+                    [
+                        "year_end_close_enabled",
+                        "year_end_close_retained_earnings_code",
+                    ],
+                ),
+            ]
+        ).unlink()
+        self.env["ir.config_parameter"].sudo().search(
+            [
+                (
+                    "key",
+                    "in",
+                    [
+                        YEAR_END_CLOSE_ENABLED_PARAM,
+                        YEAR_END_CLOSE_RE_CODE_PARAM,
+                    ],
+                )
+            ]
+        ).unlink()
+
+        # Replay the module installer's *upgrade* load of this module's own
+        # data file — mode="update" + noupdate=True is exactly what
+        # odoo/modules/loading.py uses for `package.state == 'to upgrade'`.
+        from odoo.tools.convert import convert_file  # noqa: PLC0415
+
+        convert_file(
+            self.env,
+            "qbo_to_odoo",
+            "data/ir_config_parameter.xml",
+            {},
+            mode="update",
+            noupdate=True,
+        )
+
+        icp = self.env["ir.config_parameter"].sudo()
+        enabled_param = icp.search([("key", "=", YEAR_END_CLOSE_ENABLED_PARAM)])
+        re_code_param = icp.search([("key", "=", YEAR_END_CLOSE_RE_CODE_PARAM)])
+        self.assertTrue(
+            enabled_param,
+            "year_end_close.enabled must be created on upgrade, not only on "
+            "fresh install, or a client module's override-by-xmlid breaks",
+        )
+        self.assertTrue(
+            re_code_param,
+            "year_end_close.retained_earnings_code must be created on "
+            "upgrade, not only on fresh install",
+        )
+        self.assertEqual(enabled_param.value, "0")
+        self.assertEqual(re_code_param.value, "3200")
