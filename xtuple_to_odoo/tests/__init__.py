@@ -6,3 +6,4 @@ from . import test_bom_import
 from . import test_partner_etl_addresses
 from . import test_purchase_order_receipt_status
 from . import test_mo_pick_import
+from . import test_mo_finished_move_import

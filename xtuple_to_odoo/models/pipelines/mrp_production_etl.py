@@ -528,3 +528,139 @@ class XtupleMrpPickGenerator(models.AbstractModel):
             warehouse.pbm_type_id.name,
         )
         return True
+
+
+# =============================================================================
+# MO finished-move generation (task 4119)
+# =============================================================================
+#
+# The MO importer writes ``state`` directly (see
+# ``XtupleMrpProductionImporter`` above) rather than going through Odoo's
+# normal draft -> confirm lifecycle, so the finished-goods move that a native
+# confirm/save would create for an open MO is never produced.  Odoo's stored
+# compute for that field, ``_compute_move_finished_ids``
+# (``mrp/models/mrp_production.py``), is guarded to only (re)build finished
+# moves for ``state == 'draft'`` MOs — for any other state it just syncs the
+# ``date``/``date_deadline`` on any *existing* finished moves and otherwise
+# no-ops.  So an imported ``confirmed``/``progress``/``to_close`` MO is left
+# with zero finished moves unless something else creates them.
+#
+# This pipeline closes that gap using the SAME value-builder Odoo's own
+# compute would have used: it calls the MO's native
+# ``_create_update_move_finished()`` directly (the helper the compute itself
+# delegates to), which in turn calls ``_get_moves_finished_values()`` /
+# ``_get_move_finished_values()`` to build the finished move (plus any BOM
+# byproduct moves) exactly as a native confirm/save would.  Calling this
+# helper directly on a non-draft MO is off Odoo's usual path — normally only
+# the draft-guarded compute reaches it — but the helper itself carries no
+# state guard, and assigning the resulting moves to ``move_finished_ids``
+# routes through ``mrp.production.write``, whose override explicitly handles
+# a ``move_finished_ids`` write on a non-draft MO by running
+# ``_autoconfirm_production()``.  So the newly created draft finished move(s)
+# are auto-confirmed in the same call, landing in the same confirmed state a
+# normal confirm would produce.
+#
+# Runs after the PICK generator (``xtuple.mrp.pick.generator``, task 3810) so
+# a full import's MO-related steps stay in one deterministic sequence; the two
+# steps are otherwise independent (finished-move creation does not depend on
+# the component PICK).  Load-only, like the PICK generator: no xTuple payload
+# to extract/transform, just a DB query over already-imported MOs, which also
+# makes it idempotent and safe to re-run.
+
+
+@ETL.pipeline(
+    target_model="mrp.production",
+    importer_name="xtuple.mrp.finished.move.generator",
+    depends_on=[
+        "xtuple.mrp.pick.generator",
+    ],
+)
+class XtupleMrpFinishedMoveGenerator(models.AbstractModel):
+    """Generate the finished-goods move for imported open/in-progress MOs
+    that still lack one (task 4119).
+
+    Runs after the PICK generator and is auto-included in
+    ``action_import_all`` via the ``xtuple_to_odoo`` module filter.
+    Load-only: it has no xTuple payload to extract/transform — its work is a
+    DB query over already-imported MOs, which also makes it idempotent and
+    safe to re-run.
+    """
+
+    _name = "xtuple.mrp.finished.move.generator"
+    _description = "xTuple MO Finished-Move Generator"
+
+    # Same open/in-progress scope as the PICK generator (see
+    # transform_productions for the xTuple-status -> Odoo-state mapping):
+    # 'done'/'cancel' MOs (e.g. the ~5181 historical Done MOs) must be left
+    # untouched, and 'draft' MOs are out of scope for this ETL step (their
+    # native draft compute already handles finished moves).
+    _OPEN_STATES = ("confirmed", "progress", "to_close")
+
+    @ETL.load()
+    def generate_finished_moves(self, ctx: ETLContext, transformed: Dict) -> None:
+        """Create the finished move for every open/in-progress imported MO
+        that still lacks one.
+
+        Queries the DB directly (does not trust any transform payload) so the
+        step is re-runnable and order-independent.
+        """
+        productions = ctx.env["mrp.production"].search(
+            [
+                ("xtuple_wo_id", "!=", False),
+                ("state", "in", self._OPEN_STATES),
+            ]
+        )
+        generated = 0
+        skipped = 0
+        for production in productions:
+            if self._generate_finished_move(ctx, production):
+                generated += 1
+            else:
+                skipped += 1
+        _logger.info(
+            "Finished-move generation: generated for %d MO(s), skipped %d "
+            "already-present/empty",
+            generated,
+            skipped,
+        )
+
+    def _generate_finished_move(self, ctx: ETLContext, production) -> bool:
+        """Create the finished (+ byproduct) move(s) for one imported MO.
+
+        Returns True if a finished move was generated, False if it was
+        skipped (a finished move for the MO's product already exists, or the
+        MO has no product set).
+        """
+        if not production.product_id:
+            return False
+
+        # Idempotency + Done-scope safety: skip if a (non-cancel) finished
+        # move for the MO's own product already exists. Search stock.move
+        # directly so it's cache-independent within the transaction (as the
+        # PICK generator's existing-PICK guard does).
+        existing_finished_move = ctx.env["stock.move"].search_count(
+            [
+                ("production_id", "=", production.id),
+                ("product_id", "=", production.product_id.id),
+                ("state", "!=", "cancel"),
+            ]
+        )
+        if existing_finished_move:
+            _logger.debug(
+                "MO %s already has a finished move for %s — skipping",
+                production.name,
+                production.product_id.display_name,
+            )
+            return False
+
+        # Native builder: creates the finished (+ byproduct) moves in draft;
+        # the write override then autoconfirms them because the MO is
+        # non-draft (mrp.production.write: a move_finished_ids write on a
+        # non-draft MO runs _autoconfirm_production()).
+        production._create_update_move_finished()
+        _logger.info(
+            "MO %s: generated finished move(s) for %s",
+            production.name,
+            production.product_id.display_name,
+        )
+        return True
