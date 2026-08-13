@@ -8,6 +8,7 @@ These tests verify:
 - End-to-end reporting through pipeline execution
 """
 
+import logging
 from unittest.mock import patch
 
 from odoo.tests import TransactionCase, tagged
@@ -284,7 +285,23 @@ class TestExecutorReporting(TransactionCase):
             importer = self.env["test.logging.importer"]
 
             executor = ETLExecutor(pipeline, ctx, importer)
-            executor.execute()
+            # The demo pipeline deliberately logs a WARNING and an ERROR to prove
+            # the reporter auto-captures them. Silence the sibling root handlers
+            # for the duration so the deliberate ERROR doesn't land in the log and
+            # fail an Odoo.sh build ("errors detected in the logs"); the reporter's
+            # own ReportLogHandler is installed on root by execute() (added after,
+            # so it keeps its own level) and still captures them. mute_logger is
+            # unusable here — it sets propagate=False, which would stop the record
+            # ever reaching that root handler, defeating the capture under test.
+            _root = logging.getLogger()
+            _saved_levels = [(h, h.level) for h in _root.handlers]
+            for _h, _ in _saved_levels:
+                _h.setLevel(logging.CRITICAL)
+            try:
+                executor.execute()
+            finally:
+                for _h, _lvl in _saved_levels:
+                    _h.setLevel(_lvl)
 
             reporter.end_run(state="done")
 
