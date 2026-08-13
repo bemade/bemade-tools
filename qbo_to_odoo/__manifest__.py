@@ -19,7 +19,7 @@
 #
 {
     "name": "QuickBooks Online to Odoo",
-    "version": "19.0.0.1.0",
+    "version": "19.0.0.1.1",
     "summary": "Migrate QuickBooks Online data to Odoo using ETL Framework",
     "description": """
 Migrate QuickBooks Online data to Odoo including:

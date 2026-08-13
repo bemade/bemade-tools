@@ -6,13 +6,22 @@
         before any closing move is posted. noupdate="1" so a value the
         user has already changed on-site is never overwritten by a
         module upgrade.
+
+        Deliberately NOT forcecreate="0": these records must be created the
+        first time this file loads whether that happens on a fresh install
+        (mode="init", where forcecreate is moot) or on an *upgrade* of an
+        already-installed qbo_to_odoo (mode="update", where noupdate skips
+        creating any record forcecreate="0" — the default True is required,
+        or a client module's override-by-external-ID of these keys fails
+        with "Cannot update missing record" on upgrade; see
+        tests/test_year_end_close.py::TestYearEndCloseConfigDataUpgrade).
     -->
-    <record id="year_end_close_enabled" model="ir.config_parameter" forcecreate="0">
+    <record id="year_end_close_enabled" model="ir.config_parameter">
         <field name="key">qbo_to_odoo.year_end_close.enabled</field>
         <field name="value">0</field>
     </record>
 
-    <record id="year_end_close_retained_earnings_code" model="ir.config_parameter" forcecreate="0">
+    <record id="year_end_close_retained_earnings_code" model="ir.config_parameter">
         <field name="key">qbo_to_odoo.year_end_close.retained_earnings_code</field>
         <field name="value">3200</field>
     </record>
