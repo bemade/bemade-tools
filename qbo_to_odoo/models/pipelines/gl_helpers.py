@@ -661,7 +661,14 @@ def compute_fiscal_year_close_rows(
         )
         return []
 
-    pnl_accounts = env["account.account"].search([
+    # active_test=False is load-bearing: Odoo's report-only "Undistributed
+    # Profits/Losses" line resolves its accounts by account_type and never
+    # filters on `active`, so any archived P&L account skipped here becomes
+    # permanent drift between the posted Retained Earnings balance and the
+    # reported one. Migrated books make that the common case — the QBO
+    # account pipeline archives every account the source chart no longer
+    # uses, and those routinely carry years of historical activity.
+    pnl_accounts = env["account.account"].with_context(active_test=False).search([
         *env["account.account"]._check_company_domain(company),
         ("internal_group", "in", list(_PNL_INTERNAL_GROUPS)),
     ])

@@ -264,6 +264,67 @@ class TestYearEndClosePipeline(TransactionCase):
         self.assertEqual(by_label[2021][1], date(2021, 6, 30))
         self.assertEqual(by_label[2021][2], -300.0)
 
+    def test_archived_pnl_accounts_count_toward_the_fy_result(self):
+        """An archived P&L account still carrying posted lines must be included.
+
+        Odoo's report-only "Undistributed Profits/Losses" line resolves its
+        accounts by ``account_type`` and does *not* filter on ``active``, so
+        any P&L account this computation skips shows up as permanent drift
+        between the posted Retained Earnings balance and the reported one.
+
+        Migrated books make this the normal case rather than an edge case:
+        the QBO account pipeline archives every account the source chart no
+        longer uses, and plenty of those carry years of historical activity.
+        On the Verajet migration of 2026-08-14 this cost 21,044.98 across
+        6 of 12 closed fiscal years — 134 archived P&L accounts silently
+        dropped out of the close.
+        """
+        self._post_pnl_move(date(2020, 6, 15), expense_debit=300.0, income_credit=800.0)
+
+        # A second income account, carrying real FY2020 activity, that the
+        # migration later archives.
+        retired_income = self.env["account.account"].create({
+            "name": "Retired Product Line (YEC Test)",
+            "code": "YEC.INC.OLD",
+            "account_type": "income",
+        })
+        move = self.env["account.move"].create({
+            "move_type": "entry",
+            "journal_id": self.journal.id,
+            "date": date(2020, 6, 20),
+            "line_ids": [
+                Command.create({
+                    "account_id": retired_income.id,
+                    "name": "YEC test retired income",
+                    "debit": 0.0,
+                    "credit": 250.0,
+                }),
+                Command.create({
+                    "account_id": self.bank_account.id,
+                    "name": "YEC test plug",
+                    "debit": 250.0,
+                    "credit": 0.0,
+                }),
+            ],
+        })
+        move.action_post()
+        retired_income.action_archive()
+        self.assertFalse(retired_income.active, "fixture must actually be archived")
+
+        rows = compute_fiscal_year_close_rows(
+            self.env, self.company, self._config()
+        )
+        by_label = {r[0]: r for r in rows}
+
+        self.assertIn(2020, by_label)
+        self.assertEqual(
+            by_label[2020][2], -750.0,
+            "FY2020 must be 800 + 250 income - 300 expense = 750 profit; "
+            "an archived P&L account's balance cannot be dropped from the "
+            "close, or Retained Earnings drifts from the reported figure "
+            "by exactly the archived accounts' net",
+        )
+
     def test_zero_result_fy_is_skipped(self):
         """A closed FY whose income/expense lines net to exactly zero needs no close."""
         self._post_pnl_move(date(2020, 6, 15), expense_debit=500.0, income_credit=500.0)
