@@ -617,6 +617,22 @@ class XtupleProductSupplierInfoImporter(models.AbstractModel):
         product_map = data.get("product_map", {})
         vendor_map = data.get("vendor_map", {})
 
+        # Resolve each vendor's purchase currency up front. Without an explicit
+        # currency_id, Odoo falls back to the company currency, so every line
+        # for a USD vendor was created as CAD and the price on a purchase order
+        # was read as the wrong currency.
+        company = ctx.env.company
+        vendors = ctx.env["res.partner"].browse(
+            [vid for vid in set(vendor_map.values()) if vid]
+        )
+        currency_by_vendor = {
+            vendor.id: (
+                vendor.with_company(company).property_purchase_currency_id.id
+                or company.currency_id.id
+            )
+            for vendor in vendors
+        }
+
         supplier_info_vals = []
         for supplier in suppliers:
             product_tmpl_id = product_map.get(supplier.get("itemsrc_item_id"))
@@ -633,6 +649,9 @@ class XtupleProductSupplierInfoImporter(models.AbstractModel):
                     "product_code": supplier.get("itemsrc_vend_item_number"),
                     "min_qty": supplier.get("itemsrc_minordqty", 0.0),
                     "delay": supplier.get("itemsrc_leadtime", 0),
+                    "currency_id": currency_by_vendor.get(
+                        vendor_id, company.currency_id.id
+                    ),
                     "xtuple_itemsrc_id": supplier.get("itemsrc_id"),
                     "xtuple_default": supplier.get("itemsrc_default", False),
                 }
