@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="sage_database_view_form" model="ir.ui.view">
+        <field name="name">sage.database.form</field>
+        <field name="model">sage.database</field>
+        <field name="arch" type="xml">
+            <form string="Sage 50 Company File">
+                <header>
+                    <button name="action_test_connection" type="object"
+                            string="Test connection" class="btn-secondary"/>
+                    <button name="action_import_master_data" type="object"
+                            string="1. Master data" class="btn-primary"/>
+                    <button name="action_import_open_items" type="object"
+                            string="2. Open receivables and payables"
+                            class="btn-primary"/>
+                    <button name="action_import_opening_entries" type="object"
+                            string="3. Counter-entry and opening balance"
+                            class="btn-primary"/>
+                    <button name="action_check" type="object"
+                            string="Verify the take-on" class="btn-secondary"/>
+                </header>
+                <sheet>
+                    <div class="alert alert-warning" role="alert">
+                        The steps are ordered and re-runnable: every record
+                        carries the Sage id it came from, so a second run
+                        updates in place rather than duplicating. Read the
+                        resulting import report under <strong>ETL &gt; Import
+                        Reports</strong> — the warnings there are the point of
+                        the exercise.
+                    </div>
+                    <group>
+                        <group string="Company file">
+                            <field name="company_id"/>
+                            <field name="socket_path"/>
+                            <field name="database_host"
+                                   invisible="socket_path"/>
+                            <field name="database_port"
+                                   invisible="socket_path"/>
+                            <field name="database_name"/>
+                            <field name="database_username"/>
+                            <field name="database_password"
+                                   password="True"/>
+                            <field name="language"/>
+                        </group>
+                        <group string="Take-on">
+                            <field name="cutover_date"/>
+                            <field name="journal_id"/>
+                            <field name="transition_account_id"/>
+                            <field name="known_imbalance"/>
+                        </group>
+                    </group>
+                    <div class="text-muted">
+                        <p>
+                            Import everything at once with
+                            <button name="action_import_all" type="object"
+                                    string="Import all" class="btn-link p-0"/>,
+                            which runs the pipelines in dependency order.
+                        </p>
+                    </div>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="sage_database_view_list" model="ir.ui.view">
+        <field name="name">sage.database.list</field>
+        <field name="model">sage.database</field>
+        <field name="arch" type="xml">
+            <list string="Sage 50 Company Files">
+                <field name="display_name" string="Source"/>
+                <field name="company_id"/>
+                <field name="cutover_date"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="sage_database_action" model="ir.actions.act_window">
+        <field name="name">Sage 50 Take-on</field>
+        <field name="res_model">sage.database</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <menuitem id="sage_database_menu"
+              name="Sage 50 Take-on"
+              parent="account.menu_finance_configuration"
+              action="sage_database_action"
+              sequence="100"
+              groups="account.group_account_manager"/>
+</odoo>
