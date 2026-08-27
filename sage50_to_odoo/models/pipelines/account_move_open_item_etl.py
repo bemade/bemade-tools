@@ -6,16 +6,23 @@ document's detail rows. Reconstructed that way the two totals tie exactly to
 their control accounts, which is what makes this the source of truth for a
 take-on rather than the ageing report.
 
-There are usually no item lines to migrate — `bHasDetail` is 0 on every
-document in most files, because Sage invoices were coded straight to GL
-accounts. **The GL entry therefore *is* the line detail**, and it carries the
-real revenue and expense accounts and the real tax amounts, which is exactly
-what Sage's own CSV export drops.
+**`tcustr.bHasDetail` is 0 on essentially every document, and it does not
+mean the document has no lines.** It says the *receivable record* carries no
+detail. The item lines live in `titrec` / `titrline`, keyed on `sSource1` +
+`lVenCusId` rather than on the receivable's own id — which is why joining
+from the document finds nothing and the GL entry looks like the only source
+of line detail. It is not: `titrline` carries the item, the quantity and the
+unit price, none of which survives into the GL.
 
-Partially paid documents are imported at their residual with the non-control
-lines scaled pro rata. The alternative — importing the original amount and
-re-entering the payments — needs bank entries that have no counterpart in
-Odoo yet, and the counter-entry neutralises the revenue side either way.
+Documents are imported at what Sage says they WERE, not at what is left on
+them, because an imported document has to match the paper the client filed.
+Anything already applied against one is re-created as a payment of its own
+and reconciled, which is what brings the residual back.
+
+Two amount conventions meet here and they are not the same. `tjentact.dAmount`
+is signed in the ACCOUNT's natural side; `titrline.dAmt` is signed the way the
+DOCUMENT reads. They agree whenever the account's natural side matches the
+document's — most lines — and disagree silently on the rest.
 """
 
 import itertools
@@ -257,6 +264,84 @@ class SageOpenItemImporter(models.AbstractModel):
             )
         return staged
 
+    def _item_lines(self, ctx, source, partner_id, tax_accounts, original,
+                    document_sign):
+        """A document's item lines from `titrec` / `titrline`.
+
+        This is the table pair `tcustr.bHasDetail = 0` does NOT tell you
+        about. That flag says the *receivable* record carries no detail, and
+        it is 0 on essentially every document; the item lines live here
+        instead, keyed on `sSource1` + `lVenCusId` rather than on the
+        receivable's own id, which is why joining from the document finds
+        nothing and the GL entry looks like the only source.
+
+        `dAmt` is pre-tax — `titrec.dInvAmt` is the tax-inclusive total — so
+        these lines replace the GL entry's base lines only, and the tax still
+        comes from the GL entry.
+
+        Lines carry `lInventId` when the document was written against an
+        item and 0 when it was coded straight to an account; both occur in
+        the same document. Returns None when the document has no `titrec`
+        row at all, so the caller keeps the GL entry's lines.
+        """
+        records = tools.query(
+            ctx.cr,
+            """select lId, dInvAmt, dFreight from titrec
+                where sSource1 = %s and lVenCusId = %s
+                order by lId""",
+            (source, partner_id),
+        )
+        if not records:
+            return None
+        # A document number is not unique here either: an order and the
+        # invoice raised from it both land in `titrec` under the same
+        # `sSource1`. Concatenating them doubles the document. Pick the record
+        # whose own total matches what the document was worth — the same
+        # disambiguation the GL lookup uses — and fall back to the GL entry
+        # when none does, rather than guessing.
+        matching = [
+            record for record in records
+            if abs(abs(record["dInvAmt"]) - abs(original)) < 0.02
+        ]
+        if not matching:
+            return None
+        lines = []
+        for record in matching[-1:]:
+            for row in tools.query(
+                ctx.cr,
+                """select l.nLineNum, l.lInventId, l.lAcctId, l.dQty,
+                          l.dPrice, l.dAmt
+                     from titrline l
+                    where l.lITRecId = %s order by l.nLineNum""",
+                (record["lId"],),
+            ):
+                # Sage pads documents with empty filler rows. Some of them
+                # carry an item id and nothing else — no amount, no quantity
+                # and no account — so the item alone does not make a line
+                # real.
+                if not row["dAmt"] and not row["dQty"]:
+                    continue
+                account = row["lAcctId"]
+                if account in tax_accounts:
+                    continue
+                lines.append({
+                    "account": account,
+                    # `dAmt` is signed the way the DOCUMENT reads — positive
+                    # adds to the invoice — which is NOT how `tjentact.dAmount`
+                    # is signed. GL lines are stored in the account's natural
+                    # side and need `signed_amount`; these need the document's
+                    # side instead. The two rules agree whenever the account's
+                    # natural side matches the document's, which is most lines,
+                    # and disagree silently on the rest — a liability account
+                    # on a bill, an asset account on an invoice.
+                    "amount": round(document_sign * row["dAmt"], 2),
+                    "sage_product_id": row["lInventId"] or 0,
+                    "quantity": row["dQty"] or 0.0,
+                    "price_unit": row["dPrice"] or 0.0,
+                    "label": None,
+                })
+        return lines or None
+
     def _collect(self, ctx, side, spec, control, tax_accounts) -> list:
         open_docs = tools.query(
             ctx.cr,
@@ -330,13 +415,24 @@ class SageOpenItemImporter(models.AbstractModel):
             # Everything below is debit-positive, so both sides can be
             # reasoned about the same way: a receivable is a debit, a payable
             # a credit.
+            #
+            # The document is imported at what Sage says it WAS, not at what
+            # is left on it. Anything already applied against it arrives as a
+            # payment of its own and is reconciled, which is the only way the
+            # imported document matches the paper the client filed.
+            original = tools.signed_amount(control, doc["original"])
             residual = tools.signed_amount(control, doc["residual"])
 
-            ratio = 1.0
-            if control_total and abs(control_total - residual) > TOLERANCE:
-                ratio = residual / control_total
-                for line in base_lines + tax_lines:
-                    line["amount"] = round(line["amount"] * ratio, 2)
+            # Sage's item lines, where it has them. They carry the product,
+            # the quantity and the unit price, none of which survives in the
+            # GL entry — the GL only knows the account and the amount. Where
+            # a document has no item lines the GL entry is still the source.
+            item_lines = self._item_lines(
+                ctx, header["sSource"], header["partner_id"], tax_accounts,
+                doc["original"], -spec["normal_side"],
+            )
+            if item_lines is not None:
+                base_lines = item_lines
 
             for line in base_lines:
                 line["taxable"] = not tax_lines
@@ -364,8 +460,18 @@ class SageOpenItemImporter(models.AbstractModel):
             # carrying negative amounts throughout, and Odoo refuses to post
             # an invoice with a negative total — rightly, since it is a credit
             # note.
-            is_refund = residual * spec["normal_side"] < 0
+            # Decided on what the document WAS, not on what is left of it: a
+            # partly paid invoice is still an invoice. Sage records some
+            # customer deductions as an ordinary invoice (`nTranType` 0)
+            # carrying negative amounts throughout, and Odoo refuses to post
+            # an invoice with a negative total — rightly, since it is a credit
+            # note — so the sign decides, not `nTranType`.
+            is_refund = original * spec["normal_side"] < 0
             staged.append({
+                "original": abs(round(original, 2)),
+                "applications": self._applications(
+                    ctx, spec, doc["doc_id"], control
+                ),
                 # Sage records the payment terms on the DOCUMENT, not on the
                 # vendor — the vendor master is routinely 0 on every row while
                 # the bills carry real net days. Take the document's, or the
@@ -393,20 +499,62 @@ class SageOpenItemImporter(models.AbstractModel):
                 "tax_lines": tax_lines,
             })
 
-            # The staged lines must add up to the residual, or the document
-            # would post an unbalanced move. Checked here, where the fix is
-            # cheap.
+            # The staged lines must add up to the document's original amount,
+            # or the move posts for the wrong total. Checked here, where the
+            # fix is cheap.
             staged_total = -sum(
                 line["amount"] for line in base_lines + tax_lines
             )
-            if gl_lines and abs(staged_total - residual) > 0.02:
+            if gl_lines and abs(staged_total - original) > 0.02:
                 ctx.report.warning(
                     f"{side} {header['sSource']} ({header['partner_name']}): "
-                    f"lines total {staged_total:.2f} but the residual is "
-                    f"{residual:.2f}",
+                    f"lines total {staged_total:.2f} but the document was "
+                    f"{original:.2f}",
                     source_ref=header["sSource"],
                 )
         return staged
+
+    def _applications(self, ctx, spec, doc_id, control) -> list:
+        """What has already been applied against a document.
+
+        Receipts, payments and applied credit notes, each with the bank
+        account and cheque number Sage recorded, so they can be re-created as
+        real payments and reconciled rather than netted off the document.
+
+        Types 0 and 8 are the document's OWN rows — an invoice and a credit
+        note respectively — not applications against it. Reading a credit
+        note's type-8 row as an application makes it pay itself, and the
+        document is then counted twice.
+
+        `bReversed` rows are skipped in pairs: Sage keeps both the original
+        application and its reversal, which net to zero. Importing them would
+        create two payments that cancel out and reconcile against nothing.
+        """
+        return [
+            {
+                "sage_id": row["lId"],
+                "date": row["dtDate"].strftime("%Y-%m-%d"),
+                # Debit-positive like everything else, so an application
+                # against a receivable is negative and one against a payable
+                # positive.
+                "amount": round(
+                    tools.signed_amount(control, row["dAmount"]), 2
+                ),
+                "reference": (row["sSource"] or "").strip() or None,
+                "sage_bank_account": row["lBnkAcctId"] or 0,
+                "cheque_id": row["lChqId"] or 0,
+            }
+            for row in tools.query(
+                ctx.cr,
+                f"""select lId, dtDate, dAmount, sSource, nTranType,
+                           lBnkAcctId, lChqId
+                      from {spec['detail']}
+                     where {spec['detail_fk']} = %s
+                       and nTranType not in (0, 8) and bReversed = 0
+                     order by dtDate, lId""",
+                (doc_id,),
+            )
+        ]
 
     # ------------------------------------------------------------------
     # Transform
@@ -454,6 +602,15 @@ class SageOpenItemImporter(models.AbstractModel):
     def load_open_items(self, ctx: ETLContext, transformed: dict) -> None:
         Move = ctx.env["account.move"]
         company_id = ctx.get_config("company_id")
+        precision = ctx.env["decimal.precision"].precision_get("Product Price")
+        # Odoo stores the quantity at the UoM precision and recomputes the
+        # subtotal from the STORED value, so a quantity with more decimals
+        # than that (27.305 kg) silently moves the line total. The check below
+        # therefore has to be made against the rounded quantity, not the one
+        # Sage supplied.
+        qty_precision = ctx.env["decimal.precision"].precision_get(
+            "Product Unit of Measure"
+        )
         accounts = ctx.env["sage.account.importer"].sage_account_map(ctx)
         # Several Sage numbers can share one Odoo account (the tax aliases
         # do), so this is built off the deduplicated ids rather than by
@@ -467,6 +624,13 @@ class SageOpenItemImporter(models.AbstractModel):
         account_names = {
             sage_id: names_by_id.get(account_id)
             for sage_id, account_id in accounts.items()
+        }
+        products = {
+            product.sage_product_id: product.product_variant_id.id
+            for product in ctx.env["product.template"].with_context(
+                active_test=False
+            ).search([("sage_product_id", "!=", 0)])
+            if product.product_variant_id
         }
         partners = {
             ("customer", partner.sage_customer_id): partner.id
@@ -518,28 +682,58 @@ class SageOpenItemImporter(models.AbstractModel):
             lines, missing = [], None
             for line in document["base_lines"]:
                 account_id = accounts.get(line["account"])
-                if not account_id:
+                if not account_id and not products.get(
+                    line.get("sage_product_id")
+                ):
                     missing = line["account"]
                     break
                 # Only the lines the extract found to be taxed. A bill can be
                 # part taxable and part not, and taxing the whole base
                 # overstates the return.
                 line_taxes = taxes if line.get("taxable", True) else empty_tax
-                lines.append((0, 0, {
-                    # Sage bills are coded straight to GL accounts and carry
-                    # no per-line text, so the account IS what the line means.
-                    # Falling back to the document number instead just repeats
-                    # the reference on every line and says nothing.
+                values = {
+                    # Sage leaves the per-line GL comment blank, and a line
+                    # coded straight to an account IS what that account says.
+                    # Falling back to the document number just repeats the
+                    # reference on every line and says nothing.
                     "name": (
                         line.get("label")
                         or account_names.get(line["account"])
                         or document["number"]
                     ),
-                    "account_id": account_id,
+                    # Left out when the line has a product and Sage recorded
+                    # no account: the product's category then decides, which
+                    # is what Odoo would do for a line typed by hand.
+                    "account_id": account_id or False,
                     "quantity": 1.0,
                     "price_unit": sign * line["amount"],
                     "tax_ids": [(6, 0, line_taxes.ids)],
-                }))
+                }
+                product_id = products.get(line.get("sage_product_id"))
+                quantity = line.get("quantity") or 0.0
+                if product_id:
+                    values["product_id"] = product_id
+                    values.pop("name", None)
+                if product_id and quantity:
+                    total = sign * line["amount"]
+                    quantity = round(quantity, qty_precision)
+                    unit = line.get("price_unit") or 0.0
+                    if quantity and abs(quantity * unit - total) >= 0.01:
+                        # Sage's unit price does not multiply out to the line
+                        # — a line discount, or a price carrying more decimals
+                        # than it stores. Derive one, at the precision the
+                        # field will actually keep.
+                        unit = round(total / quantity, precision)
+                    if quantity and abs(quantity * unit - total) < 0.005:
+                        values.update(
+                            {"quantity": quantity, "price_unit": unit}
+                        )
+                    # Otherwise the line keeps quantity 1 at its exact amount.
+                    # A take-on has to tie to the cent, and no quantity is
+                    # worth a control account that is out by a few cents; the
+                    # product link, which is what sales analysis needs, is
+                    # kept either way.
+                lines.append((0, 0, values))
             if missing is not None:
                 ctx.report.failure(
                     f"No Odoo account for Sage {missing}",
@@ -579,10 +773,10 @@ class SageOpenItemImporter(models.AbstractModel):
                     f"recorded {staged_tax:.2f}",
                     source_ref=document["number"],
                 )
-            if abs(abs(move.amount_total) - document["residual"]) > 0.02:
+            if abs(abs(move.amount_total) - document["original"]) > 0.02:
                 ctx.report.warning(
-                    f"Posted {move.amount_total:.2f} against a staged "
-                    f"residual of {document['residual']:.2f}",
+                    f"Posted {move.amount_total:.2f} against a Sage document "
+                    f"of {document['original']:.2f}",
                     source_ref=document["number"],
                 )
 
