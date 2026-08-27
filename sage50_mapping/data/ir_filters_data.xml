@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!--
+        Invoices Analysis hides drafts and cancelled documents through a
+        removable search filter, not through its SQL. Historical Sage invoices
+        are imported and cancelled precisely so they carry no accounting
+        weight, so this filter puts them back in the picture without also
+        surfacing invoices a user cancelled by mistake.
+    -->
+    <record id="filter_invoice_report_with_sage_history" model="ir.filters">
+        <field name="name">Invoiced + Sage history</field>
+        <field name="model_id">account.invoice.report</field>
+        <!-- user_ids left empty: shared with every user. Odoo 19 renamed the
+             old single-user `user_id` to a many2many. -->
+        <field name="domain">['|', ('state', 'not in', ('draft', 'cancel')), ('sage_doc_id', '!=', 0)]</field>
+        <field name="context">{'group_by': ['invoice_date:month', 'product_id']}</field>
+    </record>
+</odoo>
