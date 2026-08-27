@@ -30,13 +30,18 @@ _logger = logging.getLogger(__name__)
 
 CONTROL_TYPES = ("asset_receivable", "liability_payable")
 
+#: Liquidity accounts are mirrored like everything else. An imported payment
+#: debits the bank, and the opening entry carries the bank balance Sage
+#: reported — which already includes that receipt. Mirroring the payment is
+#: what stops the two counting twice.
+
 REFERENCE = "Sage 50 take-on — reversal of the imported documents"
 
 
 @ETL.pipeline(
     target_model="account.move",
     importer_name="sage.counter.entry.importer",
-    depends_on=["sage.open.item.importer"],
+    depends_on=["sage.open.item.importer", "sage.payment.importer"],
     allow_multiprocessing=False,
 )
 class SageCounterEntryImporter(models.AbstractModel):
@@ -52,7 +57,9 @@ class SageCounterEntryImporter(models.AbstractModel):
         open-item pipeline just posted, and only Odoo knows how they came
         out once its own tax engine had run."""
         return ctx.env["account.move"].search([
+            "|",
             ("sage_doc_id", "!=", 0),
+            ("sage_application_id", "!=", 0),
             ("company_id", "=", ctx.get_config("company_id")),
             ("state", "=", "posted"),
         ]).ids

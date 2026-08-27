@@ -11,7 +11,7 @@
 #
 {
     "name": "Sage 50 Mapping",
-    "version": "19.0.1.0.0",
+    "version": "19.0.1.1.0",
     "summary": "Where each Odoo record came from in a Sage 50 company file",
     "description": "Carries the Sage 50 source identifiers on the Odoo "
                    "records a Sage take-on creates, and nothing else. This is "

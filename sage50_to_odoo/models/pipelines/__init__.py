@@ -4,6 +4,8 @@ from . import res_partner_etl
 from . import product_category_etl
 from . import product_template_etl
 from . import product_pricelist_item_etl
+from . import account_journal_etl
 from . import account_move_open_item_etl
+from . import account_payment_etl
 from . import account_move_counter_entry_etl
 from . import account_move_opening_balance_etl

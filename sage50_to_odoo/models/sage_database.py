@@ -274,7 +274,11 @@ class SageDatabase(models.Model):
 
     def action_import_open_items(self) -> dict:
         """The open receivables and payables carried over at cutover."""
-        return self._execute_pipelines(["sage.open.item.importer"])
+        return self._execute_pipelines([
+            "sage.open.item.importer",
+            "sage.bank.journal.importer",
+            "sage.payment.importer",
+        ])
 
     def action_import_opening_entries(self) -> dict:
         """The counter-entry and the opening trial balance, in that order."""
@@ -324,12 +328,9 @@ class SageDatabase(models.Model):
             if not account:
                 continue
             orphan = self._posted_balance(account, partner_less=True)
-            good = abs(orphan) < 0.01
+            verdict, good = self._verdict(orphan)
             ok = ok and good
-            lines.append(
-                f"{label}: {orphan:,.2f} with no partner  "
-                + ("OK" if good else "NOT ZERO — a document failed to import")
-            )
+            lines.append(f"{label}: {orphan:,.2f} with no partner  {verdict}")
 
         if self.transition_account_id:
             balance = self._posted_balance(self.transition_account_id)
@@ -356,6 +357,21 @@ class SageDatabase(models.Model):
         return self._notification(
             "\n".join(lines), kind="success" if ok else "danger"
         )
+
+    #: A control account this far from zero is source rounding, not a missing
+    #: document. Sage's own line detail can sum a cent under the receivable
+    #: record it belongs to, and a tax recomputed from the base can land a cent
+    #: off the amount Sage stored. Neither is recoverable from the data, and a
+    #: check that calls a cent a failure trains people to ignore it — which is
+    #: the real cost, because the next failure is a whole missing invoice.
+    ROUNDING_BAND = 0.05
+
+    def _verdict(self, balance) -> tuple:
+        if abs(balance) < 0.005:
+            return "OK", True
+        if abs(balance) < self.ROUNDING_BAND:
+            return _("within source rounding — see the import report"), True
+        return _("NOT ZERO — a document failed to import"), False
 
     def _posted_balance(self, account, partner_less=False) -> float:
         self.env.cr.execute(

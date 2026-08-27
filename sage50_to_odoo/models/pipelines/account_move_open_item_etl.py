@@ -30,6 +30,7 @@ import logging
 from datetime import timedelta
 
 from odoo import fields, models
+from odoo.tools.float_utils import float_compare, float_round
 from odoo.addons.etl_framework import ETL, ETLContext
 
 from odoo.addons.sage50_to_odoo import tools
@@ -606,11 +607,17 @@ class SageOpenItemImporter(models.AbstractModel):
         # Odoo stores the quantity at the UoM precision and recomputes the
         # subtotal from the STORED value, so a quantity with more decimals
         # than that (27.305 kg) silently moves the line total. The check below
-        # therefore has to be made against the rounded quantity, not the one
-        # Sage supplied.
-        qty_precision = ctx.env["decimal.precision"].precision_get(
-            "Product Unit of Measure"
-        )
+        # is made against the rounded quantity, not the one Sage supplied.
+        #
+        # Asked of the FIELD, not of `decimal.precision`. The two disagree
+        # whenever the precision has been changed in the running process: the
+        # table is updated immediately, the field keeps the digits it was
+        # built with until the registry reloads. Trusting the table then lets
+        # through a quantity the field is about to re-round, which is exactly
+        # the drift this guard exists to catch.
+        qty_precision = ctx.env["account.move.line"]._fields[
+            "quantity"
+        ].get_digits(ctx.env)[1]
         accounts = ctx.env["sage.account.importer"].sage_account_map(ctx)
         # Several Sage numbers can share one Odoo account (the tax aliases
         # do), so this is built off the deduplicated ids rather than by
@@ -718,13 +725,27 @@ class SageOpenItemImporter(models.AbstractModel):
                     total = sign * line["amount"]
                     quantity = round(quantity, qty_precision)
                     unit = line.get("price_unit") or 0.0
-                    if quantity and abs(quantity * unit - total) >= 0.01:
+                    rounding = ctx.env["res.company"].browse(
+                        company_id
+                    ).currency_id.rounding or 0.01
+                    if quantity and abs(quantity * unit - total) >= rounding:
                         # Sage's unit price does not multiply out to the line
                         # — a line discount, or a price carrying more decimals
                         # than it stores. Derive one, at the precision the
                         # field will actually keep.
                         unit = round(total / quantity, precision)
-                    if quantity and abs(quantity * unit - total) < 0.005:
+                    # Compared the way Odoo will compute it: `price_subtotal`
+                    # is the product rounded to the currency, so anything that
+                    # merely lands close enough on a float is not close
+                    # enough. A cent that survives here is a cent the control
+                    # account carries.
+                    if quantity and float_compare(
+                        float_round(
+                            quantity * unit, precision_rounding=rounding
+                        ),
+                        total,
+                        precision_rounding=rounding,
+                    ) == 0:
                         values.update(
                             {"quantity": quantity, "price_unit": unit}
                         )
