@@ -20,8 +20,9 @@ Odoo yet, and the counter-entry neutralises the revenue side either way.
 
 import itertools
 import logging
+from datetime import timedelta
 
-from odoo import models
+from odoo import fields, models
 from odoo.addons.etl_framework import ETL, ETLContext
 
 from odoo.addons.sage50_to_odoo import tools
@@ -365,6 +366,18 @@ class SageOpenItemImporter(models.AbstractModel):
             # note.
             is_refund = residual * spec["normal_side"] < 0
             staged.append({
+                # Sage records the payment terms on the DOCUMENT, not on the
+                # vendor — the vendor master is routinely 0 on every row while
+                # the bills carry real net days. Take the document's, or the
+                # ageing the take-on is for comes out wrong.
+                "payment_term_days": header["nNetDay"] or 0,
+                # The GL entry's own description. Sage leaves the per-LINE
+                # comment blank on every line in a file (verified: 8,756 of
+                # 8,756 payable lines), so the header comment is the only
+                # free text a document has.
+                "description": (
+                    (gl_lines[0]["sComment"] or "").strip() if gl_lines else ""
+                ),
                 "side": side,
                 "sage_doc_id": header["lId"],
                 "sage_partner_id": header["partner_id"],
@@ -442,6 +455,19 @@ class SageOpenItemImporter(models.AbstractModel):
         Move = ctx.env["account.move"]
         company_id = ctx.get_config("company_id")
         accounts = ctx.env["sage.account.importer"].sage_account_map(ctx)
+        # Several Sage numbers can share one Odoo account (the tax aliases
+        # do), so this is built off the deduplicated ids rather than by
+        # zipping two sequences that are not the same length.
+        names_by_id = {
+            account.id: account.name
+            for account in ctx.env["account.account"].browse(
+                set(accounts.values())
+            )
+        }
+        account_names = {
+            sage_id: names_by_id.get(account_id)
+            for sage_id, account_id in accounts.items()
+        }
         partners = {
             ("customer", partner.sage_customer_id): partner.id
             for partner in ctx.env["res.partner"].search(
@@ -485,6 +511,9 @@ class SageOpenItemImporter(models.AbstractModel):
             # the ones that have them.
             sign = MOVE_TYPE_SIGN[document["move_type"]]
             taxes = self._taxes_for(ctx, document)
+            due_date = fields.Date.from_string(document["date"]) + timedelta(
+                days=document.get("payment_term_days") or 0
+            )
             empty_tax = ctx.env["account.tax"]
             lines, missing = [], None
             for line in document["base_lines"]:
@@ -497,7 +526,15 @@ class SageOpenItemImporter(models.AbstractModel):
                 # overstates the return.
                 line_taxes = taxes if line.get("taxable", True) else empty_tax
                 lines.append((0, 0, {
-                    "name": line.get("label") or document["number"],
+                    # Sage bills are coded straight to GL accounts and carry
+                    # no per-line text, so the account IS what the line means.
+                    # Falling back to the document number instead just repeats
+                    # the reference on every line and says nothing.
+                    "name": (
+                        line.get("label")
+                        or account_names.get(line["account"])
+                        or document["number"]
+                    ),
                     "account_id": account_id,
                     "quantity": 1.0,
                     "price_unit": sign * line["amount"],
@@ -522,6 +559,8 @@ class SageOpenItemImporter(models.AbstractModel):
                 "invoice_date": document["date"],
                 "date": document["date"],
                 "ref": f"Sage {document['number']}",
+                "narration": document.get("description") or False,
+                "invoice_date_due": due_date,
                 "sage_doc_id": document["sage_doc_id"],
                 "company_id": company_id,
                 "invoice_line_ids": lines,

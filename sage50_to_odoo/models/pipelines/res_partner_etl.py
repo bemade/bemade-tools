@@ -276,7 +276,14 @@ class SagePartnerImporter(models.AbstractModel):
             record["state_id"] = states.get((state_code, country_code or "CA"))
             record["company_type"] = "company"
             if days and days in terms:
-                record["property_payment_term_id"] = terms[days]
+                # Customers and vendors take DIFFERENT fields. Writing the
+                # customer term for a vendor leaves its bills with no term at
+                # all, which Odoo then resolves to a due date of today.
+                record[
+                    "property_supplier_payment_term_id"
+                    if record["sage_vendor_id"] and not record["sage_customer_id"]
+                    else "property_payment_term_id"
+                ] = terms[days]
             elif days:
                 ctx.report.warning(
                     f"No payment term of {days} days to assign",
