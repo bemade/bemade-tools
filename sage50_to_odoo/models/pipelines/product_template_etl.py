@@ -77,7 +77,7 @@ class SageProductImporter(models.AbstractModel):
     def _uom_xmlid(self, sage_unit: str) -> str:
         return UOM_MAP.get((sage_unit or "").strip().lower(), DEFAULT_UOM)
 
-    def _invoice_policy(self, ctx: ETLContext, uom):
+    def _invoice_policy(self, ctx: ETLContext, record: dict, uom):
         """Ordered or delivered quantities, decided by how the product is
         measured.
 
@@ -90,6 +90,9 @@ class SageProductImporter(models.AbstractModel):
         Counted products keep **delivered**, where 21 ordered against 23
         shipped is not a tolerance but two extra units, and worth seeing.
 
+        Services invoice on **ordered** whatever their unit: nothing delivers
+        them, so a delivered quantity would stay at zero forever.
+
         Set explicitly at import because Odoo's own default does not make
         this distinction: `invoice_policy` is a stored compute that forces
         every `consu` product to "order" whatever its unit. Leaving it to the
@@ -101,6 +104,11 @@ class SageProductImporter(models.AbstractModel):
         is a behavioural change to a core model and belongs in a client
         module rather than here.
         """
+        if record.get("type") == "service":
+            # Nothing delivers a service, so `qty_delivered` never moves off
+            # zero and "delivered quantities" would leave the line permanently
+            # un-invoiceable. Not a preference — the other setting is broken.
+            return "order"
         if not uom:
             return False
         roots = set()
@@ -280,7 +288,7 @@ class SageProductImporter(models.AbstractModel):
             }
             if uom:
                 values["uom_id"] = uom.id
-            policy = self._invoice_policy(ctx, uom)
+            policy = self._invoice_policy(ctx, record, uom)
             if policy:
                 values["invoice_policy"] = policy
             if record["sale_tax"]:
