@@ -24,6 +24,8 @@ from odoo.addons.etl_framework import (
     PipelineOrchestrator,
 )
 
+from odoo.addons.sage50_to_odoo import tools
+
 _logger = logging.getLogger(__name__)
 
 
@@ -319,14 +321,32 @@ class SageDatabase(models.Model):
     def action_check(self) -> dict:
         """The checks that actually catch a bad take-on.
 
-        A trial balance that ties proves less than it looks. An invoice missed
-        at the open-items step is reversed away by the counter-entry and never
-        shows up in the trial balance at all — what exposes it is the
-        partner-less balance on the control accounts, which the two entries
-        are constructed to leave at exactly zero.
+        Which check is the strong one depends on the shape of the take-on.
+
+        **Balances only.** A trial balance that ties proves less than it
+        looks: an invoice missed at the open-items step is reversed away by
+        the counter-entry and never shows up in the trial balance at all.
+        What exposes it is the partner-less balance on the control accounts,
+        which the opening entry and the counter-entry are constructed to
+        leave at exactly zero.
+
+        **With history.** That check no longer holds, and saying so is the
+        point — the opening entry carries the control balances as they stood
+        at the start of the replay, with no partner, and they decay toward
+        zero only as the replayed payments settle the documents that were
+        open back then. The strong check here is the other one: every
+        account's balance in Odoo against the same account in Sage, at the
+        last date the file describes. It is reported per account, because a
+        total that ties while two accounts are wrong in opposite directions
+        is the failure this is meant to catch.
         """
         self.ensure_one()
         lines, ok = [], True
+        history = bool(self.history_start_date)
+        if history:
+            tied, tb_lines = self._check_trial_balance()
+            ok = ok and tied
+            lines.extend(tb_lines)
         for account, label in (
             (self.env["account.account"].search([
                 ("company_ids", "in", self.company_id.id),
@@ -342,6 +362,13 @@ class SageDatabase(models.Model):
             if not account:
                 continue
             orphan = self._posted_balance(account, partner_less=True)
+            if history:
+                # Information, not a verdict: see the docstring.
+                lines.append(
+                    f"{label}: {orphan:,.2f} with no partner (the opening "
+                    f"balance, less whatever the replay has since settled)"
+                )
+                continue
             verdict, good = self._verdict(orphan)
             ok = ok and good
             lines.append(f"{label}: {orphan:,.2f} with no partner  {verdict}")
@@ -386,6 +413,84 @@ class SageDatabase(models.Model):
         if abs(balance) < self.ROUNDING_BAND:
             return _("within source rounding — see the import report"), True
         return _("NOT ZERO — a document failed to import"), False
+
+    def _check_trial_balance(self) -> tuple:
+        """Every account in Odoo against the same account in Sage.
+
+        Sage's own `dYtc` summary field is not used as the expected figure:
+        it describes the file's "as at" moment, which is not necessarily the
+        last entry, and it disagrees with the ledger on a real file. The
+        expected balance is derived instead — the fiscal year's opening
+        balance plus that year's postings up to the last date the file
+        describes — which is the same construction the opening entry itself
+        is built from, and which every generation netting to zero verifies.
+        """
+        self.ensure_one()
+        expected = {}
+        with self.get_cursor() as cr:
+            as_of = tools.query(
+                cr, "select max(dtJourDate) as last_date from tjourent"
+            )[0]["last_date"].strftime("%Y-%m-%d")
+            for row in tools.query(
+                cr,
+                """select lId, dYts from taccount where cFunc in %s""",
+                (tools.POSTABLE_FUNCS,),
+            ):
+                expected[row["lId"]] = round(row["dYts"], 2)
+            header, entries = tools.GENERATIONS[0]
+            for row in tools.query(
+                cr,
+                f"""select l.lAcctId, round(sum(l.dAmount), 2) as amount
+                      from {header} j
+                      join {entries} l on l.lJEntId = j.lId
+                     where j.dtJourDate <= %s
+                     group by l.lAcctId""",
+                (as_of,),
+            ):
+                expected[row["lAcctId"]] = (
+                    expected.get(row["lAcctId"], 0.0) + row["amount"]
+                )
+
+        self.env.cr.execute(
+            """select a.sage_account_id, coalesce(sum(l.balance), 0) as balance
+                 from account_move_line l
+                 join account_move m on m.id = l.move_id
+                 join account_account a on a.id = l.account_id
+                where m.state = 'posted' and m.date <= %s
+                  and m.company_id = %s and a.sage_account_id != 0
+                group by a.sage_account_id""",
+            (as_of, self.company_id.id),
+        )
+        actual = {row[0]: round(row[1], 2) for row in self.env.cr.fetchall()}
+
+        drift = []
+        for sage_id, natural in expected.items():
+            want = round(tools.signed_amount(sage_id, round(natural, 2)), 2)
+            got = actual.get(sage_id, 0.0)
+            if abs(want - got) > 0.01:
+                drift.append((sage_id, want, got))
+        for sage_id, got in actual.items():
+            if sage_id not in expected and abs(got) > 0.01:
+                drift.append((sage_id, 0.0, got))
+
+        if not drift:
+            return True, [
+                f"Trial balance at {as_of}: all {len(expected)} Sage "
+                f"accounts tie to the cent  OK"
+            ]
+        drift.sort(key=lambda row: -abs(row[1] - row[2]))
+        report = [
+            f"Trial balance at {as_of}: {len(drift)} of {len(expected)} "
+            f"accounts DO NOT tie"
+        ]
+        report += [
+            f"  {sage_id}: Sage {want:,.2f}, Odoo {got:,.2f} "
+            f"(off by {got - want:,.2f})"
+            for sage_id, want, got in drift[:15]
+        ]
+        if len(drift) > 15:
+            report.append(f"  … and {len(drift) - 15} more")
+        return False, report
 
     def _posted_balance(self, account, partner_less=False) -> float:
         self.env.cr.execute(

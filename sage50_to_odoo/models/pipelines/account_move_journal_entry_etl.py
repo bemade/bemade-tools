@@ -172,8 +172,18 @@ class SageJournalEntryImporter(models.AbstractModel):
     # Load
     # ------------------------------------------------------------------
     def _excluded_entry_ids(self, ctx: ETLContext) -> set:
-        """Entries already posted as documents or payments, by id."""
+        """Entries already in Odoo as a document or a payment, by id.
+
+        Restricted to moves that carry a Sage *document* or *application*
+        id, so a re-run does not mistake the entries this pipeline posted
+        last time for documents. Those are handled separately, and counting
+        them here would make the log read as though the open items had
+        swallowed the whole ledger.
+        """
         return set(ctx.env["account.move"].search([
+            "|",
+            ("sage_doc_id", "!=", 0),
+            ("sage_application_id", "!=", 0),
             ("sage_gl_entry_id", "!=", 0),
             ("company_id", "=", ctx.get_config("company_id")),
         ]).mapped("sage_gl_entry_id"))
@@ -205,6 +215,12 @@ class SageJournalEntryImporter(models.AbstractModel):
         accounts = ctx.env["sage.account.importer"].sage_account_map(ctx)
         partners = self._partner_map(ctx)
         excluded = self._excluded_entry_ids(ctx)
+        # Resolved once. Browsing the account per line costs a query for
+        # every one of the tens of thousands of lines a full replay posts.
+        control_accounts = set(ctx.env["account.account"].search([
+            ("account_type", "in", ("asset_receivable", "liability_payable")),
+            ("company_ids", "in", company_id),
+        ]).ids)
         already = set(Move.search([
             ("sage_gl_entry_id", "!=", 0),
             ("company_id", "=", company_id),
@@ -238,8 +254,17 @@ class SageJournalEntryImporter(models.AbstractModel):
                 lines.append((0, 0, {
                     "name": line["label"] or entry["comment"] or "/",
                     "account_id": account_id,
-                    "partner_id": self._line_partner(
-                        ctx, account_id, partner_id
+                    # Only the receivable and payable lines carry the
+                    # tiers. Sage's header tiers is the *document's*
+                    # counterparty and a general-journal entry has none at
+                    # all, so the control lines are the only ones where it
+                    # is unambiguously right — and the only ones where it
+                    # matters, since a control account with partner-less
+                    # lines cannot be aged or reconciled.
+                    "partner_id": (
+                        partner_id
+                        if partner_id and account_id in control_accounts
+                        else False
                     ),
                     "debit": balance if balance > 0 else 0.0,
                     "credit": -balance if balance < 0 else 0.0,
@@ -276,24 +301,6 @@ class SageJournalEntryImporter(models.AbstractModel):
             "%s left to the documents and payments that replaced them.",
             posted, skipped, documents,
         )
-
-    def _line_partner(self, ctx: ETLContext, account_id, partner_id):
-        """The tiers on a replayed line, where Sage knew one.
-
-        Only the receivable and payable lines get it. Putting the customer
-        on the revenue line as well would be defensible, but Sage's header
-        tiers is the *document's* counterparty and a general-journal entry
-        has none at all, so the receivable and payable control lines are the
-        only ones where it is unambiguously right — and they are the ones
-        where it matters, because a control account with partner-less lines
-        cannot be aged or reconciled.
-        """
-        if not partner_id:
-            return False
-        account = ctx.env["account.account"].browse(account_id)
-        if account.account_type in ("asset_receivable", "liability_payable"):
-            return partner_id
-        return False
 
     def _reference(self, entry: dict) -> str:
         source = entry["source"]
