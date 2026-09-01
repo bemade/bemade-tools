@@ -74,6 +74,15 @@ class SageJournalEntryImporter(models.AbstractModel):
     @ETL.extract("tjourent")
     def extract_entries(self, ctx: ETLContext) -> dict:
         start = ctx.env["sage.opening.balance.importer"].history_start(ctx)
+        if not start:
+            # A balances-only take-on has no history to replay. Silent, not
+            # an error: this pipeline is registered unconditionally, so it
+            # runs on every migration whether or not one was asked for.
+            _logger.info(
+                "No history start set, so there is no general ledger to "
+                "replay: this is a balances-only take-on."
+            )
+            return {"start": "", "entries": []}
         spans = [
             span for span in tools.generation_spans(ctx.cr)
             if span["start"] >= start
@@ -210,6 +219,8 @@ class SageJournalEntryImporter(models.AbstractModel):
     @ETL.load()
     def load_entries(self, ctx: ETLContext, transformed: dict) -> None:
         payload = transformed["transform_entries"]
+        if not payload["entries"]:
+            return
         company_id = ctx.get_config("company_id")
         journal_id = ctx.get_config("journal_id")
         if not journal_id:
