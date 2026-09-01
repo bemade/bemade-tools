@@ -500,10 +500,13 @@ class SageDatabase(models.Model):
         if movements:
             for sage_id, amount in movements[0][1].items():
                 closing[sage_id] = closing.get(sage_id, 0.0) + amount
-        drift = self._drift(
-            fold(closing, only_balance_sheet=True),
-            self._movement(None, as_of, balance_sheet_only=True),
-        )
+        actual_bs = self._movement(None, as_of, balance_sheet_only=True)
+        # The transition account is Odoo's, not Sage's: it exists to absorb
+        # the recorded imbalance and is checked on its own below. Comparing
+        # it against a Sage balance it was never meant to have would fail
+        # every take-on that worked.
+        actual_bs.pop(self.transition_account_id.id, None)
+        drift = self._drift(fold(closing, only_balance_sheet=True), actual_bs)
         if drift:
             ok = False
             report.append(

@@ -30,6 +30,9 @@ GENERATIONS = (
     ("tjeh02", "tjeah02"),
 )
 
+#: Generation header table -> its line table, for a lookup by name.
+LINES_FOR = {header: lines for header, lines in GENERATIONS}
+
 #: `tjourent.nModule`. For 1 and 2 the header's `lRecId` is the vendor or
 #: customer id and `sSource` is the document number, which is how a bill or
 #: an invoice is joined to the GL entry behind it.

@@ -21,6 +21,8 @@ import logging
 from odoo import models
 from odoo.addons.etl_framework import ETL, ETLContext
 
+from odoo.addons.sage50_to_odoo import tools
+
 from .account_move_open_item_etl import SIDES
 
 _logger = logging.getLogger(__name__)
@@ -123,6 +125,73 @@ class SagePaymentImporter(models.AbstractModel):
             })
         return values
 
+    def _wholly_ours(self, ctx: ETLContext, values: list) -> list:
+        """Drop payments whose Sage receipt also settled other invoices.
+
+        One receipt settles many invoices, and Sage records it as ONE GL
+        entry. Only the slice applied to a document we imported can become
+        an `account.payment` — the rest settled invoices that closed long
+        ago and are not in Odoo as documents at all.
+
+        That matters because the general-ledger replay skips the entry
+        behind any payment we create. Skip an entry worth 64,837.65 and
+        replace it with a payment worth 245.35 and the ledger loses the
+        difference: the bank comes up short and the receivable stays high by
+        the same amount, which is exactly the shape of a mirror-image pair
+        in the per-account check.
+
+        So a receipt is only taken as a payment when the applications we
+        hold account for the whole of it. Otherwise the payments are
+        dropped, nothing carries that entry's reference, and the replay
+        posts the receipt in full — which is where it belongs, since most of
+        what it settled is history rather than an open document.
+        """
+        by_entry = {}
+        for values_row in values:
+            by_entry.setdefault(
+                values_row["sage_gl_entry_ref"], []
+            ).append(values_row)
+
+        kept = []
+        for entry_ref, rows in by_entry.items():
+            if not entry_ref:
+                # No GL entry of its own — an application settled by a credit
+                # note rather than by money. Nothing is excluded on its
+                # behalf, so there is nothing to reconcile against.
+                kept.extend(rows)
+                continue
+            generation, _, entry_id = entry_ref.partition(":")
+            control = tools.query(
+                ctx.cr,
+                f"""select round(sum(l.dAmount), 2) as amount
+                      from {generation} j
+                      join {tools.LINES_FOR[generation]} l
+                        on l.lJEntId = j.lId
+                     where j.lId = %s and l.lAcctId in %s""",
+                (int(entry_id), tuple(self._control_accounts(ctx))),
+            )[0]["amount"] or 0.0
+            ours = round(sum(row["amount"] for row in rows), 2)
+            if abs(abs(control) - ours) < 0.02:
+                kept.extend(rows)
+            else:
+                ctx.report.warning(
+                    f"Sage entry {entry_ref} settles {abs(control):,.2f} but "
+                    f"only {ours:,.2f} of it belongs to an imported "
+                    f"document. Left to the general-ledger replay rather "
+                    f"than split into a partial payment.",
+                    source_ref=entry_ref,
+                )
+        return kept
+
+    def _control_accounts(self, ctx: ETLContext) -> list:
+        """The Sage receivable and payable control account numbers."""
+        linked = tools.linked_accounts(ctx.cr)
+        return [
+            account for account in
+            (linked.get("lAcNaccRec"), linked.get("lAcNaccPay"))
+            if account
+        ]
+
     @ETL.load()
     def load_payments(self, ctx: ETLContext, transformed: dict) -> None:
         Payment = ctx.env["account.payment"]
@@ -134,7 +203,7 @@ class SagePaymentImporter(models.AbstractModel):
         ]).mapped("sage_application_id"))
 
         created = skipped = reconciled = 0
-        for values in transformed["transform_payments"]:
+        for values in self._wholly_ours(ctx, transformed["transform_payments"]):
             if values["sage_application_id"] in already:
                 skipped += 1
                 continue
