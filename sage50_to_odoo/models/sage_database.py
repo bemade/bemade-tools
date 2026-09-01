@@ -511,6 +511,18 @@ class SageDatabase(models.Model):
         # it against a Sage balance it was never meant to have would fail
         # every take-on that worked.
         actual_bs.pop(self.transition_account_id.id, None)
+        # The unaffected-earnings account is Odoo's own and has no Sage
+        # counterpart either. The year-end closes deliberately leave a
+        # balance on it: it offsets the prior-year result Odoo computes at
+        # report time, which is what makes the balance sheet show retained
+        # earnings exactly as Sage had it and an Undistributed
+        # Profits/Losses line of zero for every closed year.
+        unaffected = self.env["account.account"].search([
+            ("account_type", "=", "equity_unaffected"),
+            ("company_ids", "in", self.company_id.id),
+        ])
+        for account in unaffected:
+            actual_bs.pop(account.id, None)
         drift = self._drift(fold(closing, only_balance_sheet=True), actual_bs)
         if drift:
             ok = False
