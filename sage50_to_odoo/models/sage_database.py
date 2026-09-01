@@ -432,10 +432,13 @@ class SageDatabase(models.Model):
         disagree in mirror-image pairs; summed onto the account they share,
         they tie.
 
-        **Without the opening entry.** It is dated the first day of the
-        oldest replayed year, so it falls inside that year's range and would
-        be counted as movement. The balance sheet check below is where it
-        belongs, and it is included there.
+        **Without the take-on's own entries.** The opening entry is dated
+        the first day of the oldest replayed year and the year-end closes on
+        each year's last day, so all of them fall inside a year's range and
+        would be counted as movement Sage never recorded — Sage has no
+        closing entry at all, and its opening balances are a column rather
+        than a posting. They belong in the balance sheet check below, and
+        they are included there.
         """
         self.ensure_one()
         start = self.history_start_date.strftime("%Y-%m-%d")
@@ -483,7 +486,9 @@ class SageDatabase(models.Model):
         for span, movement in movements:
             drift = self._drift(
                 fold(movement),
-                self._movement(span["start"], span["end"], skip_opening=True),
+                self._movement(
+                    span["start"], span["end"], skip_synthetic=True
+                ),
             )
             label = f"{span['start']}..{span['end']}"
             if drift:
@@ -518,7 +523,7 @@ class SageDatabase(models.Model):
         return ok, report
 
     def _movement(self, start, end, balance_sheet_only=False,
-                  skip_opening=False) -> dict:
+                  skip_synthetic=False) -> dict:
         """Odoo account id -> movement over a date range, debit-positive."""
         query = """select l.account_id, coalesce(sum(l.balance), 0)
                      from account_move_line l
@@ -533,9 +538,13 @@ class SageDatabase(models.Model):
         if balance_sheet_only:
             query += """ and a.account_type not in ('income', 'income_other',
                          'expense', 'expense_depreciation', 'expense_direct_cost')"""
-        if skip_opening:
+        if skip_synthetic:
+            # The opening entry and the year-end closes are ours, not Sage's:
+            # Sage has no closing entry at all, and its opening balances are
+            # a column rather than a posting. Both belong in the balance
+            # sheet and neither is movement Sage ever recorded.
             query += " and coalesce(m.ref, '') not like %s"
-            args.append("Sage 50 take-on — opening balance%")
+            args.append("Sage 50 take-on —%")
         query += " group by l.account_id"
         self.env.cr.execute(query, args)
         return {row[0]: round(row[1], 2) for row in self.env.cr.fetchall()}
