@@ -110,7 +110,7 @@ class SagePaymentImporter(models.AbstractModel):
             # receipt subtracts it twice.
             values.append({
                 "sage_application_id": application["sage_id"],
-                "sage_gl_entry_id": application["sage_gl_entry_id"],
+                "sage_gl_entry_ref": application["sage_gl_entry_ref"],
                 "move_id": application["move_id"],
                 "journal_id": journal_id,
                 "date": application["date"],
@@ -159,7 +159,7 @@ class SagePaymentImporter(models.AbstractModel):
             payment.move_id.sage_application_id = values[
                 "sage_application_id"
             ]
-            payment.move_id.sage_gl_entry_id = values["sage_gl_entry_id"]
+            payment.move_id.sage_gl_entry_ref = values["sage_gl_entry_ref"]
             created += 1
             ctx.report.success()
 

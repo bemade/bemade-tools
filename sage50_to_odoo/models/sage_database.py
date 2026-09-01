@@ -415,82 +415,131 @@ class SageDatabase(models.Model):
         return _("NOT ZERO — a document failed to import"), False
 
     def _check_trial_balance(self) -> tuple:
-        """Every account in Odoo against the same account in Sage.
+        """Odoo against Sage, per account, over every replayed year.
 
-        Sage's own `dYtc` summary field is not used as the expected figure:
-        it describes the file's "as at" moment, which is not necessarily the
-        last entry, and it disagrees with the ledger on a real file. The
-        expected balance is derived instead — the fiscal year's opening
-        balance plus that year's postings up to the last date the file
-        describes — which is the same construction the opening entry itself
-        is built from, and which every generation netting to zero verifies.
+        Comparing cumulative balances alone would be wrong for half the
+        chart. A profit and loss account restarts at zero every year, so
+        Sage's figure for it describes ONE year while Odoo's running total
+        describes all of them — on a three-year replay that reads as a
+        threefold discrepancy on every P&L account and hides whatever the
+        real errors are. The comparison is therefore per generation: each
+        year's movement in Odoo against the same year's movement in Sage,
+        which is the right test for both halves of the chart. The closing
+        balance sheet is then checked once on top, because a year's movement
+        can be right in every year while the opening balance underneath it
+        is wrong.
+
+        Sage's own `dYtc` summary field is deliberately not used as the
+        expected figure: it describes the file's "as at" moment, which is
+        not necessarily its last entry, and it disagrees with the ledger on
+        a real file.
         """
         self.ensure_one()
-        expected = {}
+        start = self.history_start_date.strftime("%Y-%m-%d")
+        report, ok = [], True
+
         with self.get_cursor() as cr:
-            as_of = tools.query(
-                cr, "select max(dtJourDate) as last_date from tjourent"
-            )[0]["last_date"].strftime("%Y-%m-%d")
-            for row in tools.query(
-                cr,
-                """select lId, dYts from taccount where cFunc in %s""",
-                (tools.POSTABLE_FUNCS,),
-            ):
-                expected[row["lId"]] = round(row["dYts"], 2)
-            header, entries = tools.GENERATIONS[0]
-            for row in tools.query(
-                cr,
-                f"""select l.lAcctId, round(sum(l.dAmount), 2) as amount
-                      from {header} j
-                      join {entries} l on l.lJEntId = j.lId
-                     where j.dtJourDate <= %s
-                     group by l.lAcctId""",
-                (as_of,),
-            ):
-                expected[row["lAcctId"]] = (
-                    expected.get(row["lAcctId"], 0.0) + row["amount"]
+            spans = [
+                span for span in tools.generation_spans(cr)
+                if span["start"] >= start
+            ]
+            movements = {
+                span["header"]: (
+                    span, tools.generation_movement(cr, span)
+                )
+                for span in spans
+            }
+            opening = {
+                row["lId"]: round(row["dYts"], 2)
+                for row in tools.query(
+                    cr,
+                    "select lId, dYts from taccount where cFunc in %s",
+                    (tools.POSTABLE_FUNCS,),
+                )
+            }
+            as_of = spans[0]["end"] if spans else start
+
+        for header, (span, expected) in movements.items():
+            actual = self._movement(span["start"], span["end"])
+            drift = self._drift(expected, actual)
+            if drift:
+                ok = False
+                report.append(
+                    f"{span['start']}..{span['end']}: {len(drift)} accounts "
+                    f"do not tie"
+                )
+                report += self._drift_lines(drift)
+            else:
+                report.append(
+                    f"{span['start']}..{span['end']}: every account ties  OK"
                 )
 
-        self.env.cr.execute(
-            """select a.sage_account_id, coalesce(sum(l.balance), 0) as balance
-                 from account_move_line l
-                 join account_move m on m.id = l.move_id
-                 join account_account a on a.id = l.account_id
-                where m.state = 'posted' and m.date <= %s
-                  and m.company_id = %s and a.sage_account_id != 0
-                group by a.sage_account_id""",
-            (as_of, self.company_id.id),
-        )
-        actual = {row[0]: round(row[1], 2) for row in self.env.cr.fetchall()}
+        # The closing balance sheet. Profit and loss is excluded: it is
+        # covered year by year above, and its cumulative total across
+        # several years is not a figure Sage holds anywhere.
+        expected = {
+            sage_id: natural for sage_id, natural in opening.items()
+            if sage_id // 10_000_000 < 4
+        }
+        closing = dict(expected)
+        current = movements.get(tools.GENERATIONS[0][0])
+        if current:
+            for sage_id, amount in current[1].items():
+                if sage_id // 10_000_000 < 4:
+                    closing[sage_id] = closing.get(sage_id, 0.0) + amount
+        actual = self._movement(None, as_of, balance_sheet_only=True)
+        drift = self._drift(closing, actual)
+        if drift:
+            ok = False
+            report.append(
+                f"Balance sheet at {as_of}: {len(drift)} accounts do not tie"
+            )
+            report += self._drift_lines(drift)
+        else:
+            report.append(f"Balance sheet at {as_of}: every account ties  OK")
+        return ok, report
 
+    def _movement(self, start, end, balance_sheet_only=False) -> dict:
+        """Sage account number -> Odoo movement over a date range."""
+        query = """select a.sage_account_id, coalesce(sum(l.balance), 0)
+                     from account_move_line l
+                     join account_move m on m.id = l.move_id
+                     join account_account a on a.id = l.account_id
+                    where m.state = 'posted' and m.company_id = %s
+                      and a.sage_account_id != 0 and m.date <= %s"""
+        args = [self.company_id.id, end]
+        if start:
+            query += " and m.date >= %s"
+            args.append(start)
+        if balance_sheet_only:
+            query += " and a.sage_account_id < 40000000"
+        query += " group by a.sage_account_id"
+        self.env.cr.execute(query, args)
+        return {row[0]: round(row[1], 2) for row in self.env.cr.fetchall()}
+
+    def _drift(self, expected_natural: dict, actual: dict) -> list:
+        """Accounts where Odoo and Sage disagree, debit-positive."""
         drift = []
-        for sage_id, natural in expected.items():
-            want = round(tools.signed_amount(sage_id, round(natural, 2)), 2)
+        seen = set(expected_natural) | set(actual)
+        for sage_id in seen:
+            want = round(tools.signed_amount(
+                sage_id, round(expected_natural.get(sage_id, 0.0), 2)
+            ), 2)
             got = actual.get(sage_id, 0.0)
             if abs(want - got) > 0.01:
                 drift.append((sage_id, want, got))
-        for sage_id, got in actual.items():
-            if sage_id not in expected and abs(got) > 0.01:
-                drift.append((sage_id, 0.0, got))
-
-        if not drift:
-            return True, [
-                f"Trial balance at {as_of}: all {len(expected)} Sage "
-                f"accounts tie to the cent  OK"
-            ]
         drift.sort(key=lambda row: -abs(row[1] - row[2]))
-        report = [
-            f"Trial balance at {as_of}: {len(drift)} of {len(expected)} "
-            f"accounts DO NOT tie"
-        ]
-        report += [
+        return drift
+
+    def _drift_lines(self, drift: list, limit: int = 10) -> list:
+        lines = [
             f"  {sage_id}: Sage {want:,.2f}, Odoo {got:,.2f} "
             f"(off by {got - want:,.2f})"
-            for sage_id, want, got in drift[:15]
+            for sage_id, want, got in drift[:limit]
         ]
-        if len(drift) > 15:
-            report.append(f"  … and {len(drift) - 15} more")
-        return False, report
+        if len(drift) > limit:
+            lines.append(f"  … and {len(drift) - limit} more")
+        return lines
 
     def _posted_balance(self, account, partner_less=False) -> float:
         self.env.cr.execute(

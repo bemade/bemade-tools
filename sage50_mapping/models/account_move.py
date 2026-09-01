@@ -17,13 +17,16 @@ class AccountMove(models.Model):
              "the move as well as the payment so the take-on's reversing "
              "entry can find every imported line with one search.",
     )
-    sage_gl_entry_id = fields.Integer(
+    sage_gl_entry_ref = fields.Char(
         string="Sage GL entry", index=True, copy=False,
-        help="Row id of the Sage journal entry this move came from, or that "
-             "it replaces. A document imported as a real invoice carries the "
-             "id of the GL entry Sage posted behind it, so the general-ledger "
-             "replay can skip that entry instead of posting the document a "
-             "second time.",
+        help="The Sage journal entry this move came from, or that it "
+             "replaces, as `<generation table>:<row id>` — for example "
+             "`tjourent:4812`. A document imported as a real invoice carries "
+             "the entry Sage posted behind it, so the general-ledger replay "
+             "can skip it instead of posting the document a second time. "
+             "The generation is part of the key because Sage restarts row "
+             "ids in every fiscal generation: the bare id names a different "
+             "entry in each one.",
     )
 
 

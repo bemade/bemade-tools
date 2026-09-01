@@ -491,7 +491,9 @@ class SageOpenItemImporter(models.AbstractModel):
                 # is about to be re-created as a real invoice, so the
                 # general-ledger replay must skip that entry or the same
                 # revenue lands twice.
-                "sage_gl_entry_id": gl_lines[0]["lId"] if gl_lines else 0,
+                "sage_gl_entry_ref": tools.entry_ref(
+                    gl_lines[0]["generation"], gl_lines[0]["lId"]
+                ) if gl_lines else False,
                 "sage_partner_id": header["partner_id"],
                 "partner_name": header["partner_name"],
                 "move_type": spec["move_type"][
@@ -555,7 +557,7 @@ class SageOpenItemImporter(models.AbstractModel):
                 # settling several invoices is one entry against several
                 # application rows, which is why the replay excludes a SET of
                 # entry ids rather than pairing them off one to one.
-                "sage_gl_entry_id": self._application_entry_id(
+                "sage_gl_entry_ref": self._application_entry_ref(
                     ctx, spec, row, control, rec_id
                 ),
             }
@@ -571,26 +573,28 @@ class SageOpenItemImporter(models.AbstractModel):
             )
         ]
 
-    def _application_entry_id(self, ctx, spec, row, control, rec_id) -> int:
-        """The id of the GL entry behind one application, or 0 if unfound.
+    def _application_entry_ref(self, ctx, spec, row, control, rec_id):
+        """The GL entry behind one application, or False if unfound.
 
         Disambiguated on the application's own amount against the control
         account, the same way a document is: a receipt number is no more
         unique than an invoice number, and a reversed-and-reissued receipt
         leaves two entries that are exact mirrors.
 
-        Returning 0 is not an error — an application settled by a credit
+        Returning False is not an error — an application settled by a credit
         note rather than by money has no separate GL entry of its own, and
         the replay then has nothing to skip.
         """
         source = (row["sSource"] or "").strip()
         if not source:
-            return 0
+            return False
         lines = tools.journal_entry(
             ctx.cr, source, spec["module"], rec_id,
             control_account=control, expected_control=row["dAmount"],
         )
-        return lines[0]["lId"] if lines else 0
+        return tools.entry_ref(
+            lines[0]["generation"], lines[0]["lId"]
+        ) if lines else False
 
     # ------------------------------------------------------------------
     # Transform
@@ -830,7 +834,7 @@ class SageOpenItemImporter(models.AbstractModel):
                 "narration": document.get("description") or False,
                 "invoice_date_due": due_date,
                 "sage_doc_id": document["sage_doc_id"],
-                "sage_gl_entry_id": document["sage_gl_entry_id"],
+                "sage_gl_entry_ref": document["sage_gl_entry_ref"],
                 "company_id": company_id,
                 "invoice_line_ids": lines,
             })

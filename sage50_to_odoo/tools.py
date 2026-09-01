@@ -108,6 +108,11 @@ def journal_entry(cr: Any, source: str, module: int, rec_id: int,
                  order by j.lId, l.nLineNum""",
             (source, module, rec_id),
         )
+        for row in rows:
+            # `lId` restarts in every generation, so it identifies an entry
+            # only alongside the table it came from. Callers that remember an
+            # entry MUST remember both -- see `entry_ref`.
+            row["generation"] = header
         if not rows:
             continue
         by_entry: dict[int, list[dict]] = {}
@@ -209,3 +214,15 @@ def net_income(movement: dict, postable: set) -> float:
         for account_id, amount in movement.items()
         if account_id in postable and account_id // 10_000_000 >= 4
     ), 2)
+
+
+def entry_ref(generation: str, entry_id: int) -> str:
+    """A GL entry's identity, unique across the whole file.
+
+    `tjourent.lId`, `tjently.lId` and `tjeh01.lId` are separate id spaces:
+    the same integer names a different entry in each generation. Anything
+    that records "which entry did this come from" and is later compared
+    against another generation must use this, not the bare id, or entries
+    are matched to entries they have nothing to do with.
+    """
+    return f"{generation}:{entry_id}"

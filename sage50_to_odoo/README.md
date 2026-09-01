@@ -214,10 +214,18 @@ at all, so the control lines are the only ones where it is unambiguously
 right — and the only ones where it matters, since a control account with
 partner-less lines cannot be aged or reconciled.
 
-Entries that became real invoices, bills or payments are skipped **by id**,
-recorded on the move as `sage_gl_entry_id` — never by document number. A
-document posted, corrected and reposted leaves two entries and only one of
-them became the invoice; the other is real ledger history and must replay.
+Entries that became real invoices, bills or payments are skipped by
+**entry**, recorded on the move as `sage_gl_entry_ref` — never by document
+number. A document posted, corrected and reposted leaves two entries and only
+one of them became the invoice; the other is real ledger history and must
+replay.
+
+The reference is `<generation table>:<row id>`, e.g. `tjourent:4812`, and the
+generation half is load-bearing. **Sage restarts row ids in every fiscal
+generation**, so `tjourent.lId` 4812 and `tjeh01.lId` 4812 are unrelated
+entries. Keying on the bare id excludes an arbitrary entry from every other
+year — which silently drops real ledger history and shows up only as a
+balance-sheet account that will not tie.
 
 ---
 

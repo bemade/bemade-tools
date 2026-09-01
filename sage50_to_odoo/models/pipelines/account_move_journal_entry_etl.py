@@ -115,7 +115,9 @@ class SageJournalEntryImporter(models.AbstractModel):
                     # them behind; they carry no ledger effect either way.
                     continue
                 entries.append({
-                    "sage_gl_entry_id": entry_id,
+                    "sage_gl_entry_ref": tools.entry_ref(
+                        span["header"], entry_id
+                    ),
                     "generation": span["header"],
                     "date": header["dtJourDate"].strftime("%Y-%m-%d"),
                     "module": header["nModule"],
@@ -136,7 +138,9 @@ class SageJournalEntryImporter(models.AbstractModel):
                         for row in lines[entry_id]
                     ],
                 })
-        entries.sort(key=lambda entry: (entry["date"], entry["sage_gl_entry_id"]))
+        entries.sort(
+            key=lambda entry: (entry["date"], entry["sage_gl_entry_ref"])
+        )
         _logger.info(
             "Sage general ledger: %s entries from %s generation(s) on or "
             "after %s.", len(entries), len(spans), start,
@@ -150,7 +154,7 @@ class SageJournalEntryImporter(models.AbstractModel):
     def transform_entries(self, ctx: ETLContext, extracted: dict) -> dict:
         payload = extracted["extract_entries"]
         unbalanced = [
-            entry["sage_gl_entry_id"] for entry in payload["entries"]
+            entry["sage_gl_entry_ref"] for entry in payload["entries"]
             if abs(round(sum(
                 line["balance"] for line in entry["lines"]
             ), 2)) > 0.005
@@ -171,8 +175,8 @@ class SageJournalEntryImporter(models.AbstractModel):
     # ------------------------------------------------------------------
     # Load
     # ------------------------------------------------------------------
-    def _excluded_entry_ids(self, ctx: ETLContext) -> set:
-        """Entries already in Odoo as a document or a payment, by id.
+    def _excluded_entry_refs(self, ctx: ETLContext) -> set:
+        """Entries already in Odoo as a document or a payment.
 
         Restricted to moves that carry a Sage *document* or *application*
         id, so a re-run does not mistake the entries this pipeline posted
@@ -184,9 +188,9 @@ class SageJournalEntryImporter(models.AbstractModel):
             "|",
             ("sage_doc_id", "!=", 0),
             ("sage_application_id", "!=", 0),
-            ("sage_gl_entry_id", "!=", 0),
+            ("sage_gl_entry_ref", "!=", False),
             ("company_id", "=", ctx.get_config("company_id")),
-        ]).mapped("sage_gl_entry_id"))
+        ]).mapped("sage_gl_entry_ref"))
 
     def _partner_map(self, ctx: ETLContext) -> dict:
         """(module, Sage tiers id) -> Odoo partner id.
@@ -214,7 +218,7 @@ class SageJournalEntryImporter(models.AbstractModel):
         Move = ctx.env["account.move"]
         accounts = ctx.env["sage.account.importer"].sage_account_map(ctx)
         partners = self._partner_map(ctx)
-        excluded = self._excluded_entry_ids(ctx)
+        excluded = self._excluded_entry_refs(ctx)
         # Resolved once. Browsing the account per line costs a query for
         # every one of the tens of thousands of lines a full replay posts.
         control_accounts = set(ctx.env["account.account"].search([
@@ -222,20 +226,20 @@ class SageJournalEntryImporter(models.AbstractModel):
             ("company_ids", "in", company_id),
         ]).ids)
         already = set(Move.search([
-            ("sage_gl_entry_id", "!=", 0),
+            ("sage_gl_entry_ref", "!=", False),
             ("company_id", "=", company_id),
             ("journal_id", "=", journal_id),
-        ]).mapped("sage_gl_entry_id"))
+        ]).mapped("sage_gl_entry_ref"))
 
         posted = skipped = documents = 0
         batch = ctx.env["account.move"]
         for entry in payload["entries"]:
-            entry_id = entry["sage_gl_entry_id"]
-            if entry_id in excluded:
+            entry_ref = entry["sage_gl_entry_ref"]
+            if entry_ref in excluded:
                 # Already in Odoo as a real invoice, bill or payment.
                 documents += 1
                 continue
-            if entry_id in already:
+            if entry_ref in already:
                 skipped += 1
                 continue
 
@@ -248,7 +252,7 @@ class SageJournalEntryImporter(models.AbstractModel):
                         "No Odoo account for Sage %(sage_id)s, used by "
                         "journal entry %(entry)s. Import the chart of "
                         "accounts first.",
-                        sage_id=line["account"], entry=entry_id,
+                        sage_id=line["account"], entry=entry_ref,
                     ))
                 balance = line["balance"]
                 lines.append((0, 0, {
@@ -270,14 +274,14 @@ class SageJournalEntryImporter(models.AbstractModel):
                     "credit": -balance if balance < 0 else 0.0,
                 }))
 
-            with ctx.skippable(source_ref=entry["source"] or str(entry_id)):
+            with ctx.skippable(source_ref=entry["source"] or entry_ref):
                 move = Move.create({
                     "move_type": "entry",
                     "journal_id": journal_id,
                     "date": entry["date"],
                     "ref": self._reference(entry),
                     "narration": entry["comment"] or False,
-                    "sage_gl_entry_id": entry_id,
+                    "sage_gl_entry_ref": entry_ref,
                     "company_id": company_id,
                     "line_ids": lines,
                 })
