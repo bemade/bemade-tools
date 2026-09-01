@@ -433,6 +433,24 @@ class SageOpenItemImporter(models.AbstractModel):
                 doc["original"], -spec["normal_side"],
             )
             if item_lines is not None:
+                # Sage's item lines know the product but not the account:
+                # the account comes from the Odoo product, and that is not
+                # always where Sage posted. Twenty receivables on this file
+                # credit the deposit account rather than revenue, and taking
+                # the product's account would move all of it to revenue and
+                # leave the deposit account empty.
+                #
+                # Where the GL entry names exactly ONE account besides the
+                # control and the taxes, every item line belongs to it and
+                # the account is not in doubt. Where it names several there
+                # is no way to tell from the item line which one it belongs
+                # to, so the product's account stands — and the per-account
+                # check against Sage is what proves that was right.
+                counterparts = {line["account"] for line in base_lines}
+                if len(counterparts) == 1:
+                    account = counterparts.pop()
+                    for line in item_lines:
+                        line["account"] = account
                 base_lines = item_lines
 
             for line in base_lines:
