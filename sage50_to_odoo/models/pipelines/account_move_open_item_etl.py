@@ -692,9 +692,27 @@ class SageOpenItemImporter(models.AbstractModel):
 
         created = skipped = 0
         totals = {"customer": 0.0, "vendor": 0.0}
+        # A document raised before the history starts is already inside the
+        # control balance the opening entry carries, so posting it as an
+        # invoice as well counts it twice. Nothing downstream would catch
+        # it: the trial balance ties account by account either way, because
+        # the opening entry and the duplicate sit on the same account.
+        history_start = ctx.env[
+            "sage.opening.balance.importer"
+        ].history_start(ctx)
         for document in transformed["transform_open_items"]:
             if document["sage_doc_id"] in already:
                 skipped += 1
+                continue
+            if history_start and document["date"] < history_start:
+                ctx.report.failure(
+                    f"{document['side']} {document['number']} is dated "
+                    f"{document['date']}, before the history starts on "
+                    f"{history_start}. Its balance is already in the opening "
+                    f"entry — importing it as a document too would count it "
+                    f"twice. Start the history earlier, or code it manually.",
+                    source_ref=document["number"],
+                )
                 continue
             partner_id = partners.get(
                 (document["side"], document["sage_partner_id"])

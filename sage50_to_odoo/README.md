@@ -153,7 +153,79 @@ all of them:
 
 ---
 
+## Two shapes of take-on
+
+Which one runs is decided by **`history_start_date`** on the `sage.database`
+record.
+
+| | `history_start_date` empty | set to a fiscal year start |
+|---|---|---|
+| Odoo opens at | `cutover_date` | that year's first day |
+| Profit and loss history | none | replayed in full |
+| Counter-entry | posted | silent |
+| GL replay | skipped | every entry from the start date |
+| Strong check | partner-less control balance = 0 | trial balance ties to Sage, account by account |
+
+Take the first when the source system keeps the year and closes it. Take the
+second when the year's remaining bills and adjustments will be booked in
+Odoo — the year then exists whole in neither system, and it can be closed
+from neither, unless the history comes across.
+
+`history_start_date` must be the **first day of a fiscal year Sage still
+holds**. Anything else is refused rather than approximated, for the reason in
+the next section.
+
+---
+
+## The year-end roll has no journal entry
+
+Sage does not sweep the profit and loss into equity with a closing entry at
+year end. It rolls the generation and adjusts the retained-earnings balance
+*silently*, with no journal entry anywhere in any generation.
+
+Two consequences, and both bite:
+
+- **There is nothing to filter out of a replay.** Looking for closing entries
+  to skip is looking for something that does not exist. Replay every entry;
+  Odoo derives each year's result itself.
+- **An opening balance reconstructed by working backwards is wrong on exactly
+  one account.** Subtracting each generation's movement from `taccount.dYts`
+  is exact for every account except retained earnings, which comes out short
+  by every year of profit the file still remembers. Each roll has to be undone
+  by hand.
+
+Verified exactly on a real file: the roll equals the jump in the retained
+earnings account between `taccount.dYtcLY` and `taccount.dYts`, and that
+account is the one Sage names in `tlinkact.lAcNretErn` — not a guess from the
+account number.
+
+---
+
+## What the replay does not carry
+
+Replayed lines post as plain journal items with **no tax grids**. Those
+GST/QST periods were filed out of Sage; stamping grids on them would put
+filed periods back onto Odoo's tax returns. Documents entered natively in
+Odoo from the cutover forward carry their taxes normally.
+
+Only the **receivable and payable lines carry a partner**. Sage's header
+tiers is the *document's* counterparty and a general-journal entry has none
+at all, so the control lines are the only ones where it is unambiguously
+right — and the only ones where it matters, since a control account with
+partner-less lines cannot be aged or reconciled.
+
+Entries that became real invoices, bills or payments are skipped **by id**,
+recorded on the move as `sage_gl_entry_id` — never by document number. A
+document posted, corrected and reposted leaves two entries and only one of
+them became the invoice; the other is real ledger history and must replay.
+
+---
+
 ## The three-entry take-on
+
+This is the balances-only shape. With history imported the counter-entry
+falls silent, because the revenue it exists to keep out of Odoo is precisely
+what the replay is there to bring in.
 
 The open documents, a counter-entry and an opening entry, in that order.
 
@@ -181,6 +253,15 @@ The opening entry balances against a transition account, which must then read
 `known_imbalance` and nothing else. `action_check` on `sage.database` runs all
 three checks, plus one for Odoo's **Invoicing Switch Threshold**, which
 cancels posted entries before its date with a raw SQL sweep and no chatter.
+
+With history imported, the partner-less check stops meaning anything and is
+reported as information rather than as a verdict: the opening entry carries
+the control balances as they stood at the *start* of the replay, with no
+partner, and they decay toward zero only as the replayed payments settle the
+documents that were open back then. `action_check` swaps in the trial balance
+against Sage instead, **reported per account** — a total that ties while two
+accounts are wrong in opposite directions is exactly the failure worth
+catching.
 
 ---
 
