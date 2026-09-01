@@ -11,7 +11,7 @@
 #
 {
     "name": "Sage 50 to Odoo",
-    "version": "19.0.2.3.0",
+    "version": "19.0.2.4.0",
     "summary": "Migrate an offline Sage 50 Canadian Edition company file",
     "description": "ETL pipelines reading a Sage 50 company file served "
                    "read-only from a userland mysqld: chart of accounts, "

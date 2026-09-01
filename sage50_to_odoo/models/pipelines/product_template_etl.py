@@ -50,14 +50,6 @@ PACKAGING_LIKE = re.compile(r"\d", re.UNICODE)
 #: pricelist rule.
 SAGE_PRICELIST_REGULAR = 1
 
-#: Reference units at the root of a MEASURED quantity. Odoo 19 has no UoM
-#: categories — units form a tree through `relative_uom_id`, so kg resolves up
-#: to g and litre up to ml. A product measured on a scale cannot be produced
-#: to an exact figure; one that is counted can.
-MEASURED_UOM_ROOTS = (
-    "uom.product_uom_gram",
-    "uom.product_uom_milliliter",
-)
 
 
 @ETL.pipeline(
@@ -78,47 +70,26 @@ class SageProductImporter(models.AbstractModel):
         return UOM_MAP.get((sage_unit or "").strip().lower(), DEFAULT_UOM)
 
     def _invoice_policy(self, ctx: ETLContext, record: dict, uom):
-        """Ordered or delivered quantities, decided by how the product is
-        measured.
+        """Invoice on DELIVERED quantities.
 
-        Weighed and poured products are billed on what was **ordered**:
-        production does not hit an ordered weight exactly, an order for 5 kg
-        comes out at 4.989, and the customer pays for the 5 kg they asked
-        for. Left on "delivered", Odoo wants to invoice the difference and
-        the order never finishes.
+        Set explicitly rather than left to Odoo, whose own compute forces
+        every `consu` product to "ordered" regardless of unit — which is the
+        wrong default for a business migrating off a system where the invoice
+        followed the shipment, and means somebody re-does hundreds of products
+        by hand afterwards.
 
-        Counted products keep **delivered**, where 21 ordered against 23
-        shipped is not a tolerance but two extra units, and worth seeing.
+        A weighed product is the interesting case and it still belongs here:
+        an order for 5 kg that ships at 4.989 is invoiced at 4.989, because
+        that is what left the building. Billing the ordered figure instead is
+        a real business rule some clients have and most do not — override this
+        hook where it applies, rather than assuming it.
 
-        Services invoice on **ordered** whatever their unit: nothing delivers
-        them, so a delivered quantity would stay at zero forever.
-
-        Set explicitly at import because Odoo's own default does not make
-        this distinction: `invoice_policy` is a stored compute that forces
-        every `consu` product to "order" whatever its unit. Leaving it to the
-        default means somebody changes them all by hand afterwards.
-
-        Note it does not STAY set by itself — the same compute reasserts
-        "order" on any write touching `type`. Holding this rule for the life
-        of the database takes an override of `_compute_invoice_policy`, which
-        is a behavioural change to a core model and belongs in a client
-        module rather than here.
+        Note this does not STAY set by itself: the same Odoo compute reasserts
+        "ordered" on any write touching `type`. Holding it for the life of the
+        database takes an override of `_compute_invoice_policy`, which is a
+        behavioural change to a core model and belongs in a client module.
         """
-        if record.get("type") == "service":
-            # Nothing delivers a service, so `qty_delivered` never moves off
-            # zero and "delivered quantities" would leave the line permanently
-            # un-invoiceable. Not a preference — the other setting is broken.
-            return "order"
-        if not uom:
-            return False
-        roots = set()
-        for xmlid in MEASURED_UOM_ROOTS:
-            root = ctx.env.ref(xmlid, raise_if_not_found=False)
-            if root:
-                roots.add(root.id)
-        path = uom.parent_path or ""
-        root_id = int(path.split("/")[0]) if path else uom.id
-        return "order" if root_id in roots else "delivery"
+        return "delivery"
 
     def _sale_tax_xmlid_suffix(self, item: dict):
         """The sales tax an item carries, as an `account.tax` xmlid suffix.
