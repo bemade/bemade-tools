@@ -22,7 +22,7 @@ never appears in the trial balance at all.
 
 import logging
 
-from odoo import _, models
+from odoo import _, fields, models
 from odoo.exceptions import UserError
 from odoo.addons.etl_framework import ETL, ETLContext
 
@@ -48,8 +48,8 @@ class SageCounterEntryImporter(models.AbstractModel):
     _name = "sage.counter.entry.importer"
     _description = "Sage 50 Take-on Counter-entry"
 
-    def _reference(self) -> str:
-        return REFERENCE
+    def _reference(self, year_end=None) -> str:
+        return f"{REFERENCE} ({year_end})" if year_end else REFERENCE
 
     @ETL.extract("account_move")
     def extract_documents(self, ctx: ETLContext) -> list:
@@ -57,20 +57,19 @@ class SageCounterEntryImporter(models.AbstractModel):
         open-item pipeline just posted, and only Odoo knows how they came
         out once its own tax engine had run.
 
-        Silent when the take-on imports history. The whole purpose of this
-        entry is to keep revenue out of Odoo that Sage already reported —
-        which is right when Odoo opens with balances alone, and exactly
-        wrong once `sage.journal.entry.importer` has replayed the years
-        those documents belong to. There the profit and loss *should* be in
-        Odoo, and the double-count is avoided at the other end instead, by
-        the replay skipping the entries these documents came from.
+        Runs in both shapes of take-on, and for the same reason in each:
+        a document re-created as an invoice must not also report its own
+        revenue. With history imported that reason is stronger, not weaker.
+        The general-ledger replay is a faithful copy of Sage, so the
+        document's accounting is ALREADY in Odoo, posted to the accounts
+        Sage actually used. A re-derived invoice cannot be substituted for
+        the entry behind it: Odoo builds it from item lines onto revenue
+        accounts, while Sage may have booked it somewhere else entirely --
+        on this client, twenty open receivables sit against the
+        unbilled-goods-received account rather than against revenue.
+        Mirroring the documents away and letting the replay carry the
+        ledger is what makes every account tie by construction.
         """
-        if ctx.env["sage.opening.balance.importer"].history_start(ctx):
-            _logger.info(
-                "History is being imported, so the documents are not "
-                "mirrored away: their profit and loss belongs in Odoo."
-            )
-            return []
         return ctx.env["account.move"].search([
             "|",
             ("sage_doc_id", "!=", 0),
@@ -142,42 +141,56 @@ class SageCounterEntryImporter(models.AbstractModel):
                   "keeps the whole take-on isolable afterwards.")
             )
         Move = ctx.env["account.move"]
-        reference = self._reference()
-        existing = Move.search([
-            ("journal_id", "=", journal_id), ("ref", "=", reference),
-        ], limit=1)
-        if existing:
-            _logger.info(
-                "Counter-entry already posted as %s; nothing to do.",
-                existing.name,
-            )
-            return
-
         lines = transformed["transform_lines"]
         if not lines:
-            if ctx.env["sage.opening.balance.importer"].history_start(ctx):
-                return
             raise UserError(
                 _("No imported documents to mirror. Import the open items "
                   "first.")
             )
-        date = max(line["date"] for line in lines)
-        move = Move.create({
-            "move_type": "entry",
-            "journal_id": journal_id,
-            "date": date,
-            "ref": reference,
-            "company_id": ctx.get_config("company_id"),
-            "line_ids": [
-                (0, 0, {
-                    key: value for key, value in line.items() if key != "date"
-                } | {"tax_tag_ids": [(6, 0, line["tax_tag_ids"])]})
-                for line in lines
-            ],
-        })
-        move.action_post()
-        ctx.report.success()
-        _logger.info(
-            "Counter-entry %s posted at %s: %s lines.",
-            move.name, date, len(lines),
-        )
+
+        # One entry per fiscal year, not one overall. A single mirror dated
+        # at the latest document would neutralise a document raised in an
+        # earlier year inside a later one, leaving both years wrong by the
+        # same amount and the total right — which is exactly the error a
+        # year-by-year comparison against Sage exists to catch. The
+        # documents on this file already straddle a year end.
+        company = ctx.env["res.company"].browse(ctx.get_config("company_id"))
+        by_year = {}
+        for line in lines:
+            span = company.compute_fiscalyear_dates(
+                fields.Date.from_string(line["date"])
+            )
+            by_year.setdefault(span["date_to"], []).append(line)
+
+        for year_end, year_lines in sorted(by_year.items()):
+            date = max(line["date"] for line in year_lines)
+            reference = self._reference(year_end)
+            existing = Move.search([
+                ("journal_id", "=", journal_id), ("ref", "=", reference),
+            ], limit=1)
+            if existing:
+                _logger.info(
+                    "Counter-entry for %s already posted as %s; skipping.",
+                    year_end, existing.name,
+                )
+                continue
+            move = Move.create({
+                "move_type": "entry",
+                "journal_id": journal_id,
+                "date": date,
+                "ref": reference,
+                "company_id": ctx.get_config("company_id"),
+                "line_ids": [
+                    (0, 0, {
+                        key: value for key, value in line.items()
+                        if key != "date"
+                    } | {"tax_tag_ids": [(6, 0, line["tax_tag_ids"])]})
+                    for line in year_lines
+                ],
+            })
+            move.action_post()
+            ctx.report.success()
+            _logger.info(
+                "Counter-entry %s posted at %s: %s lines.",
+                move.name, date, len(year_lines),
+            )

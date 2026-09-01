@@ -10,16 +10,22 @@ year end, so "the general ledger" is several tables — see
 `tools.generation_spans`. Every generation from the current one back to
 `history_start_date` is imported whole.
 
-**Two entries must not be posted twice.** The open receivables and payables
-are re-created as real invoices and bills by `sage.open.item.importer`, and
-the applications against them as real payments by `sage.payment.importer`,
-because an ageing report and a reconciliation need documents rather than
-journal lines. Sage also has a GL entry behind each of those, and posting
-both would double every one of them. Each imported document and payment
-therefore records the id of the entry it came from, and this pipeline skips
-exactly those ids — not every entry sharing a document number, because an
-invoice that was posted, corrected and reposted leaves two entries and only
-one of them became the invoice. The other is real ledger history.
+**Every entry is replayed, including the ones behind the open documents.**
+The general ledger is the truth here, and nothing is left out of it. The
+open receivables and payables are also re-created as real invoices and bills
+by `sage.open.item.importer`, because an ageing report and a reconciliation
+need documents rather than journal lines — but those documents are mirrored
+away in the general ledger by `sage.counter.entry.importer`, so they add
+subledger detail and no accounting.
+
+Substituting the document for the entry behind it was tried and is wrong.
+Odoo builds an invoice from item lines onto revenue accounts, while Sage may
+have booked the same document somewhere else entirely: on the file this was
+built against, twenty open receivables totalling $133,894.80 sit against the
+unbilled-goods-received account rather than against revenue. Swap the entry
+for the invoice and that account loses its balance while revenue gains one,
+and no exclusion rule can repair it. Replay everything; neutralise the
+documents.
 
 **No taxes.** Replayed lines post as plain journal items with no tax grids.
 Those GST/QST periods were filed out of Sage years ago; stamping grids on
@@ -175,23 +181,6 @@ class SageJournalEntryImporter(models.AbstractModel):
     # ------------------------------------------------------------------
     # Load
     # ------------------------------------------------------------------
-    def _excluded_entry_refs(self, ctx: ETLContext) -> set:
-        """Entries already in Odoo as a document or a payment.
-
-        Restricted to moves that carry a Sage *document* or *application*
-        id, so a re-run does not mistake the entries this pipeline posted
-        last time for documents. Those are handled separately, and counting
-        them here would make the log read as though the open items had
-        swallowed the whole ledger.
-        """
-        return set(ctx.env["account.move"].search([
-            "|",
-            ("sage_doc_id", "!=", 0),
-            ("sage_application_id", "!=", 0),
-            ("sage_gl_entry_ref", "!=", False),
-            ("company_id", "=", ctx.get_config("company_id")),
-        ]).mapped("sage_gl_entry_ref"))
-
     def _partner_map(self, ctx: ETLContext) -> dict:
         """(module, Sage tiers id) -> Odoo partner id.
 
@@ -218,7 +207,6 @@ class SageJournalEntryImporter(models.AbstractModel):
         Move = ctx.env["account.move"]
         accounts = ctx.env["sage.account.importer"].sage_account_map(ctx)
         partners = self._partner_map(ctx)
-        excluded = self._excluded_entry_refs(ctx)
         # Resolved once. Browsing the account per line costs a query for
         # every one of the tens of thousands of lines a full replay posts.
         control_accounts = set(ctx.env["account.account"].search([
@@ -231,14 +219,10 @@ class SageJournalEntryImporter(models.AbstractModel):
             ("journal_id", "=", journal_id),
         ]).mapped("sage_gl_entry_ref"))
 
-        posted = skipped = documents = 0
+        posted = skipped = 0
         batch = ctx.env["account.move"]
         for entry in payload["entries"]:
             entry_ref = entry["sage_gl_entry_ref"]
-            if entry_ref in excluded:
-                # Already in Odoo as a real invoice, bill or payment.
-                documents += 1
-                continue
             if entry_ref in already:
                 skipped += 1
                 continue
@@ -301,9 +285,8 @@ class SageJournalEntryImporter(models.AbstractModel):
             ctx.env.cr.commit()
 
         _logger.info(
-            "Sage general ledger: %s entries posted, %s already present, "
-            "%s left to the documents and payments that replaced them.",
-            posted, skipped, documents,
+            "Sage general ledger: %s entries posted, %s already present.",
+            posted, skipped,
         )
 
     def _reference(self, entry: dict) -> str:

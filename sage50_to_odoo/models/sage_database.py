@@ -417,38 +417,44 @@ class SageDatabase(models.Model):
     def _check_trial_balance(self) -> tuple:
         """Odoo against Sage, per account, over every replayed year.
 
-        Comparing cumulative balances alone would be wrong for half the
-        chart. A profit and loss account restarts at zero every year, so
-        Sage's figure for it describes ONE year while Odoo's running total
-        describes all of them — on a three-year replay that reads as a
-        threefold discrepancy on every P&L account and hides whatever the
-        real errors are. The comparison is therefore per generation: each
-        year's movement in Odoo against the same year's movement in Sage,
-        which is the right test for both halves of the chart. The closing
-        balance sheet is then checked once on top, because a year's movement
-        can be right in every year while the opening balance underneath it
-        is wrong.
+        Three things this has to get right, each of which reads as a pile of
+        false failures when it is got wrong.
 
-        Sage's own `dYtc` summary field is deliberately not used as the
-        expected figure: it describes the file's "as at" moment, which is
-        not necessarily its last entry, and it disagrees with the ledger on
-        a real file.
+        **Per year, not cumulative.** A profit and loss account restarts at
+        zero every year, so Sage's figure for it describes ONE year while a
+        running Odoo balance describes all of them. On a three-year replay
+        that makes every P&L account look threefold and buries the real
+        errors.
+
+        **In Odoo's account space, not Sage's.** Several Sage accounts map
+        deliberately onto one Odoo account — the tax accounts are aliased
+        onto the localisation's. Compared one Sage id at a time they always
+        disagree in mirror-image pairs; summed onto the account they share,
+        they tie.
+
+        **Without the opening entry.** It is dated the first day of the
+        oldest replayed year, so it falls inside that year's range and would
+        be counted as movement. The balance sheet check below is where it
+        belongs, and it is included there.
         """
         self.ensure_one()
         start = self.history_start_date.strftime("%Y-%m-%d")
         report, ok = [], True
 
         with self.get_cursor() as cr:
+            ctx = ETLContext(
+                cr=cr, env=self.env, source_config=self._get_source_config()
+            )
+            sage_to_odoo = self.env["sage.account.importer"].sage_account_map(
+                ctx
+            )
             spans = [
                 span for span in tools.generation_spans(cr)
                 if span["start"] >= start
             ]
-            movements = {
-                span["header"]: (
-                    span, tools.generation_movement(cr, span)
-                )
-                for span in spans
-            }
+            movements = [
+                (span, tools.generation_movement(cr, span)) for span in spans
+            ]
             opening = {
                 row["lId"]: round(row["dYts"], 2)
                 for row in tools.query(
@@ -459,36 +465,45 @@ class SageDatabase(models.Model):
             }
             as_of = spans[0]["end"] if spans else start
 
-        for header, (span, expected) in movements.items():
-            actual = self._movement(span["start"], span["end"])
-            drift = self._drift(expected, actual)
+        def fold(natural_by_sage, only_balance_sheet=False) -> dict:
+            """Sage amounts -> debit-positive totals per Odoo account."""
+            folded = {}
+            for sage_id, natural in natural_by_sage.items():
+                if only_balance_sheet and sage_id // 10_000_000 >= 4:
+                    continue
+                account_id = sage_to_odoo.get(sage_id)
+                if not account_id:
+                    continue
+                folded[account_id] = round(
+                    folded.get(account_id, 0.0)
+                    + tools.signed_amount(sage_id, round(natural, 2)), 2
+                )
+            return folded
+
+        for span, movement in movements:
+            drift = self._drift(
+                fold(movement),
+                self._movement(span["start"], span["end"], skip_opening=True),
+            )
+            label = f"{span['start']}..{span['end']}"
             if drift:
                 ok = False
-                report.append(
-                    f"{span['start']}..{span['end']}: {len(drift)} accounts "
-                    f"do not tie"
-                )
+                report.append(f"{label}: {len(drift)} accounts do not tie")
                 report += self._drift_lines(drift)
             else:
-                report.append(
-                    f"{span['start']}..{span['end']}: every account ties  OK"
-                )
+                report.append(f"{label}: every account ties  OK")
 
-        # The closing balance sheet. Profit and loss is excluded: it is
-        # covered year by year above, and its cumulative total across
-        # several years is not a figure Sage holds anywhere.
-        expected = {
-            sage_id: natural for sage_id, natural in opening.items()
-            if sage_id // 10_000_000 < 4
-        }
-        closing = dict(expected)
-        current = movements.get(tools.GENERATIONS[0][0])
-        if current:
-            for sage_id, amount in current[1].items():
-                if sage_id // 10_000_000 < 4:
-                    closing[sage_id] = closing.get(sage_id, 0.0) + amount
-        actual = self._movement(None, as_of, balance_sheet_only=True)
-        drift = self._drift(closing, actual)
+        # The closing balance sheet, opening entry included. Profit and loss
+        # is left out: it is covered year by year above, and its total
+        # across several years is not a figure Sage holds anywhere.
+        closing = dict(opening)
+        if movements:
+            for sage_id, amount in movements[0][1].items():
+                closing[sage_id] = closing.get(sage_id, 0.0) + amount
+        drift = self._drift(
+            fold(closing, only_balance_sheet=True),
+            self._movement(None, as_of, balance_sheet_only=True),
+        )
         if drift:
             ok = False
             report.append(
@@ -499,43 +514,52 @@ class SageDatabase(models.Model):
             report.append(f"Balance sheet at {as_of}: every account ties  OK")
         return ok, report
 
-    def _movement(self, start, end, balance_sheet_only=False) -> dict:
-        """Sage account number -> Odoo movement over a date range."""
-        query = """select a.sage_account_id, coalesce(sum(l.balance), 0)
+    def _movement(self, start, end, balance_sheet_only=False,
+                  skip_opening=False) -> dict:
+        """Odoo account id -> movement over a date range, debit-positive."""
+        query = """select l.account_id, coalesce(sum(l.balance), 0)
                      from account_move_line l
                      join account_move m on m.id = l.move_id
                      join account_account a on a.id = l.account_id
                     where m.state = 'posted' and m.company_id = %s
-                      and a.sage_account_id != 0 and m.date <= %s"""
+                      and m.date <= %s"""
         args = [self.company_id.id, end]
         if start:
             query += " and m.date >= %s"
             args.append(start)
         if balance_sheet_only:
-            query += " and a.sage_account_id < 40000000"
-        query += " group by a.sage_account_id"
+            query += """ and a.account_type not in ('income', 'income_other',
+                         'expense', 'expense_depreciation', 'expense_direct_cost')"""
+        if skip_opening:
+            query += " and coalesce(m.ref, '') not like %s"
+            args.append("Sage 50 take-on — opening balance%")
+        query += " group by l.account_id"
         self.env.cr.execute(query, args)
         return {row[0]: round(row[1], 2) for row in self.env.cr.fetchall()}
 
-    def _drift(self, expected_natural: dict, actual: dict) -> list:
-        """Accounts where Odoo and Sage disagree, debit-positive."""
+    def _drift(self, expected: dict, actual: dict) -> list:
+        """Odoo accounts where the two sides disagree."""
         drift = []
-        seen = set(expected_natural) | set(actual)
-        for sage_id in seen:
-            want = round(tools.signed_amount(
-                sage_id, round(expected_natural.get(sage_id, 0.0), 2)
-            ), 2)
-            got = actual.get(sage_id, 0.0)
+        for account_id in set(expected) | set(actual):
+            want = expected.get(account_id, 0.0)
+            got = actual.get(account_id, 0.0)
             if abs(want - got) > 0.01:
-                drift.append((sage_id, want, got))
+                drift.append((account_id, want, got))
         drift.sort(key=lambda row: -abs(row[1] - row[2]))
         return drift
 
     def _drift_lines(self, drift: list, limit: int = 10) -> list:
+        accounts = {
+            account.id: account
+            for account in self.env["account.account"].browse(
+                [row[0] for row in drift[:limit]]
+            )
+        }
         lines = [
-            f"  {sage_id}: Sage {want:,.2f}, Odoo {got:,.2f} "
-            f"(off by {got - want:,.2f})"
-            for sage_id, want, got in drift[:limit]
+            f"  {accounts[account_id].code} "
+            f"{accounts[account_id].name[:34]}: Sage {want:,.2f}, "
+            f"Odoo {got:,.2f} (off by {got - want:,.2f})"
+            for account_id, want, got in drift[:limit]
         ]
         if len(drift) > limit:
             lines.append(f"  … and {len(drift) - limit} more")
