@@ -17,6 +17,14 @@ class AccountMove(models.Model):
              "the move as well as the payment so the take-on's reversing "
              "entry can find every imported line with one search.",
     )
+    sage_gl_entry_id = fields.Integer(
+        string="Sage GL entry", index=True, copy=False,
+        help="Row id of the Sage journal entry this move came from, or that "
+             "it replaces. A document imported as a real invoice carries the "
+             "id of the GL entry Sage posted behind it, so the general-ledger "
+             "replay can skip that entry instead of posting the document a "
+             "second time.",
+    )
 
 
 class AccountPayment(models.Model):

@@ -126,3 +126,86 @@ def journal_entry(cr: Any, source: str, module: int, rec_id: int,
         # Fall back to the last entry posted, which is the correction.
         return by_entry[max(by_entry)]
     return []
+
+
+def linked_accounts(cr: Any) -> dict:
+    """Sage's `tlinkact` row: the accounts Sage itself nominates for a role.
+
+    Worth reading rather than hardcoding or guessing from account numbers.
+    The two that matter to a take-on are `lAcNretErn` (retained earnings)
+    and `lAcNcurErn` (the current-earnings pseudo-account, which is `cFunc`
+    `X` and which Odoo computes rather than stores).
+    """
+    rows = query(cr, "select * from tlinkact limit 1")
+    return rows[0] if rows else {}
+
+
+def generation_spans(cr: Any) -> list[dict]:
+    """Every populated fiscal generation, newest first, with its date span.
+
+    Sage names the generations by position rather than by year, so the only
+    way to learn which year a table holds is to look. Empty generations are
+    dropped: a file that has not yet rolled twice still has the archive
+    tables, just with nothing in them.
+    """
+    spans = []
+    for index, (header, lines) in enumerate(GENERATIONS):
+        row = query(
+            cr,
+            f"""select count(*) as entries,
+                       min(dtJourDate) as first_date,
+                       max(dtJourDate) as last_date
+                  from {header}""",
+        )[0]
+        if not row["entries"]:
+            continue
+        spans.append({
+            "index": index,
+            "header": header,
+            "lines": lines,
+            "entries": row["entries"],
+            "start": row["first_date"].strftime("%Y-%m-%d"),
+            "end": row["last_date"].strftime("%Y-%m-%d"),
+        })
+    return spans
+
+
+def generation_movement(cr: Any, span: dict) -> dict:
+    """Sage account number -> that generation's net movement, natural side.
+
+    Natural side rather than debit-positive because the caller combines it
+    with `taccount.dYts`, which is stored the same way. Convert with
+    `signed_amount` only when adding accounts from different sections
+    together.
+    """
+    return {
+        row["lAcctId"]: round(row["amount"], 2)
+        for row in query(
+            cr,
+            f"""select l.lAcctId, sum(l.dAmount) as amount
+                  from {span['header']} j
+                  join {span['lines']} l on l.lJEntId = j.lId
+                 group by l.lAcctId""",
+        )
+    }
+
+
+def net_income(movement: dict, postable: set) -> float:
+    """A generation's net income, debit-positive (so a profit is positive).
+
+    Sage does NOT post a closing entry that sweeps the profit and loss into
+    equity. It rolls the generation and moves the result into retained
+    earnings as a silent balance adjustment, with no journal entry anywhere.
+    So there is nothing to exclude from a replay — but an opening balance
+    reconstructed by working backwards through the generations has to undo
+    each roll by hand, or retained earnings comes out short by every year of
+    profit the file still remembers.
+
+    Verified exactly on a real file: this figure equals the jump in the
+    `lAcNretErn` account between `taccount.dYtcLY` and `taccount.dYts`.
+    """
+    return -round(sum(
+        signed_amount(account_id, amount)
+        for account_id, amount in movement.items()
+        if account_id in postable and account_id // 10_000_000 >= 4
+    ), 2)

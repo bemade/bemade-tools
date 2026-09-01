@@ -55,7 +55,22 @@ class SageCounterEntryImporter(models.AbstractModel):
     def extract_documents(self, ctx: ETLContext) -> list:
         """Reads Odoo, not Sage: the documents to mirror are the ones the
         open-item pipeline just posted, and only Odoo knows how they came
-        out once its own tax engine had run."""
+        out once its own tax engine had run.
+
+        Silent when the take-on imports history. The whole purpose of this
+        entry is to keep revenue out of Odoo that Sage already reported —
+        which is right when Odoo opens with balances alone, and exactly
+        wrong once `sage.journal.entry.importer` has replayed the years
+        those documents belong to. There the profit and loss *should* be in
+        Odoo, and the double-count is avoided at the other end instead, by
+        the replay skipping the entries these documents came from.
+        """
+        if ctx.env["sage.opening.balance.importer"].history_start(ctx):
+            _logger.info(
+                "History is being imported, so the documents are not "
+                "mirrored away: their profit and loss belongs in Odoo."
+            )
+            return []
         return ctx.env["account.move"].search([
             "|",
             ("sage_doc_id", "!=", 0),
@@ -140,6 +155,8 @@ class SageCounterEntryImporter(models.AbstractModel):
 
         lines = transformed["transform_lines"]
         if not lines:
+            if ctx.env["sage.opening.balance.importer"].history_start(ctx):
+                return
             raise UserError(
                 _("No imported documents to mirror. Import the open items "
                   "first.")

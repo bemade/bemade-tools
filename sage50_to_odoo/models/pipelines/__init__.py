@@ -9,3 +9,4 @@ from . import account_move_open_item_etl
 from . import account_payment_etl
 from . import account_move_counter_entry_etl
 from . import account_move_opening_balance_etl
+from . import account_move_journal_entry_etl

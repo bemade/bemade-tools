@@ -96,6 +96,16 @@ class SageDatabase(models.Model):
     )
 
     # -- take-on settings --------------------------------------------
+    history_start_date = fields.Date(
+        string="Import history from",
+        help="Leave empty for a balances-only take-on: Odoo opens at the "
+             "cutover date with no history behind it. Set it to the first "
+             "day of a fiscal year Sage still holds to replay every journal "
+             "entry from that day forward, which is what lets a year be "
+             "closed in Odoo rather than merely opened there. It must be a "
+             "fiscal year start — anything else would leave retained "
+             "earnings carrying a part-year roll Sage never performed.",
+    )
     cutover_date = fields.Date(
         help="Balances are taken as at the end of this day. It must fall "
              "inside the fiscal year the company file is open on — an older "
@@ -211,6 +221,10 @@ class SageDatabase(models.Model):
             "cutover_date": (
                 self.cutover_date.strftime("%Y-%m-%d")
                 if self.cutover_date else None
+            ),
+            "history_start_date": (
+                self.history_start_date.strftime("%Y-%m-%d")
+                if self.history_start_date else None
             ),
             "journal_id": self.journal_id.id,
             "transition_account_id": self.transition_account_id.id,

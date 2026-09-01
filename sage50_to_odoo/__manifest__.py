@@ -11,13 +11,14 @@
 #
 {
     "name": "Sage 50 to Odoo",
-    "version": "19.0.2.4.0",
+    "version": "19.0.3.0.0",
     "summary": "Migrate an offline Sage 50 Canadian Edition company file",
     "description": "ETL pipelines reading a Sage 50 company file served "
                    "read-only from a userland mysqld: chart of accounts, "
                    "partners, product categories, products, pricelists, the "
-                   "open receivables and payables, and the opening trial "
-                   "balance. Install on the machine running the migration "
+                   "open receivables and payables, the opening trial "
+                   "balance and, optionally, a full replay of the general "
+                   "ledger. Install on the machine running the migration "
                    "only. See README.md in the module directory.",
     "category": "Technical",
     "author": "Bemade Inc.",

@@ -471,7 +471,7 @@ class SageOpenItemImporter(models.AbstractModel):
             staged.append({
                 "original": abs(round(original, 2)),
                 "applications": self._applications(
-                    ctx, spec, doc["doc_id"], control
+                    ctx, spec, doc["doc_id"], control, header["partner_id"]
                 ),
                 # Sage records the payment terms on the DOCUMENT, not on the
                 # vendor — the vendor master is routinely 0 on every row while
@@ -487,6 +487,11 @@ class SageOpenItemImporter(models.AbstractModel):
                 ),
                 "side": side,
                 "sage_doc_id": header["lId"],
+                # The GL entry Sage posted behind this document. The document
+                # is about to be re-created as a real invoice, so the
+                # general-ledger replay must skip that entry or the same
+                # revenue lands twice.
+                "sage_gl_entry_id": gl_lines[0]["lId"] if gl_lines else 0,
                 "sage_partner_id": header["partner_id"],
                 "partner_name": header["partner_name"],
                 "move_type": spec["move_type"][
@@ -515,7 +520,7 @@ class SageOpenItemImporter(models.AbstractModel):
                 )
         return staged
 
-    def _applications(self, ctx, spec, doc_id, control) -> list:
+    def _applications(self, ctx, spec, doc_id, control, rec_id) -> list:
         """What has already been applied against a document.
 
         Receipts, payments and applied credit notes, each with the bank
@@ -544,6 +549,15 @@ class SageOpenItemImporter(models.AbstractModel):
                 "reference": (row["sSource"] or "").strip() or None,
                 "sage_bank_account": row["lBnkAcctId"] or 0,
                 "cheque_id": row["lChqId"] or 0,
+                # The GL entry Sage posted for the receipt or payment itself.
+                # It is about to become a real `account.payment`, so the
+                # replay must skip it or the bank moves twice. One receipt
+                # settling several invoices is one entry against several
+                # application rows, which is why the replay excludes a SET of
+                # entry ids rather than pairing them off one to one.
+                "sage_gl_entry_id": self._application_entry_id(
+                    ctx, spec, row, control, rec_id
+                ),
             }
             for row in tools.query(
                 ctx.cr,
@@ -556,6 +570,27 @@ class SageOpenItemImporter(models.AbstractModel):
                 (doc_id,),
             )
         ]
+
+    def _application_entry_id(self, ctx, spec, row, control, rec_id) -> int:
+        """The id of the GL entry behind one application, or 0 if unfound.
+
+        Disambiguated on the application's own amount against the control
+        account, the same way a document is: a receipt number is no more
+        unique than an invoice number, and a reversed-and-reissued receipt
+        leaves two entries that are exact mirrors.
+
+        Returning 0 is not an error — an application settled by a credit
+        note rather than by money has no separate GL entry of its own, and
+        the replay then has nothing to skip.
+        """
+        source = (row["sSource"] or "").strip()
+        if not source:
+            return 0
+        lines = tools.journal_entry(
+            ctx.cr, source, spec["module"], rec_id,
+            control_account=control, expected_control=row["dAmount"],
+        )
+        return lines[0]["lId"] if lines else 0
 
     # ------------------------------------------------------------------
     # Transform
@@ -777,6 +812,7 @@ class SageOpenItemImporter(models.AbstractModel):
                 "narration": document.get("description") or False,
                 "invoice_date_due": due_date,
                 "sage_doc_id": document["sage_doc_id"],
+                "sage_gl_entry_id": document["sage_gl_entry_id"],
                 "company_id": company_id,
                 "invoice_line_ids": lines,
             })

@@ -43,6 +43,7 @@
                             <field name="language"/>
                         </group>
                         <group string="Take-on">
+                            <field name="history_start_date"/>
                             <field name="cutover_date"/>
                             <field name="journal_id"/>
                             <field name="transition_account_id"/>
