@@ -146,6 +146,15 @@ class SagePaymentImporter(models.AbstractModel):
         posts the receipt in full — which is where it belongs, since most of
         what it settled is history rather than an open document.
         """
+        if not ctx.env["sage.opening.balance.importer"].history_start(ctx):
+            # Only the general-ledger replay makes a partial payment a
+            # problem: it skips the whole entry behind any payment we
+            # create. With no replay, nothing else will ever post that
+            # receipt, so dropping it loses the money outright and leaves
+            # the partner-less control balance short by the difference —
+            # which is the check a balances-only take-on is verified by.
+            return values
+
         by_entry = {}
         for values_row in values:
             by_entry.setdefault(
