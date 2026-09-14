@@ -664,6 +664,10 @@ class AccountMoveCommon(models.AbstractModel):
             "invoice_date_due": fix_tz(order["docduedate"]),
             "sap_docentry": order["docentry"],
             "sap_docnum": order["docnum"],
+            # ir.attachment.importer resolves ATC1.absentry against this
+            # column; without it every OINV/OPCH/ORIN/ORPC attachment is
+            # silently skipped.
+            "sap_atcentry": order.get("atcentry"),
             "sap_table": sap_header_table,
             "ref": order["numatcard"],
             "line_ids": move_lines,
