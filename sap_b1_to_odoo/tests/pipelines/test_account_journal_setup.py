@@ -31,6 +31,9 @@ Acceptance criteria:
    keyed on the account, not on the ``BNK{n}`` code.
 3. (test_bank_journal_codes_are_unique) the emitted bank journal codes are
    distinct from each other and from every existing journal code.
+4. (test_archived_journal_does_not_count_as_presence) an ARCHIVED journal
+   pointing at a cash account does not suppress a new one: the account still
+   ends up with an active journal, under a code the archived one is not using.
 """
 
 from unittest.mock import MagicMock
@@ -140,3 +143,18 @@ class TestAccountJournalSetup(TransactionCase):
         self.assertEqual(len(codes), len(set(codes)))
         existing_codes = set(self.Journal.search([]).mapped("code"))
         self.assertFalse(set(codes) & existing_codes)
+
+    def test_archived_journal_does_not_count_as_presence(self):
+        self.Journal.create(
+            {
+                "name": "Old Checking",
+                "code": "OLDCHK",
+                "type": "bank",
+                "default_account_id": self.checking.id,
+                "active": False,
+            }
+        )
+        result = self._transform(self.checking | self.sweep)
+        by_account = {v["default_account_id"]: v for v in self._bank_vals(result)}
+        self.assertIn(self.checking.id, by_account)
+        self.assertNotEqual(by_account[self.checking.id]["code"], "OLDCHK")

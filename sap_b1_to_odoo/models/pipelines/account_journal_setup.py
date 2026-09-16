@@ -286,9 +286,11 @@ class AccountJournalSetup(models.AbstractModel):
         # default BNK1 (archived above) used to swallow the first — lowest
         # coded — cash account, which on a real chart is the operating
         # checking account. A taken code means "pick the next free one",
-        # never "skip the account".
+        # never "skip the account". Only an ACTIVE journal counts as presence:
+        # an archived one pointing at the account would otherwise leave it
+        # with no usable journal at all.
         journaled_accounts = {
-            j.default_account_id.id for j in existing_journals if j.default_account_id
+            j.default_account_id.id for j in active_journals if j.default_account_id
         }
         next_idx = 1
         for cash_account in cash_accounts or []:
