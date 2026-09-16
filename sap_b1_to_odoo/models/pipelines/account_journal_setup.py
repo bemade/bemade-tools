@@ -280,11 +280,24 @@ class AccountJournalSetup(models.AbstractModel):
             journal_vals.append(vals)
             _logger.info("Will create Stock journal (STJ)")
 
-        # 6. Bank Journals (one per cash account)
-        for idx, cash_account in enumerate(cash_accounts or [], start=1):
-            journal_code = f"BNK{idx}"
-            if journal_code in existing_codes:
+        # 6. Bank Journals (one per cash account). Presence is keyed on the
+        # account a journal already points at, not on the BNK{n} code:
+        # existing_codes includes archived journals, so the chart template's
+        # default BNK1 (archived above) used to swallow the first — lowest
+        # coded — cash account, which on a real chart is the operating
+        # checking account. A taken code means "pick the next free one",
+        # never "skip the account".
+        journaled_accounts = {
+            j.default_account_id.id for j in existing_journals if j.default_account_id
+        }
+        next_idx = 1
+        for cash_account in cash_accounts or []:
+            if cash_account.id in journaled_accounts:
                 continue
+            while f"BNK{next_idx}" in existing_codes:
+                next_idx += 1
+            journal_code = f"BNK{next_idx}"
+            existing_codes.add(journal_code)
 
             vals = {
                 "name": cash_account.name,

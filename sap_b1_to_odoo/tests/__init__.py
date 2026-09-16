@@ -3,6 +3,7 @@ from . import pipelines, test_sale_order_etl, test_itr_pipeline, test_res_compan
 # (which only picks up top-level members whose names start with 'test_') can
 # discover them without requiring an explicit --test-tags flag.
 from .pipelines import (
+    test_account_journal_setup,
     test_account_move_jdt1_etl,
     test_account_move_sap_atcentry,
     test_carrier_account_etl,

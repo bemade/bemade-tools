@@ -1,4 +1,5 @@
 from . import (
+    test_account_journal_setup,
     test_account_move_jdt1_etl,
     test_account_move_sap_atcentry,
     test_carrier_account_etl,
