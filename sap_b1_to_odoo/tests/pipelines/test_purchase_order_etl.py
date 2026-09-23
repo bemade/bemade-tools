@@ -70,6 +70,7 @@ def _make_header(**overrides):
         "docduedate": datetime.datetime(2026, 2, 15),
         "numatcard": "PO-1001",
         "trnspcode": 42,
+        "docstatus": "C",
     }
     header.update(overrides)
     return header
@@ -132,6 +133,11 @@ class TestPurchaseOrderHeaderEtl(TransactionCase):
         cache = _make_cache(self.partner.id)
 
         vals_list = self._run_transform(ctx, header, cache)
+        self.assertEqual(
+            vals_list[0]["sap_docstatus"],
+            "C",
+            "transform_headers must carry the SAP docstatus into vals",
+        )
         self.importer.load_headers(ctx, {"transform_headers": vals_list})
         self.env.flush_all()
 
@@ -140,6 +146,11 @@ class TestPurchaseOrderHeaderEtl(TransactionCase):
         self.assertEqual(order.partner_id, self.partner)
         self.assertIn("SAP Order PO-1001", order.note or "")
         self.assertTrue(order.date_order, "date_order must be set")
+        self.assertEqual(
+            order.sap_docstatus,
+            "C",
+            "load_headers must persist sap_docstatus onto the created order",
+        )
 
     def test_transform_headers_omits_carrier_id_when_field_absent(self):
         """When purchase.order has no carrier_id field, the key is dropped."""
