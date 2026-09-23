@@ -14,6 +14,7 @@ For enriched moves, three GL-correction mechanisms ensure accuracy:
 """
 
 import logging
+import os
 import re
 from collections import Counter, defaultdict
 
@@ -809,6 +810,46 @@ class AccountMoveJDT1Importer(models.AbstractModel):
 
         self._create_pending_currency_rates(lookups)
 
+        # ── Batched load ───────────────────────────────────────────────
+        # Loading the whole SAP GL in ONE transaction OOM-kills the
+        # postgres backend on full-size data: the ORM cache is released
+        # per move (invalidate_all in the create loop), but the backend's
+        # transaction state (snapshot + deferred trigger/constraint queue
+        # from posting hundreds of thousands of move lines) grows without
+        # bound until the end-of-pipeline commit. Committing every N moves
+        # bounds it. Safe because: the extract filters
+        # _get_already_imported (committed batches are skipped on re-run),
+        # post_lock is a transaction-level advisory lock (released at each
+        # commit), and the commit sits OUTSIDE every ctx.skippable
+        # savepoint. Override the batch size with SAP_JDT1_COMMIT_BATCH.
+        try:
+            batch_size = int(os.environ.get("SAP_JDT1_COMMIT_BATCH", "500"))
+        except ValueError:
+            batch_size = 500
+        if batch_size <= 0:
+            batch_size = 500
+        total = len(move_vals_list)
+        posted = 0
+        for start in range(0, total, batch_size):
+            batch = move_vals_list[start:start + batch_size]
+            posted += self._load_journal_entries_batch(
+                ctx, batch, tax_account_ids)
+            ctx.env.cr.commit()
+            ctx.env.invalidate_all()
+            _logger.info(
+                "jdt1: committed batch %d-%d of %d (%d moves posted so far).",
+                start + 1, min(start + batch_size, total), total, posted,
+            )
+        _logger.info("Created and posted %d journal entries.", posted)
+
+    def _load_journal_entries_batch(self, ctx, move_vals_list,
+                                    tax_account_ids):
+        """Create, fix, post and verify ONE batch of journal entries.
+
+        The body is the original (whole-volume) load; the caller commits
+        and invalidates after each batch (unbounded memory otherwise). Returns the
+        number of moves posted in this batch.
+        """
         # Strip GL metadata (not real fields) before create().
         gl_truth = {}
         for i, vals in enumerate(move_vals_list):
@@ -910,12 +951,12 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 move_index[move.id] = i
 
         if not moves:
-            return
+            return 0
 
         # Filter out phantom records from savepoint rollbacks
         moves = moves.exists()
         if not moves:
-            return
+            return 0
 
         # ── Post moves, grouped by journal ──
         by_journal = {}
@@ -1005,7 +1046,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
                 mismatched,
             )
 
-        _logger.info("Created and posted %d journal entries.", len(moves))
+        return len(moves)
 
     # ----------------------------------------------------------------
     # Enrichment builder

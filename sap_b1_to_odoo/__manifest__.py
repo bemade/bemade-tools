@@ -20,8 +20,14 @@
 {
     "name": "SAP Business One to Odoo",
 
-    "version": "19.0.0.1.7",
+    "version": "19.0.0.2.4",
     "summary": "Convert a database from SAP Business One to Odoo",
+    # Plain-text description: with none, Odoo falls back to README.md and
+    # renders it as RST via docutils -> "(ERROR/3) Unexpected indentation"
+    # lines in the install log, which flip an odoo.sh build's grade to failed.
+    "description": "ETL framework and importers converting a SAP Business One "
+                   "database into Odoo (partners, products, pricelists, "
+                   "documents). See README.md in the module directory.",
     "category": "Technical",
     "author": "Bemade Inc.",
     "website": "http://www.bemade.org",
