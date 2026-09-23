@@ -190,6 +190,7 @@ class PurchaseOrderHeaderImporter(models.AbstractModel):
                 "sap_docnum": header["docnum"],
                 "sap_docentry": header["docentry"],
                 "sap_atcentry": header["atcentry"],
+                "sap_docstatus": header.get("docstatus"),
                 "partner_id": commercial_id,
                 "payment_term_id": cache["terms_map"].get(header["groupnum"]),
                 "date_approve": order_date,
@@ -633,26 +634,30 @@ class PurchaseOrderPostProcessor(models.AbstractModel):
         """Extract SAP order status data needed for post-processing."""
         _logger.info("Extracting SAP order data for post-processing...")
 
-        # Get closed orders (confirmed and closed, no delivery)
+        # Get closed orders (confirmed and closed, no delivery).
+        # SAP can close a document (DocStatus=C) without closing its
+        # inventory status (InvntSttus=O) — the two fields can drift apart
+        # independently of when the document was created. DocStatus is
+        # authoritative for whether the document is closed; InvntSttus is
+        # not required to agree.
         ctx.cr.execute(
             """
-            SELECT docnum FROM opor 
-            WHERE docstatus = 'C' 
-            AND invntsttus = 'C' 
+            SELECT docnum FROM opor
+            WHERE docstatus = 'C'
             AND canceled = 'N'
+            AND confirmed = 'Y'
             """
         )
         closed_orders = [row[0] for row in ctx.cr.fetchall()]
 
-        # Get open orders (to confirm)
+        # Get open orders (to confirm). Disjoint from closed_orders above:
+        # any docstatus='C' row is either closed (confirmed, non-canceled)
+        # or canceled — never open.
         ctx.cr.execute(
             """
-            SELECT docnum FROM opor 
-            WHERE canceled='N' AND confirmed='Y' 
-            AND (
-                (docstatus='O' AND invntsttus='O')
-                OR docstatus='C'
-            )
+            SELECT docnum FROM opor
+            WHERE canceled='N' AND confirmed='Y'
+            AND docstatus='O' AND invntsttus='O'
             """
         )
         open_orders = [row[0] for row in ctx.cr.fetchall()]
@@ -719,6 +724,9 @@ class PurchaseOrderPostProcessor(models.AbstractModel):
         _logger.info("Setting delivered quantities for closed orders...")
         self._set_delivered_qty_for_closed_orders(sap_data.get("closed_orders", []))
 
+        _logger.info("Pinning invoice status for closed orders...")
+        self._pin_closed_order_invoice_status(sap_data.get("closed_orders", []))
+
         _logger.info("Confirming open orders...")
         self._confirm_open_orders(ctx, sap_data.get("open_orders", []))
 
@@ -776,6 +784,33 @@ class PurchaseOrderPostProcessor(models.AbstractModel):
                         }
                     )
 
+        self.env.cr.commit()
+
+    @api.model
+    def _pin_closed_order_invoice_status(self, closed_orders):
+        """Force a recompute of invoice_status for closed orders.
+
+        _confirm_closed_orders sets purchase_order.state via raw SQL, which
+        bypasses the ORM and leaves the 'state' field cache stale. The
+        invoice_status override on purchase.order depends on 'state', so a
+        recompute triggered right after (e.g. by _set_delivered_qty_for_closed_orders
+        writing qty_received through the ORM) would still read the pre-update
+        cached state and produce the wrong value. Invalidate the state cache
+        first, then explicitly mark invoice_status for recompute and flush it
+        so the pin lands as part of this load step, not on some later,
+        unpredictable recompute.
+        """
+        if not closed_orders:
+            return
+
+        PurchaseOrder = self.env["purchase.order"]
+        orders = PurchaseOrder.search([("sap_docnum", "in", closed_orders)])
+        if not orders:
+            return
+
+        orders.invalidate_recordset(["state"])
+        self.env.add_to_compute(PurchaseOrder._fields["invoice_status"], orders)
+        orders.flush_recordset(["invoice_status"])
         self.env.cr.commit()
 
     @api.model
