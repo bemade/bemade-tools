@@ -810,7 +810,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
 
         self._create_pending_currency_rates(lookups)
 
-        # ── Batched load (see ACCOUNTING_BUG.md) ──────────────────────
+        # ── Batched load ───────────────────────────────────────────────
         # Loading the whole SAP GL in ONE transaction OOM-kills the
         # postgres backend on full-size data: the ORM cache is released
         # per move (invalidate_all in the create loop), but the backend's
@@ -847,7 +847,7 @@ class AccountMoveJDT1Importer(models.AbstractModel):
         """Create, fix, post and verify ONE batch of journal entries.
 
         The body is the original (whole-volume) load; the caller commits
-        and invalidates after each batch (ACCOUNTING_BUG.md). Returns the
+        and invalidates after each batch (unbounded memory otherwise). Returns the
         number of moves posted in this batch.
         """
         # Strip GL metadata (not real fields) before create().
