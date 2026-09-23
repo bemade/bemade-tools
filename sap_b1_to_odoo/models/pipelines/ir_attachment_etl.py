@@ -1,16 +1,32 @@
 """ETL Pipeline for importing attachments from SAP B1 into Odoo."""
 
 import base64
+import csv
 import logging
 import os
+import tempfile
+from collections import Counter
 from typing import Dict, List
 
 from odoo import models
+from odoo.tools import config as odoo_config
 from odoo.tools.sql import SQL
 
 from odoo.addons.etl_framework import ETL, ETLContext
 
 _logger = logging.getLogger(__name__)
+
+# Columns of the missing-files manifest CSV (see _write_missing_manifest).
+_MANIFEST_FIELDS = [
+    "absentry",
+    "model",
+    "res_id",
+    "filename",
+    "expected_path",
+    "sap_trgtpath",
+    "sap_srcpath",
+    "reason",
+]
 
 
 @ETL.pipeline(
@@ -86,6 +102,14 @@ class IrAttachmentImporter(models.AbstractModel):
             )
 
         _logger.info(f"Total attachments extracted: {len(all_attachments)}")
+
+        # Fresh run, fresh manifest: extract runs once per pipeline (before any
+        # transform chunk), so this is the place to drop the previous run's
+        # missing-files manifest.
+        manifest = self._missing_manifest_path(ctx.env)
+        if os.path.exists(manifest):
+            os.remove(manifest)
+
         return all_attachments
 
     def _get_missing_absentries(self, env, tablename):
@@ -134,18 +158,20 @@ class IrAttachmentImporter(models.AbstractModel):
         sap_attachments = extracted.get("extract_attachments") or []
 
         attachment_vals = []
+        missing = []
+        found_by_model = Counter()
+        missing_by_model = Counter()
         for att in sap_attachments:
             filestore_path = att["_filestore_path"]
-            file_path = os.path.join(
-                filestore_path, f"{att['filename']}.{att['fileext']}"
-            )
+            filename = f"{att['filename']}.{att['fileext']}"
+            file_path = os.path.join(filestore_path, filename)
 
             try:
                 with open(file_path, "rb") as file:
                     file_data = file.read()
 
                 vals = {
-                    "name": f"{att['filename']}.{att['fileext']}",
+                    "name": filename,
                     "res_model": att["_model_name"],
                     "res_id": att["_res_id"],
                     "type": "binary",
@@ -153,13 +179,79 @@ class IrAttachmentImporter(models.AbstractModel):
                     "datas": base64.b64encode(file_data),
                 }
                 attachment_vals.append(vals)
+                found_by_model[att["_model_name"]] += 1
             except FileNotFoundError:
                 _logger.warning(f"File not found: {file_path}")
+                self._record_missing(ctx, missing, missing_by_model, att,
+                                     file_path, "file not found")
             except Exception as e:
                 _logger.error(f"Error reading file {file_path}: {e}")
+                self._record_missing(ctx, missing, missing_by_model, att,
+                                     file_path, str(e))
 
-        _logger.info(f"Transformed {len(attachment_vals)} attachments")
+        if missing:
+            manifest = self._write_missing_manifest(ctx.env, missing)
+            _logger.warning(
+                "attachments: %d of %d files missing/unreadable (%s) — "
+                "manifest for fixing the folder: %s",
+                len(missing),
+                len(sap_attachments),
+                ", ".join(f"{m}: {n}" for m, n in missing_by_model.most_common()),
+                manifest,
+            )
+        _logger.info(
+            "Transformed %d attachments (%s)",
+            len(attachment_vals),
+            ", ".join(f"{m}: {n}" for m, n in found_by_model.most_common())
+            or "none",
+        )
         return attachment_vals
+
+    def _record_missing(self, ctx, missing, missing_by_model, att, file_path,
+                        reason):
+        """Track one unreadable attachment: ETL report + manifest row."""
+        model_name = att["_model_name"]
+        missing_by_model[model_name] += 1
+        ctx.report.warning(
+            "Attachment file missing/unreadable (%s): %s [%s res_id=%s]"
+            % (reason, file_path, model_name, att["_res_id"]),
+            source_ref=f"absentry {att['absentry']}",
+        )
+        missing.append(
+            {
+                "absentry": att["absentry"],
+                "model": model_name,
+                "res_id": att["_res_id"],
+                "filename": f"{att['filename']}.{att['fileext']}",
+                "expected_path": file_path,
+                "sap_trgtpath": att.get("trgtpath") or "",
+                "sap_srcpath": att.get("srcpath") or "",
+                "reason": reason,
+            }
+        )
+
+    def _missing_manifest_path(self, env):
+        """Deterministic per-database manifest location (next to the log file,
+        or the system temp dir when no logfile is configured)."""
+        logfile = odoo_config.get("logfile")
+        base = os.path.dirname(logfile) if logfile else tempfile.gettempdir()
+        return os.path.join(
+            base, f"sap_missing_attachments_{env.cr.dbname}.csv"
+        )
+
+    def _write_missing_manifest(self, env, rows):
+        """Append missing-file rows to the manifest CSV, creating it with a
+        header when new. Append (not overwrite) because in multiprocessing
+        mode each transform chunk writes its own batch; extract clears the
+        file once at the start of every run."""
+        path = self._missing_manifest_path(env)
+        write_header = not os.path.exists(path)
+        with open(path, "a", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=_MANIFEST_FIELDS)
+            if write_header:
+                writer.writeheader()
+            writer.writerows(rows)
+        return path
 
     @ETL.load()
     def load_attachments(self, ctx: ETLContext, transformed: Dict) -> None:
