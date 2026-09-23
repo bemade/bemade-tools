@@ -12,11 +12,25 @@ class PurchaseOrder(models.Model):
     )
     sap_docnum = fields.Integer(index="btree", string="SAP Document Number", copy=False)
     sap_atcentry = fields.Integer(index="btree", copy=False)
+    # Source-system DocStatus from SAP OPOR: 'O' open, 'C' closed.
+    # Closed orders in SAP are treated as fully invoiced even when there is
+    # no linked vendor bill — this matches the manual-close behaviour from
+    # SAP and mirrors the equivalent sale.order field.
+    sap_docstatus = fields.Char(index="btree", copy=False)
 
     _sap_docentry_unique = models.Constraint(
         "EXCLUDE USING btree (sap_docentry WITH =) WHERE (sap_docentry != 0)",
         "SAP docentry must be unique when set!",
     )
+
+    @api.depends("sap_docstatus")
+    def _get_invoiced(self):
+        super()._get_invoiced()
+        for order in self.filtered(
+            lambda o: o.sap_docstatus == "C" and o.state == "purchase"
+        ):
+            if order.invoice_status != "invoiced":
+                order.invoice_status = "invoiced"
 
 
 class PurchaseOrderLine(models.Model):
