@@ -669,26 +669,30 @@ class SaleOrderPostProcessor(models.AbstractModel):
         """Extract SAP order status data needed for post-processing."""
         _logger.info("Extracting SAP order data for post-processing...")
 
-        # Get closed orders (confirmed and closed, no delivery)
+        # Get closed orders (confirmed and closed, no delivery).
+        # SAP can close a document (DocStatus=C) without closing its
+        # inventory status (InvntSttus=O) — the two fields can drift apart
+        # independently of when the document was created. DocStatus is
+        # authoritative for whether the document is closed; InvntSttus is
+        # not required to agree.
         ctx.cr.execute(
             """
-            SELECT docnum FROM ordr 
-            WHERE docstatus = 'C' 
-            AND invntsttus = 'C' 
+            SELECT docnum FROM ordr
+            WHERE docstatus = 'C'
             AND canceled = 'N'
+            AND confirmed = 'Y'
             """
         )
         closed_orders = [row[0] for row in ctx.cr.fetchall()]
 
-        # Get open orders (to confirm)
+        # Get open orders (to confirm). Disjoint from closed_orders above:
+        # any docstatus='C' row is either closed (confirmed, non-canceled)
+        # or canceled — never open.
         ctx.cr.execute(
             """
-            SELECT docnum FROM ordr 
-            WHERE canceled='N' AND confirmed='Y' 
-            AND (
-                (docstatus='O' AND invntsttus='O')
-                OR docstatus='C'
-            )
+            SELECT docnum FROM ordr
+            WHERE canceled='N' AND confirmed='Y'
+            AND docstatus='O' AND invntsttus='O'
             """
         )
         open_orders = [row[0] for row in ctx.cr.fetchall()]

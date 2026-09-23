@@ -20,7 +20,7 @@
 {
     "name": "SAP Business One to Odoo",
 
-    "version": "19.0.0.2.4",
+    "version": "19.0.0.3.0",
     "summary": "Convert a database from SAP Business One to Odoo",
     # Plain-text description: with none, Odoo falls back to README.md and
     # renders it as RST via docutils -> "(ERROR/3) Unexpected indentation"
