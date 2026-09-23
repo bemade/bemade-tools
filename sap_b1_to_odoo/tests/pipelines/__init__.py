@@ -3,6 +3,7 @@ from . import (
     test_account_move_jdt1_etl,
     test_account_move_sap_atcentry,
     test_carrier_account_etl,
+    test_ir_attachment_etl,
     test_jdt1_sale_link,
     test_order_post_processor_closed,
     test_product_pricelist_etl,
