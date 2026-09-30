@@ -57,10 +57,25 @@ class SaleOrderHeaderImporter(models.AbstractModel):
         existing_docnums = tuple(row[0] for row in ctx.env.cr.fetchall())
         _logger.info(f"Found {len(existing_docnums)} existing sales orders.")
 
-        # Extract new order headers
-        sql = "SELECT * FROM ordr"
+        # Extract new order headers, each with the CRD1 LineNum its ShipToCode
+        # (type S) and PayToCode (type B) name. CRD1 is keyed
+        # (CardCode, Address, AdresType) under SAP's case- and
+        # trailing-space-insensitive collation, so both sides are normalised.
+        sql = """
+            WITH crd1k AS (
+                SELECT UPPER(TRIM(cardcode)) AS card, UPPER(TRIM(address)) AS name,
+                       adrestype AS kind, MIN(linenum) AS linenum
+                FROM crd1 GROUP BY 1, 2, 3
+            )
+            SELECT o.*, s.linenum AS etl_ship_linenum, b.linenum AS etl_bill_linenum
+            FROM ordr o
+            LEFT JOIN crd1k s ON s.card = UPPER(TRIM(o.cardcode))
+                AND s.name = UPPER(TRIM(o.shiptocode)) AND s.kind = 'S'
+            LEFT JOIN crd1k b ON b.card = UPPER(TRIM(o.cardcode))
+                AND b.name = UPPER(TRIM(o.paytocode)) AND b.kind = 'B'
+        """
         if existing_docnums:
-            sql += " WHERE docnum NOT IN %s"
+            sql += " WHERE o.docnum NOT IN %s"
             ctx.cr.execute(SQL(sql, existing_docnums))
         else:
             ctx.cr.execute(sql)
@@ -71,7 +86,7 @@ class SaleOrderHeaderImporter(models.AbstractModel):
         if not headers:
             return ChunkableData(records=[], context={
                 "partners_map": {},
-                "partner_addresses_map": {},
+                "sap_addresses_map": {},
                 "contacts_map": {},
                 "users_map": {},
                 "terms_map": {},
@@ -89,39 +104,35 @@ class SaleOrderHeaderImporter(models.AbstractModel):
         )
         partners_map = {partner.sap_card_code: partner.id for partner in partners}
 
-        # Pre-compute partner addresses (delivery and invoice) for all partners
-        partner_addresses_map = {}
-        for partner in partners:
-            # Get all potential address partners (commercial + children)
-            all_partners = (
-                partner.commercial_partner_id | partner.commercial_partner_id.child_ids
+        # CRD1 addresses by (CardCode, LineNum, type), as the address importer
+        # keys them (sap_parent_card, sap_address_linenum) -- no parent_id
+        # needed.
+        ctx.env["res.partner"].flush_model()
+        ctx.env.cr.execute(
+            SQL(
+                """
+                SELECT UPPER(TRIM(sap_parent_card)), sap_address_linenum, type, MIN(id)
+                FROM res_partner
+                WHERE sap_address_linenum IS NOT NULL
+                  AND type IN ('delivery', 'invoice')
+                  AND UPPER(TRIM(sap_parent_card)) IN %s
+                GROUP BY 1, 2, 3
+                """,
+                tuple({h["cardcode"].strip().upper() for h in headers}),
             )
+        )
+        sap_addresses_map = {
+            (card, linenum, kind): pid
+            for card, linenum, kind, pid in ctx.env.cr.fetchall()
+        }
 
-            # Find delivery addresses
-            delivery_partners = all_partners.filtered(lambda p: p.type == "delivery")
-            invoice_partners = all_partners.filtered(lambda p: p.type == "invoice")
-
-            # Store as dict of address type -> list of (id, address_string)
-            partner_addresses_map[partner.id] = {
-                "delivery": [
-                    (p.id, self.extract_address_string(p)) for p in delivery_partners
-                ],
-                "invoice": [
-                    (p.id, self.extract_address_string(p)) for p in invoice_partners
-                ],
-                "commercial_id": partner.commercial_partner_id.id,
-            }
-
+        # The order's partner is SAP's contact person itself, not its company:
+        # Odoo reaches the company through commercial_partner_id.
         cntctcodes = [h["cntctcode"] for h in headers if h.get("cntctcode")]
         contacts = ctx.env["res.partner"].search(
             [("sap_cntct_code", "in", cntctcodes), ("active", "in", [True, False])]
         )
-        contacts_map = {
-            contact.sap_cntct_code: (
-                contact.parent_id.id if contact.parent_id else contact.id
-            )
-            for contact in contacts
-        }
+        contacts_map = {contact.sap_cntct_code: contact.id for contact in contacts}
 
         slpcodes = [h["slpcode"] for h in headers if h.get("slpcode")]
         users = ctx.env["res.users"].search(
@@ -167,13 +178,39 @@ class SaleOrderHeaderImporter(models.AbstractModel):
 
         return ChunkableData(records=headers, context={
             "partners_map": partners_map,
-            "partner_addresses_map": partner_addresses_map,
+            "sap_addresses_map": sap_addresses_map,
             "contacts_map": contacts_map,
             "users_map": users_map,
             "terms_map": terms_map,
             "pricelists_map": pricelists_map,
             "carriers_map": carriers_map,
         })
+
+    @staticmethod
+    def _sap_order_address(ctx, header, code_field, linenum_field, kind, fallback_id, cache):
+        """The address SAP's ShipToCode/PayToCode names, else ``fallback_id``.
+
+        Looked up by the CRD1 (CardCode, LineNum) the extract joined in. A
+        code SAP names but whose row is gone (deleted after the order) is
+        reported as a warning, never an error; an order with no code falls
+        back silently.
+        """
+        linenum = header.get(linenum_field)
+        if linenum is not None:
+            address_id = cache["sap_addresses_map"].get(
+                (header["cardcode"].strip().upper(), linenum, kind)
+            )
+            if address_id:
+                return address_id
+        code = (header.get(code_field) or "").strip()
+        if code:
+            ctx.report.warning(
+                message=f"Order {header['docnum']}: {code_field} {code!r} has no "
+                        f"{kind} address in Odoo (no longer in SAP CRD1, or not "
+                        f"imported); the customer is used.",
+                source_ref=f"ordr:{header['docnum']}",
+            )
+        return fallback_id
 
     @ETL.transform()
     def transform_headers(self, ctx: ETLContext, extracted: Dict) -> List[Dict]:
@@ -197,12 +234,14 @@ class SaleOrderHeaderImporter(models.AbstractModel):
                 )
                 continue
 
-            # Get shipping and invoice addresses
-            partner_shipping_id = self.find_partner_address_id(
-                header, partner_id, "delivery", cache
+            # Ship-to and bill-to: the CRD1 rows ShipToCode and PayToCode name
+            # A code whose row SAP no longer holds (the address was
+            # deleted after the order) warns and falls back to the customer.
+            partner_shipping_id = self._sap_order_address(
+                ctx, header, "shiptocode", "etl_ship_linenum", "delivery", partner_id, cache
             )
-            partner_invoice_id = self.find_partner_address_id(
-                header, partner_id, "invoice", cache
+            partner_invoice_id = self._sap_order_address(
+                ctx, header, "paytocode", "etl_bill_linenum", "invoice", partner_id, cache
             )
 
             # Get pricelist based on currency
