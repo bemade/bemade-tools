@@ -57,6 +57,12 @@ class SagePaymentImporter(models.AbstractModel):
         Re-deriving them here would duplicate that logic and risk the two
         drifting apart.
         """
+        if ctx.get_config("import_closed_documents"):
+            # Every document is imported, and `sage.settlement.importer`
+            # replays Sage's receipts and payments as they were posted and
+            # reconciles them application by application. Creating payments
+            # here as well would settle every document twice.
+            return []
         Move = ctx.env["account.move"]
         applications = []
         documents = Move.search([
@@ -65,9 +71,12 @@ class SagePaymentImporter(models.AbstractModel):
             ("state", "=", "posted"),
         ])
         staged = ctx.env["sage.open.item.importer"].extract_open_items(ctx)
-        by_doc = {doc["sage_doc_id"]: doc for doc in staged}
+        # Keyed on the side too: customer and vendor documents are numbered
+        # from separate counters and routinely share an id.
+        by_doc = {(doc["side"], doc["sage_doc_id"]): doc for doc in staged}
         for move in documents:
-            document = by_doc.get(move.sage_doc_id)
+            side = "customer" if move.move_type.startswith("out_") else "vendor"
+            document = by_doc.get((side, move.sage_doc_id))
             if not document:
                 continue
             for application in document.get("applications", []):

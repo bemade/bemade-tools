@@ -11,7 +11,7 @@
 #
 {
     "name": "Sage 50 to Odoo",
-    "version": "19.0.3.0.0",
+    "version": "19.0.3.1.0",
     "summary": "Migrate an offline Sage 50 Canadian Edition company file",
     "description": "ETL pipelines reading a Sage 50 company file served "
                    "read-only from a userland mysqld: chart of accounts, "
@@ -29,6 +29,10 @@
         "etl_framework",
         "account",
         "product",
+        # Open sales orders at cutover. The module is uninstalled before the
+        # database is promoted, so this reaches no production database that
+        # does not already sell.
+        "sale_management",
     ],
     "data": [
         "security/ir.model.access.csv",

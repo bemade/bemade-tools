@@ -84,7 +84,9 @@ SQL_DEBIT_SIGN = (
 
 def journal_entry(cr: Any, source: str, module: int, rec_id: int,
                   control_account: int | None = None,
-                  expected_control: float | None = None) -> list[dict]:
+                  expected_control: float | None = None,
+                  day: Any = None, strict: bool = False,
+                  exact_amount: bool = False) -> list[dict]:
     """The lines of the GL entry behind one AR/AP document.
 
     Searched across every fiscal generation, because an open item can predate
@@ -95,44 +97,229 @@ def journal_entry(cr: Any, source: str, module: int, rec_id: int,
     and reposted leaves two entries on the same `(sSource, nModule, lRecId)`,
     only the second of which is live, and the amounts differ. Pass
     `control_account` and `expected_control` — the document's original amount
-    — to pick the entry that actually matches. Without them the newest entry
-    wins, which is the right guess but only a guess.
+    — to pick the entry that actually matches. And an invoice and a later
+    receipt can share a number for the same customer in different
+    generations: pass the document's date as `day` so the entry dated that day
+    wins over whichever generation happens to be searched first. See
+    `choose_entry`.
 
     Returns [] when no entry is found in any generation.
     """
+    entries, reversals = [], []
+    reversal_source = f"CORR {source}"
     for header, lines in GENERATIONS:
+        rows = query(
+            cr,
+            f"""select j.lId, j.sSource, j.dtJourDate, j.sComment, l.nLineNum,
+                       l.lAcctId, l.dAmount, l.szComment
+                  from {header} j
+                  join {lines} l on l.lJEntId = j.lId
+                 where j.sSource in (%s, %s) and j.nModule = %s
+                   and j.lRecId = %s
+                 order by j.lId, l.nLineNum""",
+            (source, reversal_source, module, rec_id),
+        )
+        by_entry: dict[int, list[dict]] = {}
+        for row in rows:
+            # `lId` restarts in every generation, so it identifies an entry
+            # only alongside the table it came from. Callers that remember an
+            # entry MUST remember both -- see `entry_ref`.
+            row["generation"] = header
+            by_entry.setdefault(row["lId"], []).append(row)
+        for entry in by_entry.values():
+            if entry[0]["sSource"] == reversal_source:
+                reversals.append(entry)
+            else:
+                entries.append(entry)
+    entries = drop_reversed(entries, reversals)
+    return choose_entry(entries, day, control_account, expected_control,
+                        strict=strict, exact_amount=exact_amount)
+
+
+def drop_reversed(entries: list[list[dict]],
+                  reversals: list[list[dict]]) -> list[list[dict]]:
+    """Remove the entries that a `CORR` entry cancels.
+
+    Sage corrects a posted document by reversing it — a `CORR <number>` entry
+    that mirrors it line for line — and posting the correction, sometimes
+    under another number (a sale on account re-entered as paid on the spot
+    becomes "Comptant"). The reversed original is not the document's entry
+    however well its number and date match. Matched on the mirrored lines
+    rather than on the reversal's comment, which is in the file's language.
+    Each reversal cancels one entry.
+    """
+    def signature(entry, sign=1):
+        return sorted(
+            (line["lAcctId"], round(sign * line["dAmount"], 2))
+            for line in entry
+        )
+
+    remaining = list(entries)
+    for reversal in reversals:
+        mirrored = signature(reversal, -1)
+        for entry in remaining:
+            if signature(entry) == mirrored:
+                remaining.remove(entry)
+                break
+    return remaining
+
+
+def choose_entry(entries: list[list[dict]], day: Any = None,
+                 control_account: int | None = None,
+                 expected_control: float | None = None,
+                 strict: bool = False,
+                 exact_amount: bool = False) -> list[dict]:
+    """Pick one entry out of several sharing a document number.
+
+    `entries` is a list of entries (each a list of its lines), newest
+    generation first. With `day`, only the entries dated that day are
+    considered, if there are any — and with `strict`, if there are none the
+    answer is none, rather than an entry from another day. Then an entry
+    whose control amount equals `expected_control`, in any generation (the
+    newest such, the latest posted within it) — and with `exact_amount`,
+    nothing else will do. Failing that, within the newest generation left:
+    a single entry is the answer; otherwise the one whose control-account
+    amount equals `expected_control`; otherwise the last one posted, which is
+    the correction.
+    """
+    if not entries:
+        return []
+    if day is not None:
+        if hasattr(day, "date"):
+            day = day.date()
+        dated = [
+            entry for entry in entries
+            if entry[0]["dtJourDate"] and entry[0]["dtJourDate"].date() == day
+        ]
+        if dated:
+            entries = dated
+        elif strict:
+            return []
+    # An entry whose control amount IS the document's, in any generation,
+    # beats the newest generation: a receipt sharing the number sits on the
+    # opposite side of the control account and never matches.
+    if control_account is not None and expected_control is not None:
+        matching = [
+            entry for entry in entries
+            if abs(sum(
+                line["dAmount"] for line in entry
+                if line["lAcctId"] == control_account
+            ) - expected_control) < 0.005
+        ]
+        if matching:
+            first = matching[0][0]["generation"]
+            return max(
+                (entry for entry in matching
+                 if entry[0]["generation"] == first),
+                key=lambda entry: entry[0]["lId"],
+            )
+        if exact_amount:
+            return []
+    newest = entries[0][0]["generation"]
+    candidates = [entry for entry in entries if entry[0]["generation"] == newest]
+    if len(candidates) == 1:
+        return candidates[0]
+    if control_account is not None and expected_control is not None:
+        for entry in candidates:
+            total = sum(
+                line["dAmount"] for line in entry
+                if line["lAcctId"] == control_account
+            )
+            if abs(total - expected_control) < 0.005:
+                return entry
+    # Fall back to the last entry posted, which is the correction.
+    return max(candidates, key=lambda entry: entry[0]["lId"])
+
+
+def pick_cash_entry(headers: list[dict], number: str) -> dict | None:
+    """The live entry behind a document paid on the spot, or None.
+
+    Sage posts a bill or a sale paid by cash or card as ONE entry — the
+    document and its payment together, with no receivable or payable line —
+    numbered with the payment method ("Comptant") rather than the document.
+    What ties it to the document is the comment, which starts with
+    "<document number>, ".
+
+    A corrected document leaves the original, a `CORR` reversal of it and the
+    correction, all with the same comment prefix. The reversal is never the
+    document's entry; of the rest the latest is the live one, the same rule
+    `journal_entry` falls back on.
+    """
+    prefix = f"{number},"
+    live = [
+        header for header in headers
+        if (header.get("sComment") or "").startswith(prefix)
+        and not (header.get("sSource") or "").startswith("CORR")
+    ]
+    if not live:
+        return None
+    return max(live, key=lambda header: header["lId"])
+
+
+def infer_payment_accounts(lines: list[dict], tax_accounts,
+                           control_amount: float) -> set:
+    """The account(s) a cash document was paid from, read off its entry.
+
+    For when the application row and its cheque header name no bank account.
+    In a paid-on-the-spot entry the payment sits exactly where the control
+    line would have been: on the control's side, and worth the document's
+    control amount. So: the non-tax lines on that side, if together they
+    make exactly that amount; else the single line that does; else nothing —
+    an ambiguous entry is not guessed at.
+
+    `lines` are debit-positive (`{"account", "balance"}`), `control_amount`
+    is the document's control amount, debit-positive.
+    """
+    same_side = [
+        line for line in lines
+        if line["account"] not in tax_accounts
+        and line["balance"] * control_amount > 0
+    ]
+    if same_side and abs(
+        sum(line["balance"] for line in same_side) - control_amount
+    ) < 0.01:
+        return {line["account"] for line in same_side}
+    exact = [
+        line for line in same_side
+        if abs(line["balance"] - control_amount) < 0.01
+    ]
+    if len(exact) == 1:
+        return {exact[0]["account"]}
+    return set()
+
+
+def cash_entry(cr: Any, number: str, module: int, rec_id: int,
+               date: Any) -> list[dict]:
+    """The lines of the single entry behind a document paid on the spot.
+
+    Same shape as `journal_entry`. Searched by tiers, module and date, then
+    picked by comment prefix — see `pick_cash_entry`. Returns [] when there
+    is none, which is the ordinary case: most documents are not cash.
+    """
+    for header, lines in GENERATIONS:
+        headers = query(
+            cr,
+            f"""select lId, sSource, sComment from {header}
+                 where nModule = %s and lRecId = %s and dtJourDate = %s
+                   and sComment like %s""",
+            (module, rec_id, date, f"{number},%"),
+        )
+        chosen = pick_cash_entry(headers, number)
+        if not chosen:
+            continue
         rows = query(
             cr,
             f"""select j.lId, j.dtJourDate, j.sComment, l.nLineNum,
                        l.lAcctId, l.dAmount, l.szComment
                   from {header} j
                   join {lines} l on l.lJEntId = j.lId
-                 where j.sSource = %s and j.nModule = %s and j.lRecId = %s
-                 order by j.lId, l.nLineNum""",
-            (source, module, rec_id),
+                 where j.lId = %s
+                 order by l.nLineNum""",
+            (chosen["lId"],),
         )
         for row in rows:
-            # `lId` restarts in every generation, so it identifies an entry
-            # only alongside the table it came from. Callers that remember an
-            # entry MUST remember both -- see `entry_ref`.
             row["generation"] = header
-        if not rows:
-            continue
-        by_entry: dict[int, list[dict]] = {}
-        for row in rows:
-            by_entry.setdefault(row["lId"], []).append(row)
-        if len(by_entry) == 1:
-            return next(iter(by_entry.values()))
-        if control_account is not None and expected_control is not None:
-            for entry_lines in by_entry.values():
-                total = sum(
-                    line["dAmount"] for line in entry_lines
-                    if line["lAcctId"] == control_account
-                )
-                if abs(total - expected_control) < 0.005:
-                    return entry_lines
-        # Fall back to the last entry posted, which is the correction.
-        return by_entry[max(by_entry)]
+        return rows
     return []
 
 

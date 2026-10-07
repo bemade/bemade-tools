@@ -120,9 +120,17 @@ document's detail rows. Reconstructed that way both totals tie exactly to
 their control accounts, which is what makes this — not the ageing report — the
 source of truth.
 
-**`bHasDetail` is routinely 0 on every document**, because Sage invoices were
-coded straight to GL accounts. There is then no item-level line detail to
-migrate, and the GL entry *is* the line source.
+**`bHasDetail` is routinely 0 on every document, and it does not mean the
+document has no lines.** It says the *receivable record* carries no detail.
+The item lines — item, quantity, unit price, account — live in `titrec` /
+`titrline`, keyed on `sSource1` + `lVenCusId` rather than on the document's
+own id, which is why joining from the document finds nothing. Documents coded
+straight to an account have `titrline` rows too, with `lInventId` 0. Where a
+document has no `titrec` row at all, the GL entry is the line source.
+
+Application rows (`nTranType`): 0 and 8 are the document's own row (invoice
+and credit note), 1 a receipt or payment, 2 an early-payment discount taken
+on a receipt. `bReversed` rows come in cancelling pairs.
 
 Two joins need care, and both bite silently:
 
@@ -176,6 +184,91 @@ holds**. Anything else is refused rather than approximated, for the reason in
 the next section.
 
 ---
+
+## Closed documents and settlements
+
+With a history start, **`import_closed_documents`** imports every invoice,
+bill and credit note of the replayed years, not only the open ones — the same
+builder, with the same item lines, taxes and repost disambiguation. A settled
+document dated before the history start stays out: its balance and its
+settlement are both inside the opening entry.
+
+The applications against those documents do **not** go through
+`sage.payment.importer` (one `account.payment` per application row): at this
+scale that turns one receipt into ten payments, puts early-payment discounts
+into the bank, and cannot place an application whose row names no bank.
+Instead `sage.settlement.importer` posts each Sage receipt or payment entry as
+itself — every line Sage posted — with its control line split into one line
+per application: the document's partner, exactly the amount applied, and
+reconciled with that document. Money applied to something not imported stays
+on a remainder line. The ledger is Sage's by construction and the
+reconciliation is Sage's pair by pair.
+
+Two shapes do not fit that mould and are handled on their own:
+
+- **Paid on the spot.** A bill or sale paid by cash or card is ONE Sage
+  entry — the document and its payment together, with no receivable or
+  payable line — numbered with the payment method (`Comptant` on a French
+  file) and tied to the document only by a comment starting with
+  `"<document number>, "`. The document importer finds it by that prefix
+  (never a `CORR` reversal; of an original and its correction, the latest),
+  builds the document from its expense and tax lines, and leaves the line on
+  the account the money came from to the settlement importer, which posts it
+  against the document.
+- **Credit note applied to an invoice.** Sage moves the amount from one
+  document to the other with no GL entry at all: two applications, `+x` and
+  `-x`, same number and date. The two documents are reconciled with each
+  other directly.
+
+An application is traced to its entry on (number, module, tiers id, **date**):
+a receipt number is not unique across years. The day's applications are then
+matched to the day's entries by amount — the whole group to one entry (one
+receipt, several documents), else each cheque's applications to one entry
+(several payments to one partner on one day, all numbered "Comptant", told
+apart only by `lChqId`), else each application alone. Of entries posted,
+reversed and re-posted the same day, the latest matching one is live.
+
+Finding a **document's** entry has the same traps, and they bite harder,
+because a document that claims the wrong entry makes the replay drop a real
+one — revenue twice, a receipt missing from the bank:
+
+- An invoice and a later receipt can share a number for the same customer in
+  different generations. The lookup prefers the entry dated on the
+  document's own date, then the cash entry (above), and only then the same
+  number on another date.
+- A `CORR <number>` entry that mirrors an entry line for line cancels it.
+  The cancelled original is dropped before choosing, so a sale on account
+  re-entered as paid on the spot finds its correction, not the dead original.
+
+Two smaller shapes: freight sits on the item record's header
+(`titrec.dFreight`), not on an item line, and is added as a line on Sage's
+linked freight account (`tlinkact.lAcNFrRev` / `lAcNFrExp`); and a bill with
+nothing but tax on it (customs, import duties) keeps its tax lines as its
+lines, untaxed. Documents worth 0.00 with nothing on them are skipped.
+
+Two guards come with it. The document import refuses to run while any
+imported product is valued in real time, because Odoo would add stock
+valuation lines to every document carrying it; import while valuation is
+periodic, then switch. And `action_check` adds two checks: every document's
+Odoo residual against Sage's, and no stock-valuation, exchange-difference or
+cash-basis entry created along the way.
+
+## Open sales orders
+
+`sage.sale.order.importer` brings the orders Sage has not cleared into Odoo
+as confirmed orders, for what is still to deliver. Historical orders are not
+imported: Sage keeps no link from an invoice to the order it filled
+(`tcustr.lOrdId` is 0), and the invoices already carry the product history.
+
+`tsoline.dOrdered` is ordered, `dQuantity` delivered so far, `dRemaining`
+Sage's difference — meaningless when the order was taken by the piece and
+delivered by weight. `remaining_quantity` decides instead: untouched lines
+keep their ordered quantity; a weight line with a delivery is done (estimated
+weight ordered, actual delivered); a count line part delivered keeps the
+rest, unless its delivered quantity is fractional (it was weighed). Where
+Sage's free-text unit is not the product's Odoo unit (`same_unit`), the
+quantity stays in Sage's unit, the line says so and the import reports it:
+the conversion factor is not in the file.
 
 ## The year-end roll has no journal entry
 
@@ -296,7 +389,7 @@ class AcmeSageAccountImporter(models.AbstractModel):
 
     def _account_type_overrides(self):
         return super()._account_type_overrides() | {
-            12000000: "asset_receivable",
+            11000000: "asset_receivable",
             21000000: "liability_payable",
             10400000: "asset_cash",
         }
