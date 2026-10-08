@@ -61,6 +61,10 @@ BATCH_SIZE = 500
     depends_on=[
         "sage.opening.balance.importer",
         "sage.counter.entry.importer",
+        # With closed documents the receipts and payments are posted by the
+        # settlement importer first; the replay then finds them in the
+        # journal and does not post them again.
+        "sage.settlement.importer",
     ],
     allow_multiprocessing=False,
 )

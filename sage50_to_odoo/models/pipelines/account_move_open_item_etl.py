@@ -29,7 +29,8 @@ import itertools
 import logging
 from datetime import timedelta
 
-from odoo import fields, models
+from odoo import _, fields, models
+from odoo.exceptions import UserError
 from odoo.tools.float_utils import float_compare, float_round
 from odoo.addons.etl_framework import ETL, ETLContext
 
@@ -60,6 +61,8 @@ SIDES = {
         "detail_fk": "lCusTrId",
         "partner_fk": "lCusId",
         "partner_table": "tcustomr",
+        "payment_header": "trcpthdr",
+        "freight_link": "lAcNFrRev",
         "module": tools.MODULE_RECEIVABLE,
         "account_type": "asset_receivable",
         "move_type": {"invoice": "out_invoice", "refund": "out_refund"},
@@ -71,6 +74,8 @@ SIDES = {
         "detail_fk": "lVenTrId",
         "partner_fk": "lVenId",
         "partner_table": "tvendor",
+        "payment_header": "tpmthdr",
+        "freight_link": "lAcNFrExp",
         "module": tools.MODULE_PAYABLE,
         "account_type": "liability_payable",
         "move_type": {"invoice": "in_invoice", "refund": "in_refund"},
@@ -266,7 +271,7 @@ class SageOpenItemImporter(models.AbstractModel):
         return staged
 
     def _item_lines(self, ctx, source, partner_id, tax_accounts, original,
-                    document_sign):
+                    document_sign, freight_account=None):
         """A document's item lines from `titrec` / `titrline`.
 
         This is the table pair `tcustr.bHasDetail = 0` does NOT tell you
@@ -308,6 +313,17 @@ class SageOpenItemImporter(models.AbstractModel):
             return None
         lines = []
         for record in matching[-1:]:
+            # Freight is on the record's header, not an item line. Dropping
+            # it posts the document short by exactly the freight.
+            if record.get("dFreight") and freight_account:
+                lines.append({
+                    "account": freight_account,
+                    "amount": round(document_sign * record["dFreight"], 2),
+                    "sage_product_id": 0,
+                    "quantity": 0.0,
+                    "price_unit": 0.0,
+                    "label": None,
+                })
             for row in tools.query(
                 ctx.cr,
                 """select l.nLineNum, l.lInventId, l.lAcctId, l.dQty,
@@ -343,18 +359,95 @@ class SageOpenItemImporter(models.AbstractModel):
                 })
         return lines or None
 
+    def _in_scope(self, ctx, residual, date, start) -> bool:
+        """Whether a document is imported at all.
+
+        Without `import_closed_documents`, only what still has something
+        outstanding — the open items. With it, every document of the replayed
+        years as well, because the replay then posts none of their entries and
+        they have to exist as documents for their payments to reconcile.
+
+        A settled document dated before the history start stays out: its
+        balance and its settlement are both inside the opening entry. An open
+        one is still taken, so the loader reports it as it always has rather
+        than it disappearing here.
+        """
+        if abs(residual) > TOLERANCE:
+            return True
+        if not ctx.get_config("import_closed_documents"):
+            return False
+        return bool(start) and date >= start
+
+    def _already_imported(self, ctx) -> set:
+        """(side, Sage document id) of every document already in Odoo.
+
+        Keyed on the side as well as the id: `tcustr` and `tventr` are
+        numbered from separate counters, so a customer invoice and a vendor
+        bill routinely share an id, and the bare id would skip one of them as
+        a duplicate of the other.
+        """
+        return {
+            ("customer" if move.move_type.startswith("out_") else "vendor",
+             move.sage_doc_id)
+            for move in ctx.env["account.move"].search([
+                ("sage_doc_id", "!=", 0),
+                ("company_id", "=", ctx.get_config("company_id")),
+            ])
+        }
+
+    def _check_no_realtime_valuation(self, ctx, products) -> None:
+        """Refuse to import documents onto real-time-valued products.
+
+        With perpetual valuation Odoo adds cost-of-goods and stock-interim
+        lines to every invoice and bill carrying a storable product. On
+        imported history those are numbers the Sage ledger never had: the
+        documents stop tying to Sage and the trial balance with them. The
+        import has to run while valuation is periodic — before inventory is
+        switched on — so this checks rather than hopes.
+        """
+        if "valuation" not in products._fields:
+            return
+        offending = products.filtered(
+            lambda product: product.valuation == "real_time"
+            and getattr(product, "is_storable", True)
+        )
+        if offending:
+            raise UserError(_(
+                "%(count)s imported products are valued in real time "
+                "(%(names)s). Odoo would add stock valuation lines to every "
+                "imported document carrying them. Import the documents while "
+                "valuation is periodic, then switch.",
+                count=len(offending),
+                names=", ".join(offending[:5].mapped("display_name")),
+            ))
+
     def _collect(self, ctx, side, spec, control, tax_accounts) -> list:
-        open_docs = tools.query(
+        start = ctx.get_config("history_start_date") or ""
+        closed_documents = ctx.get_config("import_closed_documents")
+        # Sage's linked freight account for this side: revenue on sales,
+        # expense on purchases.
+        freight_account = tools.linked_accounts(ctx.cr).get(
+            spec["freight_link"]
+        )
+        docs = tools.query(
             ctx.cr,
-            f"""select d.{spec['detail_fk']} as doc_id,
+            f"""select d.{spec['detail_fk']} as doc_id, h.dtDate as doc_date,
                        round(sum(d.dAmount), 2) as residual,
                        round(sum(case when d.nTranType in (0, 8)
                                       then d.dAmount else 0 end), 2) as original
                   from {spec['detail']} d
-                 group by d.{spec['detail_fk']}
-                having abs(round(sum(d.dAmount), 2)) > %s""",
-            (TOLERANCE,),
+                  left join {spec['header']} h
+                    on h.lId = d.{spec['detail_fk']}
+                 group by d.{spec['detail_fk']}, h.dtDate""",
         )
+        open_docs = [
+            doc for doc in docs
+            if self._in_scope(
+                ctx, doc["residual"],
+                doc["doc_date"].strftime("%Y-%m-%d") if doc["doc_date"] else "",
+                start,
+            )
+        ]
 
         staged = []
         for doc in open_docs:
@@ -383,10 +476,57 @@ class SageOpenItemImporter(models.AbstractModel):
             # Negating it on the payable side silently picks the wrong entry
             # whenever a bill has been posted, reversed and reposted: the pair
             # are exact mirrors, and the reversal matches just as well.
+            # The entry under the document's own number on the document's
+            # own date; failing that, the entry of a document paid on the
+            # spot (below); failing that, the same number on another date.
+            # In that order: a counter sale's number is routinely reused by
+            # a document of another year, and taking that one claims an
+            # entry that is not this document's.
             gl_lines = tools.journal_entry(
                 ctx.cr, header["sSource"], spec["module"], header["partner_id"],
                 control_account=control, expected_control=doc["original"],
+                day=header["dtDate"], strict=True,
             )
+            # Paid on the spot: Sage posted the document and its payment as
+            # one entry, numbered with the payment method and tied to the
+            # document only by its comment. The line on the account the money
+            # came from is the payment, not part of the document; the
+            # settlement importer posts it against the document.
+            payment_accounts = set()
+            if not gl_lines and header["dtDate"]:
+                gl_lines = tools.cash_entry(
+                    ctx.cr, header["sSource"], spec["module"],
+                    header["partner_id"], header["dtDate"],
+                )
+                if gl_lines:
+                    # What Sage names counts only if the entry touches it:
+                    # a cheque header can name the bank while the entry was
+                    # paid from the card.
+                    payment_accounts = (
+                        self._payment_accounts(ctx, spec, doc["doc_id"])
+                        & {line["lAcctId"] for line in gl_lines}
+                    ) or tools.infer_payment_accounts(
+                        [
+                            {
+                                "account": line["lAcctId"],
+                                "balance": tools.signed_amount(
+                                    line["lAcctId"], line["dAmount"],
+                                ),
+                            }
+                            for line in gl_lines
+                        ],
+                        tax_accounts,
+                        tools.signed_amount(control, doc["original"]),
+                    )
+            if not gl_lines:
+                # Another date only for an entry worth exactly the document:
+                # a 0.00 invoice has no entry at all, and the only one under
+                # its number may be a receipt from another year.
+                gl_lines = tools.journal_entry(
+                    ctx.cr, header["sSource"], spec["module"],
+                    header["partner_id"], control_account=control,
+                    expected_control=doc["original"], exact_amount=True,
+                )
             if not gl_lines:
                 ctx.report.warning(
                     f"{side} {header['sSource']} ({header['partner_name']}): "
@@ -398,6 +538,8 @@ class SageOpenItemImporter(models.AbstractModel):
             for line in gl_lines:
                 account = line["lAcctId"]
                 amount = tools.signed_amount(account, line["dAmount"])
+                if account in payment_accounts:
+                    continue
                 if account == control:
                     control_total += amount
                 elif account in tax_accounts:
@@ -431,6 +573,7 @@ class SageOpenItemImporter(models.AbstractModel):
             item_lines = self._item_lines(
                 ctx, header["sSource"], header["partner_id"], tax_accounts,
                 doc["original"], -spec["normal_side"],
+                freight_account=freight_account,
             )
             if item_lines is not None:
                 # Sage's item lines know the product but not the account:
@@ -451,7 +594,20 @@ class SageOpenItemImporter(models.AbstractModel):
                     account = counterparts.pop()
                     for line in item_lines:
                         line["account"] = account
-                base_lines = item_lines
+                elif not self._align_item_accounts(item_lines, base_lines):
+                    # The ledger wins: the per-account check is what the
+                    # take-on is proved by. The document keeps Sage's
+                    # accounts and amounts and loses its product detail.
+                    ctx.report.warning(
+                        f"{side} {header['sSource']} "
+                        f"({header['partner_name']}): item lines do not tie "
+                        f"to the ledger account by account — imported from "
+                        f"the GL entry, without products",
+                        source_ref=header["sSource"],
+                    )
+                    item_lines = None
+                if item_lines is not None:
+                    base_lines = item_lines
 
             for line in base_lines:
                 line["taxable"] = not tax_lines
@@ -473,6 +629,10 @@ class SageOpenItemImporter(models.AbstractModel):
                     for line in base_lines:
                         line["taxable"] = True
 
+            base_lines, tax_lines = self._tax_only_as_base(
+                base_lines, tax_lines,
+            )
+
             # Whether a document is a credit note is decided by the sign of
             # what it leaves outstanding, not by `nTranType`. Sage records
             # some customer deductions as an ordinary invoice (`nTranType` 0)
@@ -488,7 +648,11 @@ class SageOpenItemImporter(models.AbstractModel):
             is_refund = original * spec["normal_side"] < 0
             staged.append({
                 "original": abs(round(original, 2)),
-                "applications": self._applications(
+                # With closed documents the settlements are replayed from
+                # Sage's own entries by `sage.settlement.importer`, which
+                # reads the applications itself; looking each one up here
+                # would be thousands of queries for nothing.
+                "applications": [] if closed_documents else self._applications(
                     ctx, spec, doc["doc_id"], control, header["partner_id"]
                 ),
                 # Sage records the payment terms on the DOCUMENT, not on the
@@ -520,6 +684,13 @@ class SageOpenItemImporter(models.AbstractModel):
                 "number": header["sSource"],
                 "reference": (header["sRef"] or "").strip() or None,
                 "date": header["dtDate"].strftime("%Y-%m-%d"),
+                # The ledger date of the entry behind the document, which is
+                # not always the document's own: an entry posted a few days
+                # later can fall in the next fiscal year.
+                "gl_date": (
+                    gl_lines[0]["dtJourDate"].strftime("%Y-%m-%d")
+                    if gl_lines and gl_lines[0].get("dtJourDate") else None
+                ),
                 "residual": abs(round(residual, 2)),
                 "base_lines": base_lines,
                 "tax_lines": tax_lines,
@@ -539,6 +710,157 @@ class SageOpenItemImporter(models.AbstractModel):
                     source_ref=header["sSource"],
                 )
         return staged
+
+    def _tax_only_as_base(self, base_lines, tax_lines):
+        """A document with nothing but tax on it keeps the tax as its lines.
+
+        Import duties and customs bills are posted in Sage as GST/QST and the
+        payable, with no expense line. There is no base to attach an Odoo tax
+        to, so the tax lines become the document's lines — untaxed, on the tax
+        accounts — which is exactly what Sage's ledger holds.
+        """
+        if base_lines or not tax_lines:
+            return base_lines, tax_lines
+        return [
+            {
+                "account": line["account"],
+                "amount": line["amount"],
+                "label": None,
+                "taxable": False,
+            }
+            for line in tax_lines
+        ], []
+
+    def _align_item_accounts(self, item_lines, gl_base_lines) -> bool:
+        """Move item lines onto the accounts Sage's ledger actually used.
+
+        `titrline.lAcctId` is not always where Sage posted: a line applied
+        against a customer deposit names the revenue account on the item
+        line while the entry credits the deposit account. The ledger is what
+        has to tie, so where the per-account totals disagree, an item line
+        whose amount exactly fills one account's shortfall is moved there
+        from an account that has too much.
+
+        Returns whether the item lines now tie to the ledger account by
+        account (within a few cents of rounding). When they cannot — Sage
+        split a document across accounts in amounts no item line carries —
+        the caller falls back to the ledger's own lines.
+        """
+        def totals(lines):
+            result = {}
+            for line in lines:
+                result[line["account"]] = round(
+                    result.get(line["account"], 0.0) + line["amount"], 2
+                )
+            return result
+
+        wanted = totals(gl_base_lines)
+        for _attempt in range(len(item_lines)):
+            have = totals(item_lines)
+            short = {
+                account: round(amount - have.get(account, 0.0), 2)
+                for account, amount in wanted.items()
+                if abs(amount - have.get(account, 0.0)) >= 0.05
+            }
+            if not short:
+                return True
+            moved = False
+            for account, missing in short.items():
+                for line in item_lines:
+                    surplus = round(
+                        have.get(line["account"], 0.0)
+                        - wanted.get(line["account"], 0.0), 2
+                    )
+                    fills_the_gap = abs(line["amount"] - missing) < 0.01
+                    spare = (
+                        surplus * line["amount"] > 0
+                        and abs(surplus) >= abs(line["amount"]) - 0.01
+                    )
+                    if line["account"] != account and fills_the_gap and spare:
+                        line["account"] = account
+                        moved = True
+                        break
+                if moved:
+                    break
+            if not moved:
+                return False
+        have = totals(item_lines)
+        return all(
+            abs(amount - have.get(account, 0.0)) < 0.05
+            for account, amount in wanted.items()
+        )
+
+    def _force_sage_tax(self, move, sage_tax_by_account: dict) -> None:
+        """Set each tax group of a draft document to the tax Sage recorded.
+
+        `sage_tax_by_account` maps an Odoo tax account to the tax Sage
+        recorded on it, signed the way the document reads. Goes through
+        `tax_totals`, the same override a user makes on the invoice form, so
+        Odoo moves the tax line and the payment term line together and the
+        document stays balanced. Groups whose accounts Sage has no figure for
+        are left as Odoo computed them.
+        """
+        totals = move.tax_totals
+        if not totals:
+            return
+        changed = False
+        for subtotal in totals.get("subtotals", []):
+            for group in subtotal.get("tax_groups", []):
+                accounts = move.line_ids.filtered(
+                    lambda line: line.tax_group_id.id == group["id"]
+                    and line.tax_line_id
+                ).account_id
+                known = [a.id for a in accounts if a.id in sage_tax_by_account]
+                if not known:
+                    continue
+                target = round(sum(sage_tax_by_account[a] for a in known), 2)
+                if abs(target - group["tax_amount_currency"]) >= 0.01:
+                    group["tax_amount_currency"] = target
+                    changed = True
+        if changed:
+            move.tax_totals = totals
+
+    def _accounting_date(self, document) -> str:
+        """Post on Sage's ledger date; the document's date is the invoice date.
+
+        Sage dates the document and the entry behind it separately, and they
+        differ now and then by a few days — across a year end, that moves the
+        amount into the other fiscal year and the per-year check shows it as a
+        mirror pair between two years.
+        """
+        return document.get("gl_date") or document["date"]
+
+    def _nothing_to_import(self, document) -> bool:
+        """A document worth nothing, with nothing on it: a voided or empty
+        Sage invoice. Skipped quietly — it is not a failure."""
+        return (
+            abs(document["original"]) < TOLERANCE
+            and not document["base_lines"]
+            and not document["tax_lines"]
+        )
+
+    def _payment_accounts(self, ctx, spec, doc_id) -> set:
+        """The Sage accounts the money for a document was drawn from.
+
+        The application row names its bank account; where it does not (a
+        handful of payments carry only the cheque id), the payment or receipt
+        header behind that cheque does.
+        """
+        accounts = set()
+        for row in tools.query(
+            ctx.cr,
+            f"""select d.lBnkAcctId, p.lBankAcct
+                  from {spec['detail']} d
+                  left join {spec['payment_header']} p
+                    on p.lChqId = d.lChqId and d.lChqId <> 0
+                 where d.{spec['detail_fk']} = %s
+                   and d.nTranType not in (0, 8) and d.bReversed = 0""",
+            (doc_id,),
+        ):
+            account = row["lBnkAcctId"] or row["lBankAcct"]
+            if account:
+                accounts.add(account)
+        return accounts
 
     def _applications(self, ctx, spec, doc_id, control, rec_id) -> list:
         """What has already been applied against a document.
@@ -609,6 +931,7 @@ class SageOpenItemImporter(models.AbstractModel):
         lines = tools.journal_entry(
             ctx.cr, source, spec["module"], rec_id,
             control_account=control, expected_control=row["dAmount"],
+            day=row["dtDate"],
         )
         return tools.entry_ref(
             lines[0]["generation"], lines[0]["lId"]
@@ -708,9 +1031,11 @@ class SageOpenItemImporter(models.AbstractModel):
                 [("sage_vendor_id", "!=", 0)]
             )
         })
-        already = set(Move.search([
-            ("sage_doc_id", "!=", 0), ("company_id", "=", company_id),
-        ]).mapped("sage_doc_id"))
+        already = self._already_imported(ctx)
+        self._check_no_realtime_valuation(
+            ctx, ctx.env["product.product"].browse(set(products.values())),
+        )
+        closed_documents = ctx.get_config("import_closed_documents")
 
         created = skipped = 0
         totals = {"customer": 0.0, "vendor": 0.0}
@@ -723,7 +1048,7 @@ class SageOpenItemImporter(models.AbstractModel):
             "sage.opening.balance.importer"
         ].history_start(ctx)
         for document in transformed["transform_open_items"]:
-            if document["sage_doc_id"] in already:
+            if (document["side"], document["sage_doc_id"]) in already:
                 skipped += 1
                 continue
             if history_start and document["date"] < history_start:
@@ -735,6 +1060,9 @@ class SageOpenItemImporter(models.AbstractModel):
                     f"twice. Start the history earlier, or code it manually.",
                     source_ref=document["number"],
                 )
+                continue
+            if self._nothing_to_import(document):
+                skipped += 1
                 continue
             partner_id = partners.get(
                 (document["side"], document["sage_partner_id"])
@@ -830,6 +1158,10 @@ class SageOpenItemImporter(models.AbstractModel):
                     # product link, which is what sales analysis needs, is
                     # kept either way.
                 lines.append((0, 0, values))
+            if missing is not None and abs(document["original"]) < TOLERANCE:
+                # A zero-value document with a line Sage never coded.
+                skipped += 1
+                continue
             if missing is not None:
                 ctx.report.failure(
                     f"No Odoo account for Sage {missing}",
@@ -847,7 +1179,7 @@ class SageOpenItemImporter(models.AbstractModel):
                 "move_type": document["move_type"],
                 "partner_id": partner_id,
                 "invoice_date": document["date"],
-                "date": document["date"],
+                "date": self._accounting_date(document),
                 "ref": f"Sage {document['number']}",
                 "narration": document.get("description") or False,
                 "invoice_date_due": due_date,
@@ -856,15 +1188,38 @@ class SageOpenItemImporter(models.AbstractModel):
                 "company_id": company_id,
                 "invoice_line_ids": lines,
             })
+            # Sage lets the bookkeeper type the tax; Odoo recomputes it from
+            # the base. Where they disagree, the document carries Sage's.
+            staged_tax = round(
+                sum(abs(line["amount"]) for line in document["tax_lines"]), 2
+            )
+            if document["tax_lines"] and abs(
+                round(abs(move.amount_tax), 2) - staged_tax
+            ) > 0.01:
+                sage_tax = {}
+                for line in document["tax_lines"]:
+                    account_id = accounts.get(line["account"])
+                    if account_id:
+                        sage_tax[account_id] = round(
+                            sage_tax.get(account_id, 0.0)
+                            + sign * line["amount"], 2
+                        )
+                self._force_sage_tax(move, sage_tax)
             move.action_post()
             created += 1
             ctx.report.success()
+            if closed_documents and not created % 200:
+                # Thousands of documents: commit in batches like the replay,
+                # or the cache grows with every posted move.
+                ctx.env.cr.commit()
+                ctx.env.invalidate_all()
+                _logger.info("Sage documents: %s posted.", created)
             totals[document["side"]] += abs(move.amount_total)
 
             staged_tax = round(
                 sum(abs(line["amount"]) for line in document["tax_lines"]), 2
             )
-            if abs(round(move.amount_tax, 2) - staged_tax) > 0.02:
+            if abs(round(abs(move.amount_tax), 2) - staged_tax) > 0.02:
                 ctx.report.warning(
                     f"Odoo computed {move.amount_tax:.2f} of tax, Sage "
                     f"recorded {staged_tax:.2f}",

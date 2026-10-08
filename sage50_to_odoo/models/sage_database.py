@@ -108,6 +108,14 @@ class SageDatabase(models.Model):
              "fiscal year start — anything else would leave retained "
              "earnings carrying a part-year roll Sage never performed.",
     )
+    import_closed_documents = fields.Boolean(
+        help="Import every invoice, bill and credit note of the replayed "
+             "years, not only the ones still open, and replay each receipt "
+             "and payment as the entry Sage posted, reconciled against its "
+             "documents exactly as Sage applied it. Needs a history start: "
+             "on a balances-only take-on there is no replay to take the "
+             "documents out of.",
+    )
     cutover_date = fields.Date(
         help="Balances are taken as at the end of this day. It must fall "
              "inside the fiscal year the company file is open on — an older "
@@ -135,6 +143,16 @@ class SageDatabase(models.Model):
              "disappear. Record it here so the verification checks it rather "
              "than rediscovering it.",
     )
+
+    @api.constrains("import_closed_documents", "history_start_date")
+    def _check_closed_documents_need_history(self):
+        for record in self:
+            if record.import_closed_documents and not record.history_start_date:
+                raise UserError(_(
+                    "Closed documents can only be imported with a history "
+                    "start: a balances-only take-on has no replayed years "
+                    "for them to belong to."
+                ))
 
     @api.depends("database_host", "database_name", "socket_path")
     def _compute_display_name(self):
@@ -228,6 +246,7 @@ class SageDatabase(models.Model):
                 self.history_start_date.strftime("%Y-%m-%d")
                 if self.history_start_date else None
             ),
+            "import_closed_documents": self.import_closed_documents,
             "journal_id": self.journal_id.id,
             "transition_account_id": self.transition_account_id.id,
             "known_imbalance": self.known_imbalance,
@@ -294,6 +313,7 @@ class SageDatabase(models.Model):
             "sage.open.item.importer",
             "sage.bank.journal.importer",
             "sage.payment.importer",
+            "sage.settlement.importer",
         ])
 
     def action_import_opening_entries(self) -> dict:
@@ -372,6 +392,14 @@ class SageDatabase(models.Model):
             verdict, good = self._verdict(orphan)
             ok = ok and good
             lines.append(f"{label}: {orphan:,.2f} with no partner  {verdict}")
+
+        if self.import_closed_documents:
+            good, residual_lines = self._check_residuals()
+            ok = ok and good
+            lines.extend(residual_lines)
+        good, automatic_lines = self._check_automatic_lines()
+        ok = ok and good
+        lines.extend(automatic_lines)
 
         if self.transition_account_id:
             balance = self._posted_balance(self.transition_account_id)
@@ -533,6 +561,90 @@ class SageDatabase(models.Model):
         else:
             report.append(f"Balance sheet at {as_of}: every account ties  OK")
         return ok, report
+
+    def _check_residuals(self) -> tuple:
+        """Every imported document owes in Odoo what it owes in Sage.
+
+        The proof that the settlements reconciled as Sage applied them: a
+        trial balance that ties says the money is on the right accounts, not
+        that it is against the right documents. Sage's residual is the sum of
+        a document's detail rows; Odoo's is what reconciliation left open.
+        """
+        from .pipelines.account_move_open_item_etl import SIDES
+
+        moves = self.env["account.move"].search([
+            ("sage_doc_id", "!=", 0),
+            ("company_id", "=", self.company_id.id),
+            ("state", "=", "posted"),
+        ])
+        odoo = {
+            ("customer" if move.move_type.startswith("out_") else "vendor",
+             move.sage_doc_id): move
+            for move in moves
+        }
+        wrong = []
+        with self.get_cursor() as cr:
+            for side, spec in SIDES.items():
+                for row in tools.query(
+                    cr,
+                    f"""select {spec['detail_fk']} as doc_id,
+                               round(sum(dAmount), 2) as residual
+                          from {spec['detail']} group by 1""",
+                ):
+                    move = odoo.get((side, row["doc_id"]))
+                    if move and abs(
+                        abs(row["residual"]) - abs(move.amount_residual)
+                    ) > 0.01:
+                        wrong.append((move, abs(row["residual"])))
+        if not wrong:
+            return True, [
+                f"Documents: all {len(odoo)} owe what Sage says they owe  OK"
+            ]
+        lines = [
+            f"Documents: {len(wrong)} of {len(odoo)} do not owe what Sage "
+            f"says they owe"
+        ]
+        lines += [
+            f"  {move.name} ({move.partner_id.name}): Sage "
+            f"{residual:,.2f}, Odoo {abs(move.amount_residual):,.2f}"
+            for move, residual in wrong[:10]
+        ]
+        if len(wrong) > 10:
+            lines.append(f"  … and {len(wrong) - 10} more")
+        return False, lines
+
+    def _check_automatic_lines(self) -> tuple:
+        """Nothing Odoo added on its own to the imported history.
+
+        Stock valuation lines on documents (real-time valuation), and
+        exchange-difference or cash-basis moves created by reconciling them.
+        Each is an amount the Sage ledger never had.
+        """
+        self.env.cr.execute(
+            """select count(*) from account_move_line l
+                 join account_move m on m.id = l.move_id
+                where m.sage_doc_id <> 0 and m.company_id = %s
+                  and l.display_type = 'cogs'""",
+            (self.company_id.id,),
+        )
+        cogs = self.env.cr.fetchone()[0]
+        exchange_journal = self.company_id.currency_exchange_journal_id
+        created = self.env["account.move"].search_count([
+            ("company_id", "=", self.company_id.id),
+            "|",
+            ("tax_cash_basis_origin_move_id", "!=", False),
+            ("journal_id", "=", exchange_journal.id or 0),
+        ])
+        if not cogs and not created:
+            return True, [
+                "Automatic lines: no stock valuation, exchange or cash-basis "
+                "entries  OK"
+            ]
+        return False, [
+            f"Automatic lines: {cogs} stock valuation lines on imported "
+            f"documents, {created} exchange / cash-basis entries — amounts "
+            f"Sage never had"
+        ]
 
     def _movement(self, start, end, balance_sheet_only=False,
                   skip_synthetic=False) -> dict:
