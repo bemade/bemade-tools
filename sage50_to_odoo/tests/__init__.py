@@ -8,3 +8,4 @@ from . import test_edge_documents
 from . import test_entry_choice
 from . import test_sage_tax_amounts
 from . import test_open_sale_orders
+from . import test_partner_merge
