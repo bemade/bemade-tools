@@ -205,6 +205,19 @@ class SagePartnerImporter(models.AbstractModel):
         for row in extracted["extract_vendors"]:
             record = self._base_record(row)
             existing_key = by_key.get(record["match_key"])
+            if existing_key and partners[existing_key]["sage_vendor_id"]:
+                # A partner carries ONE Sage vendor id. A second vendor that
+                # folds onto the same customer ("Acme", "Acme Inc") would
+                # overwrite the first one's id and leave its bills with no
+                # partner, so it stays a partner of its own, to be merged in
+                # Odoo by whoever knows whether they are the same company.
+                _logger.warning(
+                    "Sage vendor %r folds onto customer %r, which already "
+                    "carries vendor %s; kept as a separate partner",
+                    record["name"], partners[existing_key]["name"],
+                    partners[existing_key]["sage_vendor_id"],
+                )
+                existing_key = None
             if existing_key:
                 # The same company on both sides: one partner, both ranks.
                 # The customer record wins on the address, because that is the
