@@ -19,7 +19,7 @@
 #
 {
     "name": "xTuple to Odoo",
-    "version": "19.0.0.2.0",
+    "version": "19.0.0.2.1",
     "summary": "Migrate xTuple data to Odoo",
     "description": """
     Migrate xTuple data to Odoo including:
